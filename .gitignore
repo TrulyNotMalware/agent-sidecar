@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.eggs/
+*.egg
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# uv
+uv.lock.local
+
+# Generated artifacts
+sidecar/_generated/
+.omc
+.claude

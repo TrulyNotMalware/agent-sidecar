@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-claude-md
+data:
+  CLAUDE.md: |
+    # Static system prompt
+    Replace this with the consumer-side base instructions. Per-request
+    `systemPrompt`/`appendSystemPrompt` from /v1/converse layer on top of this
+    file per the merge rules in openapi.yaml.

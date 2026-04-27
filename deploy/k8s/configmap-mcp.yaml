@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-mcp-config
+data:
+  mcp.json: |
+    {
+      "mcpServers": {
+        "domain-tools": {
+          "type": "sse",
+          "url": "http://localhost:8080/mcp/sse",
+          "headers": {
+            "Authorization": "Bearer ${MCP_BEARER}"
+          }
+        }
+      }
+    }

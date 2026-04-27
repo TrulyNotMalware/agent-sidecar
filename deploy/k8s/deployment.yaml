@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-app-with-claude-sidecar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example-app
+  template:
+    metadata:
+      labels:
+        app: example-app
+    spec:
+      initContainers:
+        # k8s 1.28+ native sidecar via restartPolicy=Always on an initContainer.
+        - name: claude-sidecar
+          image: ghcr.io/REPLACE_ORG/claude-sidecar:1.0.0
+          restartPolicy: Always
+          ports:
+            - containerPort: 7300
+          env:
+            - name: BEARER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sidecar-secret
+                  key: bearer
+            - name: CLAUDE_CODE_OAUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: anthropic-claude-auth
+                  key: CLAUDE_CODE_OAUTH_TOKEN
+            - name: MAX_CONCURRENT
+              value: "8"
+            - name: TURN_TIMEOUT_SEC
+              value: "90"
+            - name: BIND
+              value: "127.0.0.1"
+          volumeMounts:
+            - { name: mcp-config,  mountPath: /etc/sidecar,     readOnly: true }
+            - { name: claude-md,   mountPath: /workspace,       readOnly: true }
+            - { name: sessions,    mountPath: /var/lib/claude-sidecar/sessions }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 7300 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 7300 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      containers:
+        - name: app
+          image: ghcr.io/REPLACE_ORG/example-app:latest
+          # The app talks to the sidecar over localhost:7300.
+          env:
+            - name: SIDECAR_URL
+              value: "http://127.0.0.1:7300"
+      volumes:
+        - name: mcp-config
+          configMap:
+            name: app-mcp-config
+        - name: claude-md
+          configMap:
+            name: app-claude-md
+        - name: sessions
+          emptyDir: {}

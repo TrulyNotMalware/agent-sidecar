@@ -1,0 +1,373 @@
+openapi: 3.1.0
+info:
+  title: Claude Sidecar API
+  version: 1.0.0
+  summary: HTTP+SSE bridge to the Claude Agent SDK.
+  description: |
+    Language-agnostic sidecar that exposes the Claude Agent SDK over HTTP+SSE so
+    services written in any language can use Claude's agent loop, MCP tool
+    dispatch, and session continuity.
+
+    Domain decoupling invariant: this API knows nothing about Slack, Discord,
+    meetings, tasks, or any business domain. The vocabulary is `prompt`,
+    `sessionKey`, and (optionally) a caller identity header. Domain operations
+    are the consumer's responsibility, exposed as MCP tools.
+
+servers:
+  - url: http://127.0.0.1:7300
+    description: Pod-local default (sidecar bound to loopback).
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/converse:
+    post:
+      summary: Run one Claude turn and stream events as SSE.
+      description: |
+        Spawns (or resumes) a Claude session for the given `sessionKey`, runs one
+        agent-loop turn for `prompt`, and streams progress as Server-Sent Events.
+
+        Event order: exactly one `session` event first, then zero or more of
+        `text` / `tool_use` / `tool_result`, then exactly one terminal event of
+        either `done` or `error`. `:keep-alive` SSE comments may appear at any
+        time and should be ignored by clients.
+      operationId: converse
+      parameters:
+        - name: X-User-Id
+          in: header
+          required: false
+          description: |
+            Opaque caller identifier. When present, forwarded verbatim to MCP
+            servers (so they can attach the identity to tool execution) and used
+            for per-user concurrency gating. The model never sees this value.
+          schema:
+            type: string
+            maxLength: 256
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConverseRequest'
+      responses:
+        '200':
+          description: Server-Sent Events stream of turn progress.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SseEvent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /v1/sessions/{sessionKey}/cancel:
+    post:
+      summary: Cancel an in-flight turn for a sessionKey.
+      description: |
+        Issues a graceful cancel to the in-flight turn (if any) for the given
+        `sessionKey`. After a short grace period the underlying claude
+        subprocess is sent SIGKILL.
+      operationId: cancelSession
+      parameters:
+        - name: sessionKey
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+      responses:
+        '202':
+          description: Cancel signal accepted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No active turn for the given sessionKey.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /healthz:
+    get:
+      summary: Liveness probe.
+      description: Returns 200 as long as the process is alive. Does not validate auth or claude.
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /readyz:
+    get:
+      summary: Readiness probe.
+      description: |
+        Verifies that the `claude` binary is present and the configured Anthropic
+        identity is usable. Returns 503 when not ready (e.g., during startup or
+        when credentials are missing).
+      operationId: readyz
+      security: []
+      responses:
+        '200':
+          description: Ready to serve requests.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '503':
+          description: Not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Shared secret provisioned via the `BEARER_SECRET` env variable.
+
+  schemas:
+    ConverseRequest:
+      type: object
+      required: [sessionKey, prompt]
+      additionalProperties: false
+      properties:
+        sessionKey:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: |
+            Stable identifier scoping conversation state on disk
+            (e.g., "channel:thread_ts"). Hashed to a per-session workspace
+            sub-directory; same key → same continued conversation.
+        prompt:
+          type: string
+          minLength: 1
+          description: The user's prompt for this turn.
+        sessionId:
+          type:
+            - string
+            - 'null'
+          description: |
+            Claude session id from a prior `session` event. When provided,
+            resumes that conversation; when null, starts fresh under sessionKey.
+        systemPrompt:
+          type:
+            - string
+            - 'null'
+          description: |
+            Per-request system prompt. **Replaces** the static CLAUDE.md base
+            entirely. Takes precedence over `appendSystemPrompt` when both are
+            present.
+        appendSystemPrompt:
+          type:
+            - string
+            - 'null'
+          description: |
+            Per-request system prompt fragment **appended** to the static
+            CLAUDE.md base, joined by a blank line. Ignored when
+            `systemPrompt` is provided.
+        mode:
+          type: string
+          enum: [session, stateless]
+          default: session
+          description: |
+            `session` (default): persist workspace under a sessionKey hash for
+            resume. Concurrent requests for the same sessionKey are rejected
+            with `busy`.
+            `stateless`: a fresh ephemeral workspace is created per request and
+            removed when the turn ends; any returned `sessionId` is not
+            resumable since the workspace is gone.
+
+      # System prompt merge rules (Phase 3 contract):
+      #   1. systemPrompt set         → final = systemPrompt
+      #   2. appendSystemPrompt set   → final = CLAUDE.md + "\n\n" + append
+      #   3. neither set              → final = CLAUDE.md (or empty if absent)
+      # The merged value is passed to the Claude Agent SDK as `system_prompt`.
+
+    HealthStatus:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, error]
+        detail:
+          type:
+            - string
+            - 'null'
+
+    Error:
+      type: object
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [bad_request, unauthorized, busy, timeout, sdk_error, internal, not_found]
+        message:
+          type: string
+
+    SseEvent:
+      description: |
+        Schema reference for the variants emitted on the `text/event-stream`
+        response. Each SSE frame's `event:` field selects the variant and
+        `data:` carries one JSON object matching that variant's schema.
+      oneOf:
+        - $ref: '#/components/schemas/SseSession'
+        - $ref: '#/components/schemas/SseText'
+        - $ref: '#/components/schemas/SseToolUse'
+        - $ref: '#/components/schemas/SseToolResult'
+        - $ref: '#/components/schemas/SseDone'
+        - $ref: '#/components/schemas/SseError'
+      discriminator:
+        propertyName: _event
+        mapping:
+          session: '#/components/schemas/SseSession'
+          text: '#/components/schemas/SseText'
+          tool_use: '#/components/schemas/SseToolUse'
+          tool_result: '#/components/schemas/SseToolResult'
+          done: '#/components/schemas/SseDone'
+          error: '#/components/schemas/SseError'
+
+    SseSession:
+      type: object
+      description: Emitted exactly once at the start of each response with the (possibly newly created) session id.
+      required: [sessionId]
+      additionalProperties: false
+      properties:
+        sessionId:
+          type: string
+
+    SseText:
+      type: object
+      description: Incremental text from the assistant. Concatenate deltas in order to reconstruct the message.
+      required: [delta]
+      additionalProperties: false
+      properties:
+        delta:
+          type: string
+
+    SseToolUse:
+      type: object
+      description: Claude has invoked an MCP tool.
+      required: [name, args]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        args:
+          type: object
+          additionalProperties: true
+        toolUseId:
+          type:
+            - string
+            - 'null'
+
+    SseToolResult:
+      type: object
+      description: An MCP tool returned a result. `ok=false` means the tool errored; the model may continue or terminate.
+      required: [name, ok]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        ok:
+          type: boolean
+        toolUseId:
+          type:
+            - string
+            - 'null'
+
+    SseDone:
+      type: object
+      description: Turn completed successfully. Terminal event; no further events follow.
+      required: [finalText, usage]
+      additionalProperties: false
+      properties:
+        finalText:
+          type: string
+        usage:
+          $ref: '#/components/schemas/Usage'
+
+    SseError:
+      type: object
+      description: Turn ended with an error. Terminal alternative to `done`; no further events follow.
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [timeout, sdk_error, busy, internal, cancelled]
+          description: |
+            `cancelled` is emitted when /v1/sessions/{sessionKey}/cancel is invoked
+            for an in-flight turn. After the configured grace period (default 5s)
+            without a graceful exit the underlying claude subprocess is force-killed
+            and the SSE connection closes without a final event.
+        message:
+          type: string
+
+    Usage:
+      type: object
+      required: [inputTokens, outputTokens]
+      additionalProperties: false
+      properties:
+        inputTokens:
+          type: integer
+          format: int64
+          minimum: 0
+        outputTokens:
+          type: integer
+          format: int64
+          minimum: 0
+        cacheReadInputTokens:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          minimum: 0
+        cacheCreationInputTokens:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          minimum: 0
+
+  responses:
+    BadRequest:
+      description: Request body failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Bearer token missing or invalid.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Busy:
+      description: Sidecar concurrency cap exceeded or per-user lock held.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Internal:
+      description: Unhandled internal error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
