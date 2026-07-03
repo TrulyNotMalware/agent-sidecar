@@ -96,7 +96,7 @@ Minimal clients in three languages under [`examples/`](examples/):
 
 - [`examples/python/client.py`](examples/python/client.py) — httpx + manual SSE
 - [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/Client.kt`](examples/kotlin/Client.kt) — OkHttp EventSource
+- [`examples/kotlin/Client.kt`](examples/kotlin/Client.kt) — Ktor client + SSE plugin (coroutines)
 
 Each is ~50 lines; the contract is meant to be trivial to adopt.
 
@@ -236,7 +236,7 @@ SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` 
 
 - [`examples/python/client.py`](examples/python/client.py) — httpx + 수동 SSE
 - [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/Client.kt`](examples/kotlin/Client.kt) — OkHttp EventSource
+- [`examples/kotlin/Client.kt`](examples/kotlin/Client.kt) — Ktor 클라이언트 + SSE 플러그인 (코루틴)
 
 각 50줄 내외. 계약 자체가 단순해서 도입 비용이 낮습니다.
 
