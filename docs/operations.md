@@ -17,8 +17,10 @@ contract itself lives in `openapi.yaml`.
 | `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Per-`sessionKey` workspace root (session mode). Stateless mode uses an OS temp dir. |
 | `CLAUDE_MD_PATH` | unset | Path to the static base system prompt (typically a ConfigMap mount, e.g. `/workspace/CLAUDE.md`). |
 | `MCP_CONFIG_PATH` | unset | Path to `mcp.json` forwarded to the Agent SDK (typically `/etc/sidecar/mcp.json`). |
-| `CLAUDE_CODE_OAUTH_TOKEN` | unset | Long-lived subscription token from `claude setup-token`. Recommended over the file-mount approach for sidecars. |
-| `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth file location (alternative to the env var). Used by `/readyz` validation. |
+| `ANTHROPIC_API_KEY` | unset | **Production / general use.** Pay-as-you-go API key from the Anthropic Console. |
+| `ANTHROPIC_MODE` | `subscription` | Set to `api` in production so `/readyz` requires `ANTHROPIC_API_KEY` specifically. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | unset | **Local testing only.** Long-lived subscription token from `claude setup-token`. Never deploy it. |
+| `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth file location (local dev alternative). Used by `/readyz` validation. |
 | `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. |
 | `LOG_LEVEL` | `INFO` | structlog level. |
 | `TRACING_ENABLED` | `false` | When `true`, enable OpenTelemetry tracing (`OTLP/HTTP`). |
@@ -42,22 +44,47 @@ OpenTelemetry SDK env reference.
 
 ## Identity model (1.x)
 
-**One Pod = one Anthropic identity.** The sidecar runs `claude` in
-subscription mode. The CLI (and the Agent SDK that wraps it) accepts any of
-the following as identity, picked in this order:
+**One Pod = one Anthropic identity.** The `claude` CLI (and the Agent SDK
+that wraps it) accepts any of the following as identity:
 
 | Source | When to use |
 |---|---|
-| `CLAUDE_CODE_OAUTH_TOKEN` env var | **Recommended for sidecars.** Long-lived (1 year) token produced by `claude setup-token`. |
-| `~/.claude.json` file | Alternative — interactive-login OAuth state. Rotates frequently; you must refresh the Secret each time. |
-| `ANTHROPIC_API_KEY` env var | Pay-as-you-go API mode, bypasses the subscription. |
+| `ANTHROPIC_API_KEY` env var | **Production / general use.** Pay-as-you-go API key from the Anthropic Console. |
+| `CLAUDE_CODE_OAUTH_TOKEN` env var | **Local testing only.** Long-lived (1 year) token produced by `claude setup-token`. |
+| `~/.claude.json` file | Local dev alternative — interactive-login OAuth state. Rotates frequently. |
 
-`/readyz` returns 200 when **any** of these is present.
+`/readyz` returns 200 when **any** of these is present. Set
+`ANTHROPIC_MODE=api` in production so the probe requires the API key
+specifically instead of accepting a leftover local credential.
 
-### Recommended: `claude setup-token` → env var
+### Production / general use: `ANTHROPIC_API_KEY`
 
-1. On a host with a browser and an active Claude subscription
-   (Pro / Max / Team / Enterprise), install the CLI:
+1. Create an API key in the Anthropic Console (`console.anthropic.com`).
+
+2. Provision it as a Kubernetes Secret:
+
+   ```bash
+   kubectl create secret generic anthropic-claude-auth \
+       --from-literal=ANTHROPIC_API_KEY='sk-ant-...'
+   ```
+
+3. `deploy/k8s/deployment.yaml` loads `ANTHROPIC_API_KEY` from that Secret
+   and sets `ANTHROPIC_MODE=api` on the sidecar container.
+
+API keys bill per token, are issued per workspace rather than per person,
+and can be rotated or revoked from the Console without touching a browser
+OAuth flow — which is why they are the only supported credential for
+shared or production deployments.
+
+### Local testing only: `claude setup-token` → env var
+
+The subscription OAuth token spends **personal subscription quota**
+(Pro / Max / Team / Enterprise) and is tied to an individual account.
+Use it to smoke-test locally without burning API credit — never for
+shared or production workloads, and never in a cluster Secret.
+
+1. On a host with a browser and an active Claude subscription, install the
+   CLI:
 
    ```bash
    npm install -g @anthropic-ai/claude-code
@@ -73,24 +100,13 @@ the following as identity, picked in this order:
    stdout**. The CLI does **not** save it anywhere — copy it now. The token
    is valid for **one year** and is scoped to inference (no Remote Control).
 
-3. Provision it as a Kubernetes Secret:
-
-   ```bash
-   kubectl create secret generic anthropic-claude-auth \
-       --from-literal=CLAUDE_CODE_OAUTH_TOKEN='<paste-token-here>'
-   ```
-
-4. `deploy/k8s/deployment.yaml` already loads `CLAUDE_CODE_OAUTH_TOKEN` from
-   that Secret as an env var on the sidecar container.
-
-5. **Refresh annually.** Re-run `claude setup-token` before the previous
-   token expires and `kubectl apply` the updated Secret. The Pod picks up
-   the new value on its next restart.
+3. Put it in `.env.local` (gitignored) and drive it with `scripts/smoke.py`
+   or a locally-run sidecar (`AUTH_MODE=subscription` forces this path).
 
 Treat the token like a password — anyone with it can spend your
 subscription quota.
 
-### Alternative: mount `~/.claude.json`
+### Alternative (local dev): mount `~/.claude.json`
 
 If you prefer the interactive-login flow, run `claude` once on a host with
 the subscription, copy the resulting `~/.claude.json` into a Secret, and

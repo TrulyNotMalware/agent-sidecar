@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from ..auth import require_bearer
@@ -14,7 +15,6 @@ from ..claude_runner import (
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
-    run_turn,
 )
 from ..config import Settings, get_settings
 from ..errors import ApiError, ErrorCode
@@ -31,12 +31,12 @@ log = get_logger("sidecar.converse")
 tracer = get_tracer("sidecar.converse")
 
 
-@router.post("/v1/converse", dependencies=[Depends(require_bearer)])
+@router.post("/v1/converse", dependencies=[Depends(require_bearer)], response_model=None)
 async def converse(
     body: ConverseRequest,
     request: Request,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
-) -> EventSourceResponse:
+) -> EventSourceResponse | JSONResponse:
     settings = get_settings()
     gate = request.app.state.gate
     registry: InflightRegistry = request.app.state.inflight
@@ -50,10 +50,44 @@ async def converse(
         prompt=body.prompt,
     )
 
+    # Preflight: reject over-limit requests with a real HTTP 429 while the
+    # status line can still carry it. The stream path re-checks atomically on
+    # registration/acquire; a limit hit only in that race window still arrives
+    # as a terminal SSE `error` frame with code=busy.
+    busy = await _preflight_busy(body, x_user_id, gate, registry)
+    if busy is not None:
+        log.warning("converse.reject", code=busy.code.value, message=busy.message)
+        REQUESTS.labels(outcome=busy.code.value).inc()
+        REQUEST_DURATION.labels(outcome=busy.code.value).observe(0.0)
+        return JSONResponse(
+            status_code=busy.status_code,
+            content={"code": busy.code.value, "message": busy.message},
+        )
+
     return EventSourceResponse(
         _event_stream(body, x_user_id, settings, gate, registry),
         ping=15,
     )
+
+
+async def _preflight_busy(
+    body: ConverseRequest,
+    x_user_id: str | None,
+    gate,
+    registry: InflightRegistry,
+) -> ApiError | None:
+    if await registry.get(body.session_key) is not None:
+        return ApiError(
+            ErrorCode.BUSY, f"sessionKey {body.session_key!r} already in-flight"
+        )
+    try:
+        await gate.check(
+            user_id=x_user_id,
+            session_key=body.session_key if body.mode == "session" else None,
+        )
+    except ApiError as exc:
+        return exc
+    return None
 
 
 async def _event_stream(
@@ -104,6 +138,7 @@ async def _event_stream(
                     session_key=body.session_key if body.mode == "session" else None,
                 ):
                     INFLIGHT.inc()
+                    run_turn = _get_runner(settings)
                     try:
                         async for ev in run_turn(
                             prompt=body.prompt,
@@ -194,6 +229,14 @@ def _merge_system_prompt(
     if append_system_prompt is not None:
         return f"{base}\n\n{append_system_prompt}".strip() or None
     return base or None
+
+
+def _get_runner(settings: Settings):
+    if settings.provider == "codex":
+        from ..codex_runner import run_turn
+    else:
+        from ..claude_runner import run_turn
+    return run_turn
 
 
 def _to_sse(ev) -> dict[str, str]:

@@ -9,7 +9,7 @@ __pycache__/
 venv/
 env/
 
-# Environment files
+# Environment files / local dev credentials (never commit)
 .env
 .env.local
 .env.*.local
@@ -37,6 +37,9 @@ htmlcov/
 
 # uv
 uv.lock.local
+
+# Local session workspace when WORKSPACE_ROOT is overridden to ./sessions
+sessions/
 
 # Generated artifacts
 sidecar/_generated/

@@ -14,22 +14,41 @@ spec:
     spec:
       initContainers:
         # k8s 1.28+ native sidecar via restartPolicy=Always on an initContainer.
+        #
+        # ── PROVIDER=claude (default) ─────────────────────────────────────────
+        # Uses ANTHROPIC_API_KEY from the anthropic-claude-auth Secret.
+        # Switch to PROVIDER=codex by replacing the auth env/volume below;
+        # see the commented codex blocks at the bottom of this file.
         - name: claude-sidecar
           image: ghcr.io/REPLACE_ORG/claude-sidecar:1.0.0
           restartPolicy: Always
           ports:
             - containerPort: 7300
           env:
+            - name: PROVIDER
+              value: "claude"          # switch to "codex" for the Codex backend
             - name: BEARER_SECRET
               valueFrom:
                 secretKeyRef:
                   name: sidecar-secret
                   key: bearer
-            - name: CLAUDE_CODE_OAUTH_TOKEN
+            # ── Claude auth ──────────────────────────────────────────────────
+            # Production / general use: API key only. The subscription OAuth
+            # token (CLAUDE_CODE_OAUTH_TOKEN) is for LOCAL TESTING ONLY and
+            # must never be deployed to a cluster.
+            - name: ANTHROPIC_MODE
+              value: "api"           # makes /readyz require the API key
+            - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: anthropic-claude-auth
-                  key: CLAUDE_CODE_OAUTH_TOKEN
+                  key: ANTHROPIC_API_KEY
+            # ── Codex auth Option A: API key (uncomment when PROVIDER=codex) ─
+            # - name: OPENAI_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: openai-codex-auth
+            #       key: OPENAI_API_KEY
             - name: MAX_CONCURRENT
               value: "8"
             - name: TURN_TIMEOUT_SEC
@@ -40,6 +59,10 @@ spec:
             - { name: mcp-config,  mountPath: /etc/sidecar,     readOnly: true }
             - { name: claude-md,   mountPath: /workspace,       readOnly: true }
             - { name: sessions,    mountPath: /var/lib/claude-sidecar/sessions }
+            # ── Codex auth Option B: OAuth file mount (uncomment when PROVIDER=codex) ─
+            # - name: codex-oauth
+            #   mountPath: /root/.codex
+            #   readOnly: true
           readinessProbe:
             httpGet: { path: /readyz, port: 7300 }
             initialDelaySeconds: 2
@@ -64,3 +87,10 @@ spec:
             name: app-claude-md
         - name: sessions
           emptyDir: {}
+        # ── Codex OAuth file mount volume (uncomment when PROVIDER=codex, Option B) ─
+        # - name: codex-oauth
+        #   secret:
+        #     secretName: openai-codex-oauth
+        #     items:
+        #       - key: auth.json
+        #         path: auth.json

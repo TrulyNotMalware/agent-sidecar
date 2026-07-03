@@ -78,6 +78,65 @@ def test_identity_ready_subscription_with_nothing(tmp_path, monkeypatch):
     assert _identity_ready(s) is False
 
 
+def _codex_settings(**overrides):
+    from sidecar.config import Settings
+
+    return Settings(bearer_secret="x", provider="codex", **overrides)
+
+
+def test_readyz_codex_503_when_binary_missing(client, monkeypatch):
+    monkeypatch.setattr("sidecar.routes.health.get_settings", _codex_settings)
+    monkeypatch.setattr("sidecar.routes.health._codex_binary_ready", lambda: False)
+    monkeypatch.setattr("sidecar.routes.health._codex_identity_ready", lambda s: True)
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    assert "codex binary" in r.json()["detail"]
+
+
+def test_readyz_codex_503_when_identity_missing(client, monkeypatch):
+    monkeypatch.setattr("sidecar.routes.health.get_settings", _codex_settings)
+    monkeypatch.setattr("sidecar.routes.health._codex_binary_ready", lambda: True)
+    monkeypatch.setattr("sidecar.routes.health._codex_identity_ready", lambda s: False)
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    assert "codex identity" in r.json()["detail"]
+
+
+def test_readyz_codex_200_when_all_good(client, monkeypatch):
+    monkeypatch.setattr("sidecar.routes.health.get_settings", _codex_settings)
+    monkeypatch.setattr("sidecar.routes.health._codex_binary_ready", lambda: True)
+    monkeypatch.setattr("sidecar.routes.health._codex_identity_ready", lambda s: True)
+    r = client.get("/readyz")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_codex_identity_ready_with_api_key(monkeypatch, tmp_path):
+    from sidecar.routes.health import _codex_identity_ready
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    s = _codex_settings(codex_auth_path=tmp_path / "missing.json")
+    assert _codex_identity_ready(s) is True
+
+
+def test_codex_identity_ready_with_auth_file(monkeypatch, tmp_path):
+    from sidecar.routes.health import _codex_identity_ready
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    auth = tmp_path / "auth.json"
+    auth.write_text("{}")
+    s = _codex_settings(codex_auth_path=auth)
+    assert _codex_identity_ready(s) is True
+
+
+def test_codex_identity_ready_with_nothing(monkeypatch, tmp_path):
+    from sidecar.routes.health import _codex_identity_ready
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    s = _codex_settings(codex_auth_path=tmp_path / "missing.json")
+    assert _codex_identity_ready(s) is False
+
+
 def test_identity_ready_api_with_key(monkeypatch):
     _clear_identity_env(monkeypatch)
 

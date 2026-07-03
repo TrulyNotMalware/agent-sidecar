@@ -9,6 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    provider: Literal["claude", "codex"] = "claude"
+
     bind: str = "127.0.0.1"
     port: int = 7300
     bearer_secret: str = Field(default="", min_length=0)
@@ -25,6 +27,9 @@ class Settings(BaseSettings):
     claude_md_path: Path | None = None
     mcp_config_path: Path | None = None
     claude_auth_path: Path | None = None  # defaults to ~/.claude.json at check time
+
+    # Codex (PROVIDER=codex) — auth state written by `codex login`
+    codex_auth_path: Path | None = None  # defaults to ~/.codex/auth.json at check time
 
     log_prompts: bool = False
     log_level: str = "INFO"
