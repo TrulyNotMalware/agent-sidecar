@@ -11,7 +11,7 @@ from sidecar.claude_runner import (
     ToolResultEvent,
     ToolUseEvent,
 )
-from sidecar.codex_runner import run_turn
+from sidecar.codex_runner import ensure_codex_auth, run_turn
 from sidecar.errors import ApiError, ErrorCode
 
 
@@ -73,6 +73,7 @@ def _install(monkeypatch, proc: FakeProc) -> dict:
 
     async def fake_exec(*cmd, **kwargs):
         calls["cmd"] = list(cmd)
+        calls["kwargs"] = kwargs
         return proc
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
@@ -135,7 +136,8 @@ async def test_maps_full_event_sequence(monkeypatch):
 
     events = await _collect()
 
-    assert calls["cmd"] == ["codex", "exec", "--json", "hi"]
+    assert calls["cmd"] == ["codex", "exec", "--json", "--skip-git-repo-check", "hi"]
+    assert calls["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
     assert events == [
         SessionEvent(session_id="t-1"),
         ToolUseEvent(name="lookup", args={"q": 1}, tool_use_id="call-1"),
@@ -238,7 +240,15 @@ async def test_resume_session_id_extends_argv(monkeypatch):
 
     await _collect(resume_session_id="sess-9")
 
-    assert calls["cmd"] == ["codex", "exec", "--json", "resume", "sess-9", "hi"]
+    assert calls["cmd"] == [
+        "codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "resume",
+        "sess-9",
+        "hi",
+    ]
 
 
 async def test_system_prompt_prepended_to_prompt(monkeypatch):
@@ -258,4 +268,63 @@ async def test_timeout_raises_and_kills_process(monkeypatch):
         await _collect(timeout_sec=0.05)
 
     assert exc_info.value.code is ErrorCode.TIMEOUT
-    assert proc.killed
+
+
+class _FakeLoginProc:
+    def __init__(self, returncode: int, auth_path: Path | None = None) -> None:
+        self.returncode = returncode
+        self._auth_path = auth_path
+        self.stdin_payload: bytes | None = None
+
+    async def communicate(self, payload: bytes | None = None):
+        self.stdin_payload = payload
+        if self.returncode == 0 and self._auth_path is not None:
+            self._auth_path.write_text("{}")
+        return b"", b""
+
+
+async def test_ensure_codex_auth_noop_when_auth_file_exists(monkeypatch, tmp_path):
+    auth = tmp_path / "auth.json"
+    auth.write_text("{}")
+
+    async def unexpected_exec(*cmd, **kwargs):
+        raise AssertionError("login must not be spawned when auth.json exists")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_exec)
+
+    assert await ensure_codex_auth(auth) is True
+
+
+async def test_ensure_codex_auth_false_without_key(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    assert await ensure_codex_auth(tmp_path / "auth.json") is False
+
+
+async def test_ensure_codex_auth_registers_key_via_login(monkeypatch, tmp_path):
+    auth = tmp_path / "auth.json"
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    proc = _FakeLoginProc(returncode=0, auth_path=auth)
+    calls: dict = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        calls["cmd"] = list(cmd)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    assert await ensure_codex_auth(auth) is True
+    assert calls["cmd"] == ["codex", "login", "--with-api-key"]
+    assert proc.stdin_payload == b"sk-test"
+
+
+async def test_ensure_codex_auth_false_when_login_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    proc = _FakeLoginProc(returncode=1)
+
+    async def fake_exec(*cmd, **kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    assert await ensure_codex_auth(tmp_path / "auth.json") is False

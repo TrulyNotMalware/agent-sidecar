@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -16,6 +17,33 @@ from .errors import ApiError, ErrorCode
 
 # Prompts are passed as argv; guard against ARG_MAX exhaustion.
 _MAX_PROMPT_BYTES = 100_000
+
+
+async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
+    """Materialize the codex auth state from OPENAI_API_KEY.
+
+    codex-cli does not send OPENAI_API_KEY from the environment at request
+    time; the key must be registered once via `codex login --with-api-key`,
+    which writes ~/.codex/auth.json. No-op when the auth file already exists
+    (subscription mode) or no key is present. Returns True when an auth file
+    is available afterwards.
+    """
+    path = auth_path or (Path.home() / ".codex" / "auth.json")
+    if path.exists():
+        return True
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        return False
+    proc = await asyncio.create_subprocess_exec(
+        "codex",
+        "login",
+        "--with-api-key",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.communicate(key.encode())
+    return proc.returncode == 0 and path.exists()
 
 
 async def run_turn(
@@ -35,7 +63,9 @@ async def run_turn(
             f"combined prompt exceeds {_MAX_PROMPT_BYTES // 1000} KB limit for codex runner",
         )
 
-    cmd = ["codex", "exec", "--json"]
+    # Session workspaces are plain scratch dirs; without the flag `codex exec`
+    # refuses to run outside a trusted git repository.
+    cmd = ["codex", "exec", "--json", "--skip-git-repo-check"]
     if resume_session_id:
         cmd += ["resume", resume_session_id, effective_prompt]
     else:
@@ -44,6 +74,8 @@ async def run_turn(
     async def _stream() -> AsyncIterator[RunnerEvent]:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            # An inherited pipe makes codex wait for "additional input from stdin".
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,

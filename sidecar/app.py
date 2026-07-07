@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .codex_runner import ensure_codex_auth
 from .concurrency import ConcurrencyGate
 from .config import get_settings
 from .errors import ErrorCode
@@ -20,6 +21,9 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if settings.provider == "codex":
+            authed = await ensure_codex_auth(settings.codex_auth_path)
+            log.info("codex.auth", materialized=authed)
         app.state.gate = ConcurrencyGate(settings.max_concurrent)
         app.state.inflight = InflightRegistry()
         try:
