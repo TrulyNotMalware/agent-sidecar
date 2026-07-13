@@ -36,6 +36,7 @@ async def converse(
     body: ConverseRequest,
     request: Request,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
+    x_turn_token: Annotated[str | None, Header(alias="X-Turn-Token")] = None,
 ) -> EventSourceResponse | JSONResponse:
     settings = get_settings()
     gate = request.app.state.gate
@@ -47,6 +48,7 @@ async def converse(
         user_id=x_user_id,
         mode=body.mode,
         resume=bool(body.session_id),
+        turn_token=bool(x_turn_token),
         prompt=body.prompt,
     )
 
@@ -65,7 +67,7 @@ async def converse(
         )
 
     return EventSourceResponse(
-        _event_stream(body, x_user_id, settings, gate, registry),
+        _event_stream(body, x_user_id, x_turn_token, settings, gate, registry),
         ping=15,
     )
 
@@ -93,6 +95,7 @@ async def _preflight_busy(
 async def _event_stream(
     body: ConverseRequest,
     x_user_id: str | None,
+    x_turn_token: str | None,
     settings: Settings,
     gate,
     registry: InflightRegistry,
@@ -146,6 +149,9 @@ async def _event_stream(
                             system_prompt=merged_system,
                             resume_session_id=body.session_id,
                             mcp_config_path=settings.mcp_config_path,
+                            mcp_server_url=settings.mcp_server_url,
+                            mcp_server_name=settings.mcp_server_name,
+                            turn_token=x_turn_token,
                             timeout_sec=settings.turn_timeout_sec,
                         ):
                             if cancel_event.is_set():

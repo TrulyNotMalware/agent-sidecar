@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     workspace_root: Path = Path("/var/lib/claude-sidecar/sessions")
     claude_md_path: Path | None = None
     mcp_config_path: Path | None = None
+    mcp_server_url: str | None = None
+    mcp_server_name: str = "codecompanion"
     claude_auth_path: Path | None = None  # defaults to ~/.claude.json at check time
 
     # Codex (PROVIDER=codex) — auth state written by `codex login`

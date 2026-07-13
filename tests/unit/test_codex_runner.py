@@ -260,6 +260,49 @@ async def test_system_prompt_prepended_to_prompt(monkeypatch):
     assert calls["cmd"][-1] == "SYS\n\nhi"
 
 
+async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
+    lines = [_line({"type": "turn.completed", "usage": {}})]
+    calls = _install(monkeypatch, FakeProc(lines))
+
+    events = [
+        ev
+        async for ev in run_turn(
+            prompt="hi",
+            cwd=Path("/tmp"),
+            system_prompt=None,
+            resume_session_id=None,
+            mcp_config_path=None,
+            mcp_server_url="https://app.example/mcp",
+            mcp_server_name="codecompanion",
+            turn_token="tok-xyz",
+            timeout_sec=5,
+        )
+    ]
+
+    assert events[-1].__class__ is DoneEvent
+    assert "-c" in calls["cmd"]
+    assert 'mcp_servers.codecompanion.url="https://app.example/mcp"' in calls["cmd"]
+    assert (
+        'mcp_servers.codecompanion.bearer_token_env_var="CODECOMPANION_MCP_TOKEN"'
+        in calls["cmd"]
+    )
+    assert (
+        'mcp_servers.codecompanion.default_tools_approval_mode="approve"'
+        in calls["cmd"]
+    )
+    assert calls["kwargs"]["env"]["CODECOMPANION_MCP_TOKEN"] == "tok-xyz"
+
+
+async def test_without_mcp_override_cmd_unchanged_and_no_env_kwarg(monkeypatch):
+    lines = [_line({"type": "turn.completed", "usage": {}})]
+    calls = _install(monkeypatch, FakeProc(lines))
+
+    await _collect()
+
+    assert calls["cmd"] == ["codex", "exec", "--json", "--skip-git-repo-check", "hi"]
+    assert "env" not in calls["kwargs"]
+
+
 async def test_timeout_raises_and_kills_process(monkeypatch):
     proc = FakeProc([], hang=True)
     _install(monkeypatch, proc)

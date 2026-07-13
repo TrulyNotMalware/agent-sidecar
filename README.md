@@ -44,7 +44,7 @@ for `ANTHROPIC_API_KEY`, `mcp.json`, and `CLAUDE.md`.
 | `POST` | `/v1/converse` | Bearer | Run one turn; streams SSE events |
 | `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | Cancel an in-flight turn (graceful → SIGKILL after grace) |
 | `GET` | `/healthz` | none | Liveness |
-| `GET` | `/readyz` | none | Readiness — `claude` binary + auth present |
+| `GET` | `/readyz` | none | Readiness — provider CLI (`claude`/`codex`) + auth present |
 | `GET` | `/metrics` | none | Prometheus text format |
 
 SSE event sequence: `session` → 0..N of `text` / `tool_use` / `tool_result` → terminal `done` *or* `error`. Full schema in [`openapi.yaml`](openapi.yaml).
@@ -184,7 +184,7 @@ docker build -t claude-sidecar:1.0.0 .
 | `POST` | `/v1/converse` | Bearer | 1턴 실행, SSE 이벤트 스트림 |
 | `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | 진행 중 turn 취소 (graceful → grace 후 SIGKILL) |
 | `GET` | `/healthz` | 없음 | Liveness |
-| `GET` | `/readyz` | 없음 | Readiness — `claude` 바이너리 + 인증 검증 |
+| `GET` | `/readyz` | 없음 | Readiness — provider CLI (`claude`/`codex`) 바이너리 + 인증 검증 |
 | `GET` | `/metrics` | 없음 | Prometheus text 포맷 |
 
 SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` → 종단 `done` 또는 `error`. 전체 스키마는 [`openapi.yaml`](openapi.yaml).

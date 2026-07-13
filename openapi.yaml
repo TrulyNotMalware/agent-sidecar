@@ -38,12 +38,24 @@ paths:
           in: header
           required: false
           description: |
-            Opaque caller identifier. When present, forwarded verbatim to MCP
-            servers (so they can attach the identity to tool execution) and used
-            for per-user concurrency gating. The model never sees this value.
+            Opaque caller identifier. Used only for logging, per-user
+            concurrency gating, and trace attribution — it is not forwarded to
+            MCP servers. The model never sees this value.
           schema:
             type: string
             maxLength: 256
+        - name: X-Turn-Token
+          in: header
+          required: false
+          description: |
+            Short-lived, signed per-turn token scoping MCP identity. When
+            present (together with a configured `MCP_SERVER_URL`), the sidecar
+            injects a per-turn MCP server entry and forwards this value as that
+            server's `Authorization: Bearer` credential. The model never sees
+            this value.
+          schema:
+            type: string
+            maxLength: 4096
       requestBody:
         required: true
         content:

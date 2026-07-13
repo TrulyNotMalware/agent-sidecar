@@ -46,6 +46,9 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
     return proc.returncode == 0 and path.exists()
 
 
+_MCP_TOKEN_ENV_VAR = "CODECOMPANION_MCP_TOKEN"
+
+
 async def run_turn(
     *,
     prompt: str,
@@ -53,6 +56,9 @@ async def run_turn(
     system_prompt: str | None,
     resume_session_id: str | None,
     mcp_config_path: Path | None,  # accepted for interface parity; Codex reads codex.toml from cwd
+    mcp_server_url: str | None = None,
+    mcp_server_name: str = "codecompanion",
+    turn_token: str | None = None,
     timeout_sec: float,
 ) -> AsyncIterator[RunnerEvent]:
     effective_prompt = f"{system_prompt}\n\n{prompt}".strip() if system_prompt else prompt
@@ -66,10 +72,28 @@ async def run_turn(
     # Session workspaces are plain scratch dirs; without the flag `codex exec`
     # refuses to run outside a trusted git repository.
     cmd = ["codex", "exec", "--json", "--skip-git-repo-check"]
+
+    # Per-turn MCP scoping: inject a streamable-HTTP server via dotted `-c` TOML
+    # overrides and hand codex the bearer through an env var (never on argv).
+    # Tool calls must be pre-approved ("approve"; "auto"/"prompt" cancel in headless
+    # exec mode) — authorization is enforced server-side per call via the turn token.
+    mcp_scoped = mcp_server_url is not None and turn_token is not None
+    if mcp_scoped:
+        cmd += [
+            "-c",
+            f'mcp_servers.{mcp_server_name}.url="{mcp_server_url}"',
+            "-c",
+            f'mcp_servers.{mcp_server_name}.bearer_token_env_var="{_MCP_TOKEN_ENV_VAR}"',
+            "-c",
+            f'mcp_servers.{mcp_server_name}.default_tools_approval_mode="approve"',
+        ]
+
     if resume_session_id:
         cmd += ["resume", resume_session_id, effective_prompt]
     else:
         cmd.append(effective_prompt)
+
+    turn_env = {**os.environ, _MCP_TOKEN_ENV_VAR: turn_token} if mcp_scoped else None
 
     async def _stream() -> AsyncIterator[RunnerEvent]:
         proc = await asyncio.create_subprocess_exec(
@@ -80,6 +104,7 @@ async def run_turn(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             limit=1024 * 1024,  # 1 MiB per line — guards against LimitOverrunError
+            **({"env": turn_env} if turn_env is not None else {}),
         )
 
         stderr_chunks: list[bytes] = []

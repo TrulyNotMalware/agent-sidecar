@@ -90,15 +90,18 @@ Auth: `Authorization: Bearer <secret>` required.
 }
 ```
 
-**SSE event sequence:**
+**SSE event sequence** (each frame is an `event:` line plus a `data:` line carrying the JSON below):
 ```
-event: session      {"session_id": "...", "resumed": false}
-event: text         {"delta": "...", "final_text": "..."}
-event: tool_use     {"tool_name": "...", "tool_use_id": "...", "tool_args": {...}}
-event: tool_result  {"tool_use_id": "...", "content": [...]}
-event: done         {"session_id": "...", "usage": {"input_tokens": N, "output_tokens": N}}
+event: session      {"sessionId": "..."}
+event: text         {"delta": "..."}
+event: tool_use     {"name": "...", "args": {...}, "toolUseId": "..."}
+event: tool_result  {"name": "...", "ok": true, "toolUseId": "..."}
+event: done         {"finalText": "...", "usage": {"inputTokens": N, "outputTokens": N, "cacheReadInputTokens": N, "cacheCreationInputTokens": N}}
 event: error        {"code": "...", "message": "..."}   ← terminal, replaces done
 ```
+Exactly one `session` first, then zero or more `text` / `tool_use` / `tool_result`,
+then exactly one terminal `done` **or** `error`. Field shapes are the source-of-truth
+contract in `openapi.yaml`.
 
 ### `POST /v1/sessions/{session_key}/cancel`
 
@@ -127,7 +130,10 @@ Returns `202` immediately. Graceful cancel (waits up to `CANCEL_GRACE_SEC`), the
 | `MCP_CONFIG_PATH` | — | Path to `mcp.json` |
 | `CLAUDE_CODE_OAUTH_TOKEN` | — | Claude subscription auth — **local testing only** |
 | `ANTHROPIC_API_KEY` | — | Claude API auth — **production / general use** |
-| `OPENAI_API_KEY` | — | Codex provider auth |
+| `ANTHROPIC_MODE` | `subscription` | Set `api` so `/readyz` requires `ANTHROPIC_API_KEY` specifically |
+| `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth-file location (local dev) |
+| `OPENAI_API_KEY` | — | Codex provider auth (`PROVIDER=codex`) |
+| `CODEX_AUTH_PATH` | `~/.codex/auth.json` | Codex OAuth auth-file location |
 | `LOG_PROMPTS` | `false` | `true` disables prompt redaction |
 | `LOG_LEVEL` | `INFO` | |
 | `TRACING_ENABLED` | `false` | OTel trace export |
@@ -161,10 +167,20 @@ Returns `202` immediately. Graceful cancel (waits up to `CANCEL_GRACE_SEC`), the
   (subscription) and `~/.claude.json` are for local testing only.
 
 ### `codex`
-- Spawns `@openai/codex exec --json` as a subprocess, parses NDJSON event stream.
-- Auth: `OPENAI_API_KEY` or `~/.codex/auth.json`.
+- Spawns `codex exec --json --skip-git-repo-check` (from `@openai/codex`) as a
+  subprocess with `stdin=DEVNULL`, then parses the NDJSON event stream.
+  `--skip-git-repo-check` is required because session workspaces are plain scratch
+  dirs (not git repos); `stdin=DEVNULL` stops codex from blocking on "Reading
+  additional input from stdin".
+- Auth: `OPENAI_API_KEY`, or a `~/.codex/auth.json` written by `codex login`
+  (`CODEX_AUTH_PATH` overrides the location). codex-cli does **not** read
+  `OPENAI_API_KEY` at request time, so on startup (FastAPI lifespan, when
+  `PROVIDER=codex`) `ensure_codex_auth()` runs `codex login --with-api-key` to
+  materialize `~/.codex/auth.json` from the key — a no-op when `auth.json`
+  already exists (subscription mode).
+- Resume uses `codex exec resume <sessionId> <prompt>`.
 - System prompt is prepended to the user prompt (no separate flag in the CLI).
-- 100 KB prompt hard limit (ARG_MAX guard).
+- 100 KB combined-prompt hard limit (ARG_MAX guard).
 
 ---
 
@@ -210,13 +226,21 @@ Returns `202` immediately. Graceful cancel (waits up to `CANCEL_GRACE_SEC`), the
 | `internal` | 500 | Unhandled exception |
 | `cancelled` | 499 | Graceful cancel acknowledged |
 
-Errors before the stream opens return a standard JSON body.  
-Errors after the stream opens arrive as a terminal `event: error` SSE frame.
+The **HTTP** column is the canonical mapping in `errors.py` (`ApiError.status_code`).
+On `/v1/converse` only pre-stream errors are sent with that status and a JSON body:
+`bad_request`, `unauthorized`, and `busy` (plus `not_found` on `/cancel`). Once the
+SSE stream has opened the response is already HTTP 200, so `timeout`, `sdk_error`,
+`internal`, and `cancelled` surface **only** as a terminal `event: error` frame —
+their HTTP code is never put on the wire for the converse response.
 
 `busy` is normally rejected pre-stream (a real HTTP 429 with a JSON body) via a
 preflight check in the converse route. A limit hit only in the narrow race
 window between preflight and in-stream registration still arrives as a terminal
 SSE `error` frame with `code=busy` on an HTTP 200 stream.
+
+`cancelled` also appears benignly when a client closes the SSE connection right
+after `done`: the ASGI server cancels the turn task, and the finished turn is
+logged with `outcome=cancelled` even though the client already has its answer.
 
 ---
 
@@ -325,5 +349,5 @@ async with stateless_workspace(parent=settings.workspace_root) as ws:
    and yielding the same event union types as `claude_runner.py`.
 2. Add the provider name to `PROVIDER` docs in `config.py`.
 3. Extend `_readyz_checks()` in `sidecar/routes/health.py`.
-4. Wire the runner in `sidecar/routes/converse.py` (`_select_runner()`).
+4. Wire the runner in `sidecar/routes/converse.py` (`_get_runner()`).
 5. Add a `test_health.py` case for the new `/readyz` path.

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ApiError, ErrorCode
+from .mcp import build_mcp_servers
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,9 @@ async def run_turn(
     system_prompt: str | None,
     resume_session_id: str | None,
     mcp_config_path: Path | None,
+    mcp_server_url: str | None = None,
+    mcp_server_name: str = "codecompanion",
+    turn_token: str | None = None,
     timeout_sec: float,
 ) -> AsyncIterator[RunnerEvent]:
     """Drive one Claude turn via the Agent SDK and yield internal events.
@@ -73,8 +77,19 @@ async def run_turn(
         options_kwargs["system_prompt"] = system_prompt
     if resume_session_id:
         options_kwargs["resume"] = resume_session_id
-    if mcp_config_path is not None:
-        options_kwargs["mcp_servers"] = str(mcp_config_path)
+    mcp_servers = build_mcp_servers(
+        static_config_path=mcp_config_path,
+        server_name=mcp_server_name,
+        server_url=mcp_server_url,
+        turn_token=turn_token,
+    )
+    if mcp_servers is not None:
+        options_kwargs["mcp_servers"] = mcp_servers
+    if mcp_server_url is not None and turn_token is not None:
+        # Headless runs have nobody to approve tool prompts, so the scoped server's tools
+        # must be pre-allowed ("mcp__<server>" covers every tool it exposes). Authorization
+        # is enforced server-side per call via the turn token; this only unblocks the SDK.
+        options_kwargs["allowed_tools"] = [f"mcp__{mcp_server_name}"]
 
     options = ClaudeAgentOptions(**options_kwargs)
 

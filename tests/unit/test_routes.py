@@ -1,3 +1,57 @@
+def _install_recording_runner(monkeypatch):
+    """Swap the runner accessor for a fake async generator that records kwargs.
+
+    The fake yields a single terminal DoneEvent so the SSE stream closes and the
+    sync TestClient collects the full response.
+    """
+    from sidecar.claude_runner import DoneEvent
+    from sidecar.routes import converse as converse_mod
+
+    recorded: dict = {}
+
+    def fake_get_runner(settings):
+        async def fake_run_turn(**kwargs):
+            recorded.update(kwargs)
+            yield DoneEvent(
+                final_text="ok",
+                input_tokens=0,
+                output_tokens=0,
+                cache_read_input_tokens=None,
+                cache_creation_input_tokens=None,
+            )
+
+        return fake_run_turn
+
+    monkeypatch.setattr(converse_mod, "_get_runner", fake_get_runner)
+    return recorded
+
+
+def test_x_turn_token_header_reaches_runner(client, monkeypatch):
+    recorded = _install_recording_runner(monkeypatch)
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "turn-k", "prompt": "hi"},
+        headers={"Authorization": "Bearer test-secret", "X-Turn-Token": "turn-abc"},
+    )
+
+    assert r.status_code == 200
+    assert recorded["turn_token"] == "turn-abc"
+
+
+def test_absent_turn_token_reaches_runner_as_none(client, monkeypatch):
+    recorded = _install_recording_runner(monkeypatch)
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "turn-k2", "prompt": "hi"},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 200
+    assert recorded["turn_token"] is None
+
+
 def test_converse_requires_bearer(client):
     r = client.post("/v1/converse", json={"sessionKey": "k", "prompt": "hi"})
     assert r.status_code == 401
