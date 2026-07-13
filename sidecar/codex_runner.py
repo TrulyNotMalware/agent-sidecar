@@ -77,6 +77,10 @@ async def run_turn(
     # overrides and hand codex the bearer through an env var (never on argv).
     # Tool calls must be pre-approved ("approve"; "auto"/"prompt" cancel in headless
     # exec mode) — authorization is enforced server-side per call via the turn token.
+    # Known limitation (codex 0.142.3): shell_environment_policy.exclude does not hide
+    # the env var from model-run shell commands, so the model can read its own turn
+    # token. Acceptable: the token is short-TTL and the model already holds the same
+    # tool-call authority the token grants.
     mcp_scoped = mcp_server_url is not None and turn_token is not None
     if mcp_scoped:
         cmd += [
