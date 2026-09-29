@@ -1,4 +1,9 @@
 import json
+import os
+import shutil
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -40,3 +45,23 @@ def build_mcp_servers(
         "headers": {"Authorization": f"Bearer {turn_token}"},
     }
     return servers
+
+
+@contextmanager
+def private_mcp_config(servers: dict[str, Any]) -> Iterator[Path]:
+    """Write `servers` as an mcp.json readable only by this user; delete it on exit.
+
+    The SDK serialises a dict `mcp_servers` into `--mcp-config '<json>'` on the CLI's
+    argv, where the per-turn bearer is visible to any process via `ps`. Handing the
+    SDK a file path keeps it off argv. The file lives in a fresh 0700 directory
+    outside the turn workspace, so the agent's cwd-scoped tools do not list it.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="claude-sidecar-mcp-"))
+    path = directory / "mcp.json"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"mcpServers": servers}, f)
+        yield path
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)

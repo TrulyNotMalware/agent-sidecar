@@ -149,3 +149,46 @@ def test_converse_busy_same_user_returns_429(client, app):
     assert r.status_code == 429
     assert r.json()["code"] == "busy"
     assert "u1" in r.json()["message"]
+
+
+def test_flag_like_session_id_is_rejected_before_streaming(client):
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k", "prompt": "hi", "sessionId": "--last"},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "bad_request"
+    assert "sessionId" in r.json()["message"]
+
+
+def test_bearer_scheme_is_case_insensitive(client, monkeypatch):
+    _install_recording_runner(monkeypatch)
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "scheme-k", "prompt": "hi"},
+        headers={"Authorization": "bearer test-secret"},
+    )
+
+    assert r.status_code == 200
+
+
+def test_empty_bearer_token_is_rejected(client):
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k", "prompt": "hi"},
+        headers={"Authorization": "Bearer "},
+    )
+    assert r.status_code == 401
+
+
+def test_claude_runner_withholds_codex_passthrough_names():
+    from sidecar.config import Settings
+    from sidecar.routes.converse import _get_runner
+
+    runner = _get_runner(
+        Settings(_env_file=None, bearer_secret="x", codex_env_passthrough="AZURE_OPENAI_KEY")
+    )
+
+    assert runner.keywords["withheld_env"] == ("AZURE_OPENAI_KEY",)

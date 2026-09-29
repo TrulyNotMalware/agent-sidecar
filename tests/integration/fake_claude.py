@@ -72,6 +72,12 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_term)
     signal.alarm(int(os.environ.get("FAKE_MAX_LIFETIME", "120")))  # SIGALRM: not ignorable here
     log(f"start mode={mode} argv={json.dumps(sys.argv[1:])}")
+    log(f"env BEARER_SECRET={'set' if os.environ.get('BEARER_SECRET') else 'unset'}")
+    if "--mcp-config" in sys.argv:
+        value = sys.argv[sys.argv.index("--mcp-config") + 1]
+        if os.path.isfile(value):
+            with open(value) as f:
+                log(f"mcp_config_file={json.dumps({'path': value, 'content': f.read()})}")
 
     # SDK handshake: one control request (initialize), then the user message.
     request = json.loads(sys.stdin.readline())

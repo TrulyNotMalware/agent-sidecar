@@ -98,3 +98,25 @@ def test_unparseable_static_file_still_returns_per_turn_entry(tmp_path):
             "headers": {"Authorization": "Bearer tok-abc"},
         }
     }
+
+
+def test_private_mcp_config_is_owner_only_and_removed_on_exit():
+    from sidecar.mcp import private_mcp_config
+
+    servers = {"codecompanion": {"type": "http", "url": "u", "headers": {"Authorization": "t"}}}
+    with private_mcp_config(servers) as path:
+        assert json.loads(path.read_text()) == {"mcpServers": servers}
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert not path.exists()
+    assert not path.parent.exists()
+
+
+def test_private_mcp_config_is_removed_when_the_turn_fails():
+    import pytest
+
+    from sidecar.mcp import private_mcp_config
+
+    with pytest.raises(RuntimeError), private_mcp_config({"s": {}}) as path:
+        raise RuntimeError("turn failed")
+    assert not path.parent.exists()

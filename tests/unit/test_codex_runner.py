@@ -136,7 +136,9 @@ async def test_maps_full_event_sequence(monkeypatch):
 
     events = await _collect()
 
-    assert calls["cmd"] == ["codex", "exec", "--json", "--skip-git-repo-check", "hi"]
+    assert calls["cmd"] == [
+        "codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--", "hi",
+    ]
     assert calls["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
     assert events == [
         SessionEvent(session_id="t-1"),
@@ -245,7 +247,10 @@ async def test_resume_session_id_extends_argv(monkeypatch):
         "exec",
         "--json",
         "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
         "resume",
+        "--",
         "sess-9",
         "hi",
     ]
@@ -293,14 +298,80 @@ async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
     assert calls["kwargs"]["env"]["CODECOMPANION_MCP_TOKEN"] == "tok-xyz"
 
 
-async def test_without_mcp_override_cmd_unchanged_and_no_env_kwarg(monkeypatch):
+async def test_without_mcp_override_no_config_flags_and_no_token_env(monkeypatch):
+    monkeypatch.setenv("CODECOMPANION_MCP_TOKEN", "stale-from-parent")
     lines = [_line({"type": "turn.completed", "usage": {}})]
     calls = _install(monkeypatch, FakeProc(lines))
 
     await _collect()
 
-    assert calls["cmd"] == ["codex", "exec", "--json", "--skip-git-repo-check", "hi"]
-    assert "env" not in calls["kwargs"]
+    assert "-c" not in calls["cmd"]
+    assert "CODECOMPANION_MCP_TOKEN" not in calls["kwargs"]["env"]
+
+
+async def test_dash_prefixed_prompt_and_session_id_are_not_parsed_as_flags(monkeypatch):
+    lines = [_line({"type": "turn.completed", "usage": {}})]
+    calls = _install(monkeypatch, FakeProc(lines))
+
+    await _collect(prompt="--last")
+    assert calls["cmd"][-2:] == ["--", "--last"]
+
+    await _collect(prompt="-csandbox_mode=danger-full-access", resume_session_id="sess-1")
+    assert calls["cmd"][-4:] == ["resume", "--", "sess-1", "-csandbox_mode=danger-full-access"]
+
+
+async def test_sandbox_is_always_explicit(monkeypatch):
+    lines = [_line({"type": "turn.completed", "usage": {}})]
+    calls = _install(monkeypatch, FakeProc(lines))
+
+    [_ async for _ in run_turn(
+        prompt="hi",
+        cwd=Path("/tmp"),
+        system_prompt=None,
+        resume_session_id="sess-1",
+        mcp_config_path=None,
+        timeout_sec=5,
+        sandbox="workspace-write",
+    )]
+
+    cmd = calls["cmd"]
+    # exec-level option: must come before the `resume` subcommand
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert cmd.index("--sandbox") < cmd.index("resume")
+
+
+async def test_child_env_withholds_sidecar_secrets(monkeypatch):
+    for name, value in {
+        "BEARER_SECRET": "sidecar-secret",
+        "OPENAI_API_KEY": "sk-openai",
+        "ANTHROPIC_API_KEY": "sk-ant",
+        "PATH": "/usr/bin",
+        "HTTPS_PROXY": "http://proxy:3128",
+        "LC_ALL": "C.UTF-8",
+        "CUSTOM_PROVIDER_KEY": "k",
+        "UNRELATED": "x",
+    }.items():
+        monkeypatch.setenv(name, value)
+    lines = [_line({"type": "turn.completed", "usage": {}})]
+    calls = _install(monkeypatch, FakeProc(lines))
+
+    [_ async for _ in run_turn(
+        prompt="hi",
+        cwd=Path("/tmp"),
+        system_prompt=None,
+        resume_session_id=None,
+        mcp_config_path=None,
+        timeout_sec=5,
+        env_passthrough=("CUSTOM_PROVIDER_KEY",),
+    )]
+
+    env = calls["kwargs"]["env"]
+    for withheld in ("BEARER_SECRET", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "UNRELATED"):
+        assert withheld not in env
+    assert env["PATH"] == "/usr/bin"
+    assert env["HTTPS_PROXY"] == "http://proxy:3128"
+    assert env["LC_ALL"] == "C.UTF-8"
+    assert env["CUSTOM_PROVIDER_KEY"] == "k"
 
 
 async def test_timeout_raises_and_kills_process(monkeypatch):

@@ -118,7 +118,7 @@ Returns `202` immediately. Graceful cancel (waits up to `CANCEL_GRACE_SEC`), the
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BEARER_SECRET` | — | **Required** |
+| `BEARER_SECRET` | — | **Required** — startup fails if unset or empty |
 | `PROVIDER` | `claude` | `claude` or `codex` |
 | `BIND` | `127.0.0.1` | Set `0.0.0.0` in Docker |
 | `PORT` | `7300` | |
@@ -135,6 +135,8 @@ Returns `202` immediately. Graceful cancel (waits up to `CANCEL_GRACE_SEC`), the
 | `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth-file location (local dev) |
 | `OPENAI_API_KEY` | — | Codex provider auth (`PROVIDER=codex`) |
 | `CODEX_AUTH_PATH` | `~/.codex/auth.json` | Codex OAuth auth-file location |
+| `CODEX_SANDBOX` | `read-only` | Always passed as `codex exec --sandbox`; `read-only` \| `workspace-write` \| `danger-full-access` |
+| `CODEX_ENV_PASSTHROUGH` | — | Comma-separated extra env var names codex may inherit (e.g. a custom provider's `env_key`) |
 | `LOG_PROMPTS` | `false` | `true` disables prompt redaction |
 | `LOG_LEVEL` | `INFO` | |
 | `TRACING_ENABLED` | `false` | OTel trace export |
@@ -167,19 +169,34 @@ Returns `202` immediately. Graceful cancel (waits up to `CANCEL_GRACE_SEC`), the
 - Auth: `ANTHROPIC_API_KEY` for production / general use. `CLAUDE_CODE_OAUTH_TOKEN`
   (subscription) and `~/.claude.json` are for local testing only.
 
+- A per-turn MCP entry carrying `X-Turn-Token` is written to a `0600` file in a
+  fresh `0700` temp dir (outside the workspace) and passed to the SDK as a path —
+  the SDK would otherwise inline the JSON, bearer included, on the CLI's argv.
+  The file is removed when the runner finishes (on a client disconnect that is
+  currently deferred until the runner generator is finalized — see the lifecycle
+  xfails in `tests/integration/test_lifecycle.py`).
+- `BEARER_SECRET` and `OPENAI_API_KEY` are blanked in the CLI's environment (the
+  SDK can only add or override variables, not remove them).
+
 ### `codex`
-- Spawns `codex exec --json --skip-git-repo-check` (from `@openai/codex`) as a
-  subprocess with `stdin=DEVNULL`, then parses the NDJSON event stream.
-  `--skip-git-repo-check` is required because session workspaces are plain scratch
-  dirs (not git repos); `stdin=DEVNULL` stops codex from blocking on "Reading
-  additional input from stdin".
+- Spawns `codex exec --json --skip-git-repo-check --sandbox <CODEX_SANDBOX>`
+  (from `@openai/codex`) as a subprocess with `stdin=DEVNULL`, then parses the
+  NDJSON event stream. `--skip-git-repo-check` is required because session
+  workspaces are plain scratch dirs (not git repos); `stdin=DEVNULL` stops codex
+  from blocking on "Reading additional input from stdin". `--sandbox` is always
+  explicit so a `config.toml` cannot loosen it.
+- The prompt (and resume id) follow `--`, so a value starting with `-` is never
+  parsed as a flag. `sessionId` is also validated (`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`).
+- codex gets an **allowlisted** environment (`PATH`, `HOME`, `CODEX_HOME`, locale,
+  proxy and CA variables, plus `CODEX_ENV_PASSTHROUGH`); `BEARER_SECRET` and
+  provider API keys are withheld from it and from the shell commands it runs.
 - Auth: `OPENAI_API_KEY`, or a `~/.codex/auth.json` written by `codex login`
   (`CODEX_AUTH_PATH` overrides the location). codex-cli does **not** read
   `OPENAI_API_KEY` at request time, so on startup (FastAPI lifespan, when
   `PROVIDER=codex`) `ensure_codex_auth()` runs `codex login --with-api-key` to
   materialize `~/.codex/auth.json` from the key — a no-op when `auth.json`
   already exists (subscription mode).
-- Resume uses `codex exec resume <sessionId> <prompt>`.
+- Resume uses `codex exec resume -- <sessionId> <prompt>`.
 - System prompt is prepended to the user prompt (no separate flag in the CLI).
 - 100 KB combined-prompt hard limit (ARG_MAX guard).
 

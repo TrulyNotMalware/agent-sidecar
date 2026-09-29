@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -240,9 +241,16 @@ def _merge_system_prompt(
 def _get_runner(settings: Settings):
     if settings.provider == "codex":
         from ..codex_runner import run_turn
-    else:
-        from ..claude_runner import run_turn
-    return run_turn
+
+        return functools.partial(
+            run_turn,
+            sandbox=settings.codex_sandbox,
+            env_passthrough=settings.codex_env_passthrough_names,
+        )
+    from ..claude_runner import run_turn
+
+    # Anything the operator routed to codex is none of the claude agent's business.
+    return functools.partial(run_turn, withheld_env=settings.codex_env_passthrough_names)
 
 
 def _to_sse(ev) -> dict[str, str]:

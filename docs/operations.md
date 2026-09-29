@@ -10,7 +10,7 @@ contract itself lives in `openapi.yaml`.
 | `PROVIDER` | `claude` | Backend selected per deployment: `claude` (Agent SDK) or `codex` (`codex exec`). Drives `/readyz` checks, the runner, and startup auth. |
 | `BIND` | `127.0.0.1` | Listen address. Use `127.0.0.1` for Pod-local sidecar; `0.0.0.0` only for standalone testing. |
 | `PORT` | `7300` | Listen port. |
-| `BEARER_SECRET` | **required** | Shared secret expected in `Authorization: Bearer …`. Provision via Kubernetes Secret. |
+| `BEARER_SECRET` | **required** | Shared secret expected in `Authorization: Bearer …`. Provision via Kubernetes Secret. Startup fails if unset or empty. |
 | `MAX_CONCURRENT` | `8` | Global in-flight `/v1/converse` cap; further requests get HTTP 429 (`busy`). |
 | `TURN_TIMEOUT_SEC` | `90` | Hard ceiling per turn. Past this, the SDK subprocess is SIGKILL'd and the SSE stream emits `error: timeout`. |
 | `CANCEL_GRACE_SEC` | `5` | Grace window between `/cancel` and force-cancel of the underlying task. |
@@ -26,6 +26,8 @@ contract itself lives in `openapi.yaml`.
 | `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth file location (local dev alternative). Used by `/readyz` validation. |
 | `OPENAI_API_KEY` | unset | **`PROVIDER=codex`.** Codex API key. Materialized into `~/.codex/auth.json` at startup (see [Codex provider](#codex-provider)). |
 | `CODEX_AUTH_PATH` | `~/.codex/auth.json` | Codex OAuth auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. |
+| `CODEX_SANDBOX` | `read-only` | **`PROVIDER=codex`.** Always passed as `codex exec --sandbox` so a `config.toml` cannot loosen it: `read-only`, `workspace-write`, or `danger-full-access`. |
+| `CODEX_ENV_PASSTHROUGH` | unset | **`PROVIDER=codex`.** Comma-separated extra env var names codex may inherit (e.g. a custom model provider's `env_key`). Everything outside the built-in allowlist is withheld. |
 | `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. |
 | `LOG_LEVEL` | `INFO` | structlog level. |
 | `TRACING_ENABLED` | `false` | When `true`, enable OpenTelemetry tracing (`OTLP/HTTP`). |
@@ -161,13 +163,25 @@ In k8s the container filesystem is ephemeral, so a `codex login`-created
 every start) or mount `auth.json` as a Secret at `/root/.codex/auth.json`.
 
 **How the runner invokes codex:** each turn runs
-`codex exec --json --skip-git-repo-check` with `stdin` set to `DEVNULL`.
+`codex exec --json --skip-git-repo-check --sandbox <CODEX_SANDBOX> -- <prompt>`
+(or `… resume -- <sessionId> <prompt>`) with `stdin` set to `DEVNULL`.
 
 - `--skip-git-repo-check` — session workspaces are plain scratch directories, not
   git repos, and `codex exec` refuses to run outside a trusted git repo without
   this flag.
 - `stdin=DEVNULL` — an inherited stdin pipe makes codex block on "Reading
   additional input from stdin", hanging the turn until `TURN_TIMEOUT_SEC`.
+- `--sandbox` — always explicit, so the sandbox for model-run shell commands is
+  decided by `CODEX_SANDBOX`, not by whatever `config.toml` is present.
+- `--` — ends option parsing, so a prompt or `sessionId` starting with `-`
+  (`--last`, `-c sandbox_mode=…`) is never read as a flag. `sessionId` is also
+  validated up front and rejected with `400` if it could look like one.
+- Environment — codex (and every shell command it runs) inherits only an
+  allowlist: `PATH`, `HOME`, `USER`, `SHELL`, `TERM`, locale (`LANG`, `LC_*`),
+  `TMPDIR`, `CODEX_HOME`, `RUST_LOG`, `XDG_*`, CA bundles, `NODE_OPTIONS` and proxy
+  variables, plus anything named in `CODEX_ENV_PASSTHROUGH` (those names are also
+  blanked for the `claude` provider's CLI). `BEARER_SECRET` and provider API
+  keys are withheld; auth comes from `CODEX_HOME/auth.json`.
 
 The codex runner enforces a 100 KB combined-prompt limit (system prompt + user
 prompt are concatenated, since the CLI has no separate system-prompt flag) to
@@ -189,9 +203,12 @@ MCP server with `MCP_SERVER_URL` (and optionally `MCP_SERVER_NAME`, default
 `codecompanion`); for each turn the sidecar injects a streamable-HTTP MCP entry
 for **both** providers:
 
-- **`claude`** — a per-turn `mcp_servers` dict entry
-  `{"type": "http", "url": MCP_SERVER_URL, "headers": {"Authorization": "Bearer <X-Turn-Token>"}}`
-  handed to the Agent SDK.
+- **`claude`** — a per-turn `mcp_servers` entry
+  `{"type": "http", "url": MCP_SERVER_URL, "headers": {"Authorization": "Bearer <X-Turn-Token>"}}`,
+  merged with any static servers and written to a `0600` file in a fresh `0700`
+  temp directory outside the workspace. The SDK gets the file **path** (never on
+  argv — a dict would be inlined as `--mcp-config '<json>'`); the file is deleted
+  when the runner finishes.
 - **`codex`** — `-c mcp_servers.<name>.url="…"` and
   `-c mcp_servers.<name>.bearer_token_env_var="CODECOMPANION_MCP_TOKEN"` config
   overrides, with the token passed only through that env var (never on argv).

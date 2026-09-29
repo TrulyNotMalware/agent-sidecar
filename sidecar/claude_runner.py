@@ -1,11 +1,18 @@
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .errors import ApiError, ErrorCode
-from .mcp import build_mcp_servers
+from .mcp import build_mcp_servers, private_mcp_config
+
+# The SDK launches the CLI with the sidecar's full environment and only lets options
+# add or override keys. Blank the secrets that are the sidecar's own business so the
+# agent's tools cannot read them from its environment. Callers can add more names
+# (e.g. CODEX_ENV_PASSTHROUGH values) via `withheld_env`.
+_WITHHELD_FROM_CLI = ("BEARER_SECRET", "OPENAI_API_KEY")
 
 
 @dataclass(frozen=True)
@@ -55,24 +62,13 @@ async def run_turn(
     mcp_server_name: str = "codecompanion",
     turn_token: str | None = None,
     timeout_sec: float,
+    withheld_env: tuple[str, ...] = (),
 ) -> AsyncIterator[RunnerEvent]:
-    """Drive one Claude turn via the Agent SDK and yield internal events.
-
-    SDK imports are lazy so the rest of the app stays usable without the SDK
-    available (e.g. unit tests for auth/health).
-    """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        ToolResultBlock,
-        ToolUseBlock,
-        UserMessage,
-        query,
-    )
-
-    options_kwargs: dict[str, Any] = {"cwd": str(cwd)}
+    """Drive one Claude turn via the Agent SDK and yield internal events."""
+    options_kwargs: dict[str, Any] = {
+        "cwd": str(cwd),
+        "env": dict.fromkeys((*_WITHHELD_FROM_CLI, *withheld_env), ""),
+    }
     if system_prompt is not None:
         options_kwargs["system_prompt"] = system_prompt
     if resume_session_id:
@@ -83,13 +79,36 @@ async def run_turn(
         server_url=mcp_server_url,
         turn_token=turn_token,
     )
-    if mcp_servers is not None:
-        options_kwargs["mcp_servers"] = mcp_servers
     if mcp_server_url is not None and turn_token is not None:
         # Headless runs have nobody to approve tool prompts, so the scoped server's tools
         # must be pre-allowed ("mcp__<server>" covers every tool it exposes). Authorization
         # is enforced server-side per call via the turn token; this only unblocks the SDK.
         options_kwargs["allowed_tools"] = [f"mcp__{mcp_server_name}"]
+
+    with contextlib.ExitStack() as cleanup:
+        if isinstance(mcp_servers, dict):
+            # Carries the turn token: pass a private file, never inline JSON on argv.
+            mcp_servers = str(cleanup.enter_context(private_mcp_config(mcp_servers)))
+        if mcp_servers is not None:
+            options_kwargs["mcp_servers"] = mcp_servers
+        async for ev in _run(options_kwargs, prompt=prompt, timeout_sec=timeout_sec):
+            yield ev
+
+
+async def _run(
+    options_kwargs: dict[str, Any], *, prompt: str, timeout_sec: float
+) -> AsyncIterator[RunnerEvent]:
+    # Lazy import keeps the rest of the app usable without the SDK (e.g. auth/health tests).
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ResultMessage,
+        TextBlock,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+        query,
+    )
 
     options = ClaudeAgentOptions(**options_kwargs)
 

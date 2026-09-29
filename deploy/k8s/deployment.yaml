@@ -63,14 +63,23 @@ spec:
             # - name: codex-oauth
             #   mountPath: /root/.codex
             #   readOnly: true
+          # exec probes, not httpGet: kubelet sends httpGet to the Pod IP, which a
+          # BIND=127.0.0.1 server never answers. The app container still reaches the
+          # sidecar over the shared loopback; nothing else in the cluster can.
+          # The opener raises on non-2xx (a 503 from /readyz fails the probe) and ignores
+          # HTTP(S)_PROXY, which would otherwise capture 127.0.0.1.
           readinessProbe:
-            httpGet: { path: /readyz, port: 7300 }
+            exec:
+              command: ["python", "-c", "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://127.0.0.1:7300/readyz', timeout=2)"]
             initialDelaySeconds: 2
-            periodSeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
           livenessProbe:
-            httpGet: { path: /healthz, port: 7300 }
+            exec:
+              command: ["python", "-c", "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://127.0.0.1:7300/healthz', timeout=2)"]
             initialDelaySeconds: 10
             periodSeconds: 15
+            timeoutSeconds: 3
       containers:
         - name: app
           image: ghcr.io/REPLACE_ORG/example-app:latest

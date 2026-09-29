@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 
 from .claude_runner import (
@@ -48,6 +48,30 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
 
 _MCP_TOKEN_ENV_VAR = "CODECOMPANION_MCP_TOKEN"
 
+# codex and the shell commands the model runs inherit only these. The sidecar's own
+# secrets (BEARER_SECRET, provider API keys) stay out: auth comes from CODEX_HOME.
+_ENV_ALLOWLIST = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ",
+    "TMPDIR", "TMP", "TEMP", "CODEX_HOME", "RUST_LOG",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+    "NODE_OPTIONS",  # the npm `codex` entry point is a node wrapper (e.g. --use-openssl-ca)
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+})
+_ENV_ALLOWLIST_PREFIXES = ("LC_",)
+
+
+def _child_env(passthrough: Iterable[str], extra: dict[str, str]) -> dict[str, str]:
+    allowed = _ENV_ALLOWLIST | set(passthrough)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k in allowed or k.startswith(_ENV_ALLOWLIST_PREFIXES)
+    }
+    env.update(extra)
+    return env
+
 
 async def run_turn(
     *,
@@ -55,11 +79,13 @@ async def run_turn(
     cwd: Path,
     system_prompt: str | None,
     resume_session_id: str | None,
-    mcp_config_path: Path | None,  # accepted for interface parity; Codex reads codex.toml from cwd
+    mcp_config_path: Path | None,  # interface parity only; static MCP servers are claude-only
     mcp_server_url: str | None = None,
     mcp_server_name: str = "codecompanion",
     turn_token: str | None = None,
     timeout_sec: float,
+    sandbox: str = "read-only",
+    env_passthrough: Iterable[str] = (),
 ) -> AsyncIterator[RunnerEvent]:
     effective_prompt = f"{system_prompt}\n\n{prompt}".strip() if system_prompt else prompt
 
@@ -70,8 +96,9 @@ async def run_turn(
         )
 
     # Session workspaces are plain scratch dirs; without the flag `codex exec`
-    # refuses to run outside a trusted git repository.
-    cmd = ["codex", "exec", "--json", "--skip-git-repo-check"]
+    # refuses to run outside a trusted git repository. --sandbox is always explicit
+    # so a config.toml cannot loosen it.
+    cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", sandbox]
 
     # Per-turn MCP scoping: inject a streamable-HTTP server via dotted `-c` TOML
     # overrides and hand codex the bearer through an env var (never on argv).
@@ -92,12 +119,16 @@ async def run_turn(
             f'mcp_servers.{mcp_server_name}.default_tools_approval_mode="approve"',
         ]
 
+    # "--" ends option parsing: a prompt or session id starting with "-" must never be
+    # read as a flag (`--last`, `-c sandbox_mode=...`, `--dangerously-bypass-...`).
     if resume_session_id:
-        cmd += ["resume", resume_session_id, effective_prompt]
+        cmd += ["resume", "--", resume_session_id, effective_prompt]
     else:
-        cmd.append(effective_prompt)
+        cmd += ["--", effective_prompt]
 
-    turn_env = {**os.environ, _MCP_TOKEN_ENV_VAR: turn_token} if mcp_scoped else None
+    turn_env = _child_env(
+        env_passthrough, {_MCP_TOKEN_ENV_VAR: turn_token} if mcp_scoped else {}
+    )
 
     async def _stream() -> AsyncIterator[RunnerEvent]:
         proc = await asyncio.create_subprocess_exec(
@@ -108,7 +139,7 @@ async def run_turn(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             limit=1024 * 1024,  # 1 MiB per line — guards against LimitOverrunError
-            **({"env": turn_env} if turn_env is not None else {}),
+            env=turn_env,
         )
 
         stderr_chunks: list[bytes] = []
