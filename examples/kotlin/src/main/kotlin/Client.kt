@@ -5,7 +5,7 @@
 // reason for being. Build with the bundled build.gradle.kts.
 //
 // Usage:
-//   BEARER_SECRET=... gradle run --args='hello'
+//   cd examples/kotlin && BEARER_SECRET=... gradle run --args='hello'
 //   (or `gradle wrapper` once, then ./gradlew run --args='hello')
 
 import io.ktor.client.HttpClient

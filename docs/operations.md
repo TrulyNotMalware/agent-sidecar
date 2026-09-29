@@ -383,6 +383,8 @@ closing the CLI before the reservation is released. Consequences:
 
 ## Operational gotchas
 
+- **Stateless leftovers.** A turn killed hard (SIGKILL, OOM) can leave a directory
+  under `WORKSPACE_ROOT/.stateless/`; it is safe to delete whenever no turn runs.
 - **Workspace cardinality.** `WORKSPACE_ROOT` accumulates one sub-directory per
   unique `sessionKey` in session mode. Mount it on a volume that has retention
   policy / cleanup — the sidecar does not GC.

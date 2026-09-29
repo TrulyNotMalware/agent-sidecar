@@ -17,6 +17,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 export BEARER_SECRET=$(openssl rand -hex 32)
 echo "$BEARER_SECRET"   # the client needs the same value
+export WORKSPACE_ROOT=$PWD/.workspaces   # the default /var/lib/... needs root
 .venv/bin/python -m sidecar
 ```
 
@@ -51,7 +52,7 @@ for `ANTHROPIC_API_KEY`, `mcp.json`, and `CLAUDE.md`.
 | `GET` | `/readyz` | none | Readiness — provider CLI (`claude`/`codex`) + auth present |
 | `GET` | `/metrics` | none | Prometheus text format |
 
-SSE event sequence: `session` → 0..N of `text` / `tool_use` / `tool_result` → terminal `done` *or* `error`. Full schema in [`openapi.yaml`](openapi.yaml).
+SSE event sequence: `session` → 0..N of `text` / `tool_use` / `tool_result` → terminal `done` *or* `error` (a lone `error` if the turn fails before it starts). Full schema in [`openapi.yaml`](openapi.yaml).
 
 ## Architecture
 
@@ -100,7 +101,7 @@ Minimal clients in three languages under [`examples/`](examples/):
 
 - [`examples/python/client.py`](examples/python/client.py) — httpx + manual SSE
 - [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/src/main/kotlin/Client.kt`](examples/kotlin/src/main/kotlin/Client.kt) — Ktor client + SSE plugin (coroutines); `gradle run --args='hello'`
+- [`examples/kotlin/src/main/kotlin/Client.kt`](examples/kotlin/src/main/kotlin/Client.kt) — Ktor client + SSE plugin (coroutines); `cd examples/kotlin && gradle run --args='hello'`
 
 Each is ~50 lines; the contract is meant to be trivial to adopt.
 
@@ -164,6 +165,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 export BEARER_SECRET=$(openssl rand -hex 32)
 echo "$BEARER_SECRET"   # 클라이언트도 같은 값을 써야 합니다
+export WORKSPACE_ROOT=$PWD/.workspaces   # 기본 경로 /var/lib/... 는 root 권한 필요
 .venv/bin/python -m sidecar
 ```
 
@@ -196,7 +198,7 @@ docker build -t claude-sidecar:1.0.0 .
 | `GET` | `/readyz` | 없음 | Readiness — provider CLI (`claude`/`codex`) 바이너리 + 인증 검증 |
 | `GET` | `/metrics` | 없음 | Prometheus text 포맷 |
 
-SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` → 종단 `done` 또는 `error`. 전체 스키마는 [`openapi.yaml`](openapi.yaml).
+SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` → 종단 `done` 또는 `error` (턴 시작 전에 실패하면 `error` 하나만). 전체 스키마는 [`openapi.yaml`](openapi.yaml).
 
 ## 아키텍처
 
@@ -245,7 +247,7 @@ SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` 
 
 - [`examples/python/client.py`](examples/python/client.py) — httpx + 수동 SSE
 - [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/src/main/kotlin/Client.kt`](examples/kotlin/src/main/kotlin/Client.kt) — Ktor 클라이언트 + SSE 플러그인 (코루틴); `gradle run --args='안녕'`
+- [`examples/kotlin/src/main/kotlin/Client.kt`](examples/kotlin/src/main/kotlin/Client.kt) — Ktor 클라이언트 + SSE 플러그인 (코루틴); `cd examples/kotlin && gradle run --args='안녕'`
 
 각 50줄 내외. 계약 자체가 단순해서 도입 비용이 낮습니다.
 

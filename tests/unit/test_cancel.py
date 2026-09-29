@@ -92,3 +92,5 @@ async def test_session_key_with_a_slash_can_be_cancelled(app, path_key):
     finally:
         await app.state.inflight.unregister("team/task", handle)
         task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

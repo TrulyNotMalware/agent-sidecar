@@ -103,8 +103,9 @@ event: done         {"finalText": "...", "usage": {"inputTokens": N, "outputToke
 event: error        {"code": "...", "message": "..."}   ← terminal, replaces done
 ```
 Exactly one `session` first, then zero or more `text` / `tool_use` / `tool_result`,
-then exactly one terminal `done` **or** `error`. Field shapes are the source-of-truth
-contract in `openapi.yaml`.
+then exactly one terminal `done` **or** `error` — unless the turn fails before the CLI
+reports its session (busy race, CLI failing to start): then the stream is a lone `error`.
+Field shapes are the source-of-truth contract in `openapi.yaml`.
 
 ### `POST /v1/sessions/{session_key}/cancel`
 
@@ -154,7 +155,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 ## System Prompt Merge Rules
 
 1. `systemPrompt` set → used directly, **replaces** `CLAUDE.md` entirely.
-2. `appendSystemPrompt` set → `CLAUDE.md + "\n\n" + appendSystemPrompt`.
+2. `appendSystemPrompt` set (non-empty) → `CLAUDE.md + "\n\n" + appendSystemPrompt`, or just
+   `appendSystemPrompt` when there is no CLAUDE.md.
 3. Neither → `CLAUDE.md` alone (or `None` if file absent).
 
 ---
@@ -165,7 +167,7 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 - **One in-flight turn per `user_id` (`X-User-Id` header)** — same constraint.
 - **Global cap** — `MAX_CONCURRENT` total; excess gets `429 busy`.
 - Session workspaces are SHA-256–keyed directories under `WORKSPACE_ROOT` (`root/XX/YYYY...`).
-- `mode=stateless` uses a `tempfile.mkdtemp` workspace, deleted after each turn.
+- `mode=stateless` uses a temp workspace under `WORKSPACE_ROOT/.stateless/`, deleted after each turn.
 
 ---
 
@@ -281,7 +283,7 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `cancelled` | 499 | Graceful cancel acknowledged |
 
 The **HTTP** column is the canonical mapping in `errors.py` (`ApiError.status_code`).
-Every JSON error body is `{"code": ..., "message": ...}` (one `ApiError` handler in
+Every error body from a sidecar route is `{"code": ..., "message": ...}` (one `ApiError` handler in
 `app.py`; validation errors are mapped to `bad_request`); `401` also sends
 `WWW-Authenticate: Bearer`.
 On `/v1/converse` only pre-stream errors are sent with that status and a JSON body:

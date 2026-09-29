@@ -328,3 +328,19 @@ def test_append_system_prompt_follows_the_documented_join(tmp_path):
         _merge_system_prompt(base_path=None, system_prompt=None, append_system_prompt=None)
         is None
     )
+
+
+def test_wrong_bearer_on_cancel_gets_the_same_401_shape(client):
+    r = client.post("/v1/sessions/k/cancel", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 401
+    assert r.json() == {"code": "unauthorized", "message": "invalid bearer token"}
+    assert r.headers["www-authenticate"] == "Bearer"
+
+
+def test_auth_is_checked_before_header_validation(client):
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k", "prompt": "hi"},
+        headers={"X-User-Id": "x" * 300},  # invalid, but unauthenticated first
+    )
+    assert r.status_code == 401
