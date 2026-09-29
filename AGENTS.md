@@ -136,7 +136,7 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `ANTHROPIC_MODE` | `subscription` | Set `api` so `/readyz` requires `ANTHROPIC_API_KEY` specifically |
 | `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth-file location (local dev) |
 | `OPENAI_API_KEY` | — | Codex provider auth (`PROVIDER=codex`) |
-| `CODEX_AUTH_PATH` | `~/.codex/auth.json` | Codex OAuth auth-file location |
+| `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location (leave unset; codex itself uses `$CODEX_HOME`, default `~/.codex`) |
 | `CODEX_SANDBOX` | `read-only` | Always passed as `codex exec --sandbox`; `read-only` \| `workspace-write` \| `danger-full-access` |
 | `CODEX_ENV_PASSTHROUGH` | — | Comma-separated extra env var names codex may inherit (e.g. a custom provider's `env_key`) |
 | `LOG_PROMPTS` | `false` | `true` disables prompt redaction |

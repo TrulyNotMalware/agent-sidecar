@@ -173,7 +173,7 @@ components:
           type:
             - string
             - 'null'
-          pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          pattern: '^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           description: |
             Session id (a UUID) from a prior `session` event. When provided,
             resumes that conversation; when null or `""`, starts fresh under

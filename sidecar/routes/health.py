@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from ..codex_runner import codex_auth_file
 from ..config import Settings, get_settings
 from ..models import HealthStatus
 
@@ -65,7 +66,8 @@ def _codex_binary_ready() -> bool:
 
 
 # Env credentials codex reads at request time — only if passed through (allowlisted env).
-_CODEX_ENV_CREDENTIALS = ("OPENAI_API_KEY", "CODEX_API_KEY")
+# OPENAI_API_KEY is not one of them: codex only uses it via `codex login` (auth.json).
+_CODEX_ENV_CREDENTIALS = ("CODEX_API_KEY",)
 
 
 def _codex_identity_ready(settings: Settings) -> bool:
@@ -77,8 +79,7 @@ def _codex_identity_ready(settings: Settings) -> bool:
     that file exists — if materialization failed, the pod must not report ready. An
     env credential listed in CODEX_ENV_PASSTHROUGH also counts, since codex sees it.
     """
-    auth_path = settings.codex_auth_path or (Path.home() / ".codex" / "auth.json")
-    if auth_path.exists():
+    if codex_auth_file(settings.codex_auth_path).exists():
         return True
     passthrough = set(settings.codex_env_passthrough_names)
     return any(os.environ.get(v) for v in _CODEX_ENV_CREDENTIALS if v in passthrough)

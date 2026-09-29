@@ -19,6 +19,18 @@ from .errors import ApiError, ErrorCode
 _MAX_PROMPT_BYTES = 100_000
 
 
+def codex_auth_file(configured: Path | None = None) -> Path:
+    """Where codex keeps auth.json: CODEX_AUTH_PATH if set, else $CODEX_HOME (~/.codex).
+
+    `codex login` writes, and `codex exec` reads, $CODEX_HOME/auth.json; the sidecar's
+    readiness check and startup materialization must look at the same file.
+    """
+    if configured is not None:
+        return configured
+    codex_home = os.environ.get("CODEX_HOME")
+    return (Path(codex_home) if codex_home else Path.home() / ".codex") / "auth.json"
+
+
 async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
     """Materialize the codex auth state from OPENAI_API_KEY.
 
@@ -28,7 +40,7 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
     (subscription mode) or no key is present. Returns True when an auth file
     is available afterwards.
     """
-    path = auth_path or (Path.home() / ".codex" / "auth.json")
+    path = codex_auth_file(auth_path)
     if path.exists():
         return True
     key = os.environ.get("OPENAI_API_KEY")

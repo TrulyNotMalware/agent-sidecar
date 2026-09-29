@@ -120,6 +120,18 @@ def test_codex_api_key_alone_is_not_ready_until_auth_json_exists(monkeypatch, tm
     assert _codex_identity_ready(s) is False
 
 
+def test_codex_auth_file_follows_codex_home(monkeypatch, tmp_path):
+    from sidecar.routes.health import _codex_identity_ready
+
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    s = _codex_settings()
+    assert _codex_identity_ready(s) is False
+
+    (tmp_path / "auth.json").write_text("{}")
+    assert _codex_identity_ready(s) is True
+
+
 def test_codex_env_credential_counts_when_passed_through(monkeypatch, tmp_path):
     from sidecar.routes.health import _codex_identity_ready
 

@@ -24,7 +24,7 @@ contract itself lives in `openapi.yaml`.
 | `CLAUDE_CODE_OAUTH_TOKEN` | unset | **Local testing only.** Long-lived subscription token from `claude setup-token`. Never deploy it. |
 | `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth file location (local dev alternative). Used by `/readyz` validation. |
 | `OPENAI_API_KEY` | unset | **`PROVIDER=codex`.** Codex API key. Materialized into `~/.codex/auth.json` at startup (see [Codex provider](#codex-provider)). |
-| `CODEX_AUTH_PATH` | `~/.codex/auth.json` | Codex OAuth auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. |
+| `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. Leave unset: codex itself always uses `$CODEX_HOME/auth.json` (default `~/.codex`). |
 | `CODEX_SANDBOX` | `read-only` | **`PROVIDER=codex`.** Always passed as `codex exec --sandbox` so a `config.toml` cannot loosen it: `read-only`, `workspace-write`, or `danger-full-access`. |
 | `CODEX_ENV_PASSTHROUGH` | unset | **`PROVIDER=codex`.** Comma-separated extra env var names codex may inherit (e.g. a custom model provider's `env_key`). Everything outside the built-in allowlist is withheld. |
 | `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. |
@@ -155,7 +155,10 @@ lifespan, when `PROVIDER=codex`) `ensure_codex_auth()` materializes the auth
 file: if `~/.codex/auth.json` is absent and `OPENAI_API_KEY` is set, it runs
 `codex login --with-api-key` once to write it. This is a no-op when the file
 already exists (subscription mode) or no key is present. `/readyz` reports not
-ready when neither the key nor the auth file is available.
+ready until `auth.json` exists (a bare `OPENAI_API_KEY` counts only once it has been
+materialized — check the `codex.auth` startup log if the pod stays unready). The
+file lives at `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`), which is also
+where the sidecar looks unless `CODEX_AUTH_PATH` points elsewhere.
 
 In k8s the container filesystem is ephemeral, so a `codex login`-created
 `auth.json` is lost on restart. Either set `OPENAI_API_KEY` (re-materialized on
