@@ -170,17 +170,31 @@ every start) or mount `auth.json` as a Secret at `/root/.codex/auth.json`.
   this flag.
 - `stdin=DEVNULL` — an inherited stdin pipe makes codex block on "Reading
   additional input from stdin", hanging the turn until `TURN_TIMEOUT_SEC`.
-- `--sandbox` — always explicit, so the sandbox for model-run shell commands is
-  decided by `CODEX_SANDBOX`, not by whatever `config.toml` is present.
+- `--sandbox` — always explicit, so the sandbox *mode* for model-run shell commands
+  is decided by `CODEX_SANDBOX`, not by whatever `config.toml` is present (other
+  `config.toml` sandbox settings, e.g. `writable_roots`, still apply). Deployments
+  that set `sandbox_mode` in `config.toml` must move it to `CODEX_SANDBOX`.
 - `--` — ends option parsing, so a prompt or `sessionId` starting with `-`
-  (`--last`, `-c sandbox_mode=…`) is never read as a flag. `sessionId` is also
-  validated up front and rejected with `400` if it could look like one.
+  (`--last`, `-c sandbox_mode=…`) is never read as a flag. `sessionId` must be a
+  UUID (checked up front, `400` otherwise): codex also resolves free-form thread
+  names across all sessions in `CODEX_HOME`.
 - Environment — codex (and every shell command it runs) inherits only an
   allowlist: `PATH`, `HOME`, `USER`, `SHELL`, `TERM`, locale (`LANG`, `LC_*`),
-  `TMPDIR`, `CODEX_HOME`, `RUST_LOG`, `XDG_*`, CA bundles, `NODE_OPTIONS` and proxy
-  variables, plus anything named in `CODEX_ENV_PASSTHROUGH` (those names are also
-  blanked for the `claude` provider's CLI). `BEARER_SECRET` and provider API
-  keys are withheld; auth comes from `CODEX_HOME/auth.json`.
+  `TMPDIR`, `CODEX_HOME`, `RUST_LOG`, `XDG_*`, CA bundles (incl.
+  `CODEX_CA_CERTIFICATE`), `NODE_OPTIONS`, proxy variables and
+  `OPENAI_BASE_URL`/`OPENAI_ORGANIZATION`/`OPENAI_PROJECT`, plus anything named in
+  `CODEX_ENV_PASSTHROUGH` (those names are also blanked for the `claude` provider's
+  CLI). `BEARER_SECRET` and provider API keys are withheld; auth comes from
+  `CODEX_HOME/auth.json` (env credentials such as `CODEX_API_KEY` only if passed
+  through). `/readyz` therefore requires `auth.json` (or a passed-through env
+  credential): a bare `OPENAI_API_KEY` counts once startup has materialized it.
+- **Scope of the isolation:** this hides secrets from the CLI's *environment*
+  only. The CLIs and their tools run as the sidecar's uid, so a tool that can run
+  commands can still read `/proc/<sidecar pid>/environ`, other turns' MCP config
+  files and `CODEX_HOME/auth.json`. Run the CLIs under a separate uid to close it.
+  Static stdio MCP servers that need a key should get it from their `env` block in
+  `mcp.json`, not from the sidecar's environment (keys the sidecar withholds are
+  blanked for the claude CLI and its children).
 
 The codex runner enforces a 100 KB combined-prompt limit (system prompt + user
 prompt are concatenated, since the CLI has no separate system-prompt flag) to

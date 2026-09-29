@@ -26,8 +26,8 @@ async def readyz() -> JSONResponse:
             failures.append("codex binary not found on PATH")
         if not _codex_identity_ready(settings):
             failures.append(
-                "no codex identity (run `codex login` to create ~/.codex/auth.json, "
-                "or set OPENAI_API_KEY)"
+                "no codex identity (run `codex login`, or set OPENAI_API_KEY so startup "
+                "materializes ~/.codex/auth.json — check the codex.auth startup log)"
             )
     else:
         if not _binary_ready():
@@ -64,13 +64,21 @@ def _codex_binary_ready() -> bool:
     return shutil.which("codex") is not None
 
 
+# Env credentials codex reads at request time — only if passed through (allowlisted env).
+_CODEX_ENV_CREDENTIALS = ("OPENAI_API_KEY", "CODEX_API_KEY")
+
+
 def _codex_identity_ready(settings: Settings) -> bool:
     """True if the codex CLI will be able to authenticate.
 
-    Codex accepts an OPENAI_API_KEY env var (API key mode) or an OAuth state
-    file written by `codex login` at ~/.codex/auth.json (subscription mode).
+    codex runs with an allowlisted environment, so it authenticates from auth.json:
+    written by `codex login` (subscription) or materialized from OPENAI_API_KEY at
+    startup by ensure_codex_auth(). A bare OPENAI_API_KEY therefore only counts once
+    that file exists — if materialization failed, the pod must not report ready. An
+    env credential listed in CODEX_ENV_PASSTHROUGH also counts, since codex sees it.
     """
-    if os.environ.get("OPENAI_API_KEY"):
-        return True
     auth_path = settings.codex_auth_path or (Path.home() / ".codex" / "auth.json")
-    return auth_path.exists()
+    if auth_path.exists():
+        return True
+    passthrough = set(settings.codex_env_passthrough_names)
+    return any(os.environ.get(v) for v in _CODEX_ENV_CREDENTIALS if v in passthrough)

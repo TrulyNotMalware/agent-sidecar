@@ -33,10 +33,12 @@ def test_turn_token_reaches_the_cli_only_through_a_private_file(start_sidecar):
     assert wait_until(lambda: not Path(config["path"]).exists(), timeout=5)
 
 
-def test_cli_environment_does_not_carry_the_bearer_secret(start_sidecar):
-    srv = start_sidecar(mode="normal")
+def test_cli_environment_does_not_carry_sidecar_secrets(start_sidecar):
+    srv = start_sidecar(mode="normal", OPENAI_API_KEY="sk-openai-for-codex-only")
 
     r = converse(srv.port, "k-env")
     precondition(r.event_names == ["session", "text", "done"], f"turn failed: {r.events}")
 
-    assert "env BEARER_SECRET=unset" in _fake_messages(srv)
+    messages = _fake_messages(srv)
+    assert "env BEARER_SECRET=unset" in messages
+    assert "env OPENAI_API_KEY=unset" in messages

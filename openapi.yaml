@@ -173,12 +173,11 @@ components:
           type:
             - string
             - 'null'
-          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+          pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           description: |
-            Claude session id from a prior `session` event. When provided,
-            resumes that conversation; when null, starts fresh under sessionKey.
-            Must start with an alphanumeric character (a leading `-` would be
-            parsed as a CLI flag); other values are rejected with `400`.
+            Session id (a UUID) from a prior `session` event. When provided,
+            resumes that conversation; when null or `""`, starts fresh under
+            sessionKey. Anything that is not a UUID is rejected with `400`.
         systemPrompt:
           type:
             - string

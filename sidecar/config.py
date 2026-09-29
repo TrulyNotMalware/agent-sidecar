@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     shutdown_grace_sec: int = Field(default=10, ge=1)
 
     anthropic_mode: Literal["subscription", "api"] = "subscription"
-    anthropic_api_key: str | None = None
+    anthropic_api_key: SecretStr | None = None
 
     workspace_root: Path = Path("/var/lib/claude-sidecar/sessions")
     claude_md_path: Path | None = None
@@ -44,6 +44,13 @@ class Settings(BaseSettings):
 
     tracing_enabled: bool = False
     otel_service_name: str = "claude-sidecar"
+
+    @field_validator("bearer_secret", mode="before")
+    @classmethod
+    def _strip_bearer_secret(cls, v: object) -> object:
+        # A k8s Secret made with `echo` / --from-file often ends in "\n"; the incoming
+        # token is stripped, so an unstripped secret would 401 every request.
+        return v.strip() if isinstance(v, str) else v
 
     @property
     def codex_env_passthrough_names(self) -> tuple[str, ...]:

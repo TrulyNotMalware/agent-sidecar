@@ -333,6 +333,11 @@ async def test_dash_prefixed_prompt_and_session_id_are_not_parsed_as_flags(monke
     await _collect(prompt="-csandbox_mode=danger-full-access", resume_session_id="sess-1")
     assert calls["cmd"][-4:] == ["resume", "--", "sess-1", "-csandbox_mode=danger-full-access"]
 
+    # Words that would otherwise be parsed as codex subcommands stay prompts too.
+    for word in ("resume", "help"):
+        await _collect(prompt=word)
+        assert calls["cmd"][-2:] == ["--", word]
+
 
 async def test_sandbox_is_always_explicit(monkeypatch):
     lines = [_line({"type": "turn.completed", "usage": {}})]
@@ -361,6 +366,8 @@ async def test_child_env_withholds_sidecar_secrets(monkeypatch):
         "PATH": "/usr/bin",
         "HTTPS_PROXY": "http://proxy:3128",
         "LC_ALL": "C.UTF-8",
+        "CODEX_CA_CERTIFICATE": "/etc/ssl/corp.pem",
+        "OPENAI_BASE_URL": "https://gateway.internal/v1",
         "CUSTOM_PROVIDER_KEY": "k",
         "UNRELATED": "x",
     }.items():
@@ -383,6 +390,8 @@ async def test_child_env_withholds_sidecar_secrets(monkeypatch):
     assert env["PATH"] == "/usr/bin"
     assert env["HTTPS_PROXY"] == "http://proxy:3128"
     assert env["LC_ALL"] == "C.UTF-8"
+    assert env["CODEX_CA_CERTIFICATE"] == "/etc/ssl/corp.pem"
+    assert env["OPENAI_BASE_URL"] == "https://gateway.internal/v1"
     assert env["CUSTOM_PROVIDER_KEY"] == "k"
 
 

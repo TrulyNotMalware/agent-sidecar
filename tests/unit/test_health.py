@@ -111,11 +111,22 @@ def test_readyz_codex_200_when_all_good(client, monkeypatch):
     assert r.json()["status"] == "ok"
 
 
-def test_codex_identity_ready_with_api_key(monkeypatch, tmp_path):
+def test_codex_api_key_alone_is_not_ready_until_auth_json_exists(monkeypatch, tmp_path):
+    # codex's env is allowlisted: the key only works once startup materialized auth.json.
     from sidecar.routes.health import _codex_identity_ready
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     s = _codex_settings(codex_auth_path=tmp_path / "missing.json")
+    assert _codex_identity_ready(s) is False
+
+
+def test_codex_env_credential_counts_when_passed_through(monkeypatch, tmp_path):
+    from sidecar.routes.health import _codex_identity_ready
+
+    monkeypatch.setenv("CODEX_API_KEY", "ck-test")
+    s = _codex_settings(
+        codex_auth_path=tmp_path / "missing.json", codex_env_passthrough="CODEX_API_KEY"
+    )
     assert _codex_identity_ready(s) is True
 
 

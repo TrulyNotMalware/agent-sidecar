@@ -186,12 +186,21 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   NDJSON event stream. `--skip-git-repo-check` is required because session
   workspaces are plain scratch dirs (not git repos); `stdin=DEVNULL` stops codex
   from blocking on "Reading additional input from stdin". `--sandbox` is always
-  explicit so a `config.toml` cannot loosen it.
+  explicit, so a `config.toml` cannot change the sandbox *mode* (its other sandbox
+  settings, e.g. `writable_roots`, still apply). A `config.toml` that relied on
+  `sandbox_mode = "danger-full-access"` must now set `CODEX_SANDBOX` instead.
 - The prompt (and resume id) follow `--`, so a value starting with `-` is never
-  parsed as a flag. `sessionId` is also validated (`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`).
+  parsed as a flag. `sessionId` must be a UUID (codex also resolves free-form thread
+  names across sessions, so names are refused).
 - codex gets an **allowlisted** environment (`PATH`, `HOME`, `CODEX_HOME`, locale,
-  proxy and CA variables, plus `CODEX_ENV_PASSTHROUGH`); `BEARER_SECRET` and
-  provider API keys are withheld from it and from the shell commands it runs.
+  proxy and CA variables, `OPENAI_BASE_URL`/`OPENAI_ORGANIZATION`/`OPENAI_PROJECT`,
+  plus `CODEX_ENV_PASSTHROUGH`); `BEARER_SECRET` and provider API keys are withheld
+  from its environment and from the shell commands it runs. Env-based codex
+  credentials (`CODEX_API_KEY`, …) only work if listed in `CODEX_ENV_PASSTHROUGH`.
+- This is **environment-only** isolation: the CLIs run as the sidecar's uid, so a
+  tool that can run commands can still read `/proc/<sidecar pid>/environ`, other
+  turns' MCP config files and `CODEX_HOME/auth.json`. Closing that needs a separate
+  uid for the CLIs (tracked with the agent tool-policy work).
 - Auth: `OPENAI_API_KEY`, or a `~/.codex/auth.json` written by `codex login`
   (`CODEX_AUTH_PATH` overrides the location). codex-cli does **not** read
   `OPENAI_API_KEY` at request time, so on startup (FastAPI lifespan, when
@@ -389,8 +398,12 @@ async with stateless_workspace(parent=settings.workspace_root) as ws:
 
 ## Adding a New Provider
 
-1. Create `sidecar/<name>_runner.py` implementing async `run_turn()` with the same signature
-   and yielding the same event union types as `claude_runner.py`.
+1. Create `sidecar/<name>_runner.py` implementing async `run_turn()` with the same common
+   keyword arguments and yielding the same event union types as `claude_runner.py`.
+   Do not add a timeout: the turn cancels the task iterating the generator once, and the
+   runner must close its CLI on the way out (`contextlib.aclosing` around every inner
+   generator). Provider-specific options are bound in `_get_runner()` with
+   `functools.partial`.
 2. Add the provider name to `PROVIDER` docs in `config.py`.
 3. Extend `_readyz_checks()` in `sidecar/routes/health.py`.
 4. Wire the runner in `sidecar/routes/converse.py` (`_get_runner()`).

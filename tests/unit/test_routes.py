@@ -206,3 +206,23 @@ def test_terminal_error_mapping():
         "runner ended without a result",
     )
     assert _terminal_error(TurnEnded(None, ValueError("x")), 90) == ("internal", "ValueError: x")
+
+
+def test_codex_runner_gets_sandbox_and_passthrough_bound():
+    from sidecar.config import Settings
+    from sidecar.routes.converse import _get_runner
+
+    runner = _get_runner(
+        Settings(
+            _env_file=None,
+            bearer_secret="x",
+            provider="codex",
+            codex_sandbox="workspace-write",
+            codex_env_passthrough="AZURE_OPENAI_KEY",
+        )
+    )
+
+    assert runner.keywords == {
+        "sandbox": "workspace-write",
+        "env_passthrough": ("AZURE_OPENAI_KEY",),
+    }
