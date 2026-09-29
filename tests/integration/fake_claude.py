@@ -8,6 +8,8 @@ credentials. Behaviour is selected by environment variables:
     FAKE_SLEEP         seconds used by slow / hang (default 3600)
     FAKE_IGNORE_TERM   "1" to ignore SIGTERM (simulates a CLI stuck in a tool)
     FAKE_LOG           file receiving one "<ts> pid=<pid> <msg>" line per lifecycle step
+    FAKE_MAX_LIFETIME  hard self-destruct in seconds (default 120) so a killed test
+                       run never leaves an hour-long hang-mode process behind
 """
 
 import json
@@ -68,7 +70,8 @@ def main() -> int:
     mode = os.environ.get("FAKE_CLAUDE_MODE", "normal")
     sleep_s = float(os.environ.get("FAKE_SLEEP", "3600"))
     signal.signal(signal.SIGTERM, _on_term)
-    log(f"start mode={mode}")
+    signal.alarm(int(os.environ.get("FAKE_MAX_LIFETIME", "120")))  # SIGALRM: not ignorable here
+    log(f"start mode={mode} argv={json.dumps(sys.argv[1:])}")
 
     # SDK handshake: one control request (initialize), then the user message.
     request = json.loads(sys.stdin.readline())

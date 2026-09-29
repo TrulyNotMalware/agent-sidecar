@@ -270,9 +270,11 @@ pytest tests/ -m "not integration"    # fast unit-only loop
 
 `tests/integration/` starts the real server per test with the SDK pointed at
 `tests/integration/fake_claude.py`, so cancel / disconnect / timeout / SIGTERM
-behaviour is exercised end to end without credentials. Tests marked
-`known_bug(...)` reproduce open `review.md` findings as strict xfails — the fix
-for a finding must remove its marker.
+behaviour is exercised end to end without credentials (the child gets a temp
+`HOME` and an allowlisted env). Tests marked `known_bug(...)` reproduce open bugs
+as strict xfails (finding ID first in the reason) — the fix for a bug must remove
+its marker. Setup steps use `precondition()` so a broken harness fails the run
+instead of passing as the known bug.
 
 Or via the helper script:
 ```bash
