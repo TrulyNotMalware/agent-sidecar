@@ -5,7 +5,8 @@
 // reason for being. Build with the bundled build.gradle.kts.
 //
 // Usage:
-//   BEARER_SECRET=... ./gradlew run --args='hello'
+//   BEARER_SECRET=... gradle run --args='hello'
+//   (or `gradle wrapper` once, then ./gradlew run --args='hello')
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO

@@ -5,9 +5,11 @@ own task (sidecar.turn); the finding ID is in the comment above the test. Setup 
 use precondition()/BackgroundConverse so a broken harness fails the run loudly.
 """
 
+import json
 import shutil
 import signal
 import time
+from pathlib import Path
 
 import pytest
 
@@ -178,3 +180,16 @@ def test_end_of_stream_means_the_session_key_is_free(start_sidecar, mode, termin
     assert not pid_alive(cli_pid)  # the stream ended only once the CLI had exited
     second = converse(srv.port, "k-chain", read_timeout=3, disconnect_after=1)
     assert second.status == 200
+
+
+def test_stateless_workspace_lives_under_workspace_root_and_is_removed(start_sidecar, tmp_path):
+    srv = start_sidecar(mode="normal")
+
+    r = converse(srv.port, "k-stateless", mode="stateless")
+    precondition(r.terminal_events == ["done"], f"turn failed: {r.events}")
+
+    [cwd_line] = [m for _p, m in srv.fake_log_lines() if m.startswith("cwd=")]
+    cwd = Path(json.loads(cwd_line.removeprefix("cwd=")))
+    [root] = tmp_path.glob("server-*/ws")
+    assert cwd.resolve().is_relative_to((root / ".stateless").resolve())
+    assert not cwd.exists()

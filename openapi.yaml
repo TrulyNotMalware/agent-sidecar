@@ -30,8 +30,11 @@ paths:
 
         Event order: exactly one `session` event first, then zero or more of
         `text` / `tool_use` / `tool_result`, then exactly one terminal event of
-        either `done` or `error`. `:keep-alive` SSE comments may appear at any
-        time and should be ignored by clients.
+        either `done` or `error`. If the turn fails before the CLI reports its
+        session (e.g. a concurrency limit hit in the race after the preflight
+        check, or the CLI failing to start), the stream is a single `error`
+        with no `session`. `:keep-alive` SSE comments may appear at any time and
+        should be ignored by clients.
       operationId: converse
       parameters:
         - name: X-User-Id
@@ -80,7 +83,7 @@ paths:
 
   /v1/sessions/{sessionKey}/cancel:
     post:
-      summary: Cancel an in-flight turn for a sessionKey.
+      summary: Cancel an in-flight turn for a sessionKey (may contain "/").
       description: |
         Cancels the in-flight turn (if any) for the given `sessionKey`. Its
         stream ends right away with `event: error` (`code: cancelled`); the
@@ -194,7 +197,8 @@ components:
             - 'null'
           description: |
             Per-request system prompt fragment **appended** to the static
-            CLAUDE.md base, joined by a blank line. Ignored when
+            CLAUDE.md base, joined by a blank line (used alone when there is no
+            CLAUDE.md; an empty string counts as unset). Ignored when
             `systemPrompt` is provided.
         mode:
           type: string
@@ -377,6 +381,11 @@ components:
             $ref: '#/components/schemas/Error'
     Unauthorized:
       description: Bearer token missing or invalid.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer
       content:
         application/json:
           schema:

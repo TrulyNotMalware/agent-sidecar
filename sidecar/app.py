@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from .codex_runner import ensure_codex_auth
 from .concurrency import ConcurrencyGate
 from .config import get_settings
-from .errors import ErrorCode
+from .errors import ApiError, ErrorCode
 from .inflight import InflightRegistry
 from .observability.logging import configure_logging, get_logger
 from .routes import cancel, converse, health, metrics
@@ -44,6 +44,17 @@ def create_app() -> FastAPI:
     app.include_router(metrics.router)
     app.include_router(cancel.router)
     app.include_router(converse.router)
+
+    # Every error body on the wire is {"code", "message"} (openapi `Error`), whether it
+    # comes from a dependency (auth), a route (cancel 404) or validation (400).
+    @app.exception_handler(ApiError)
+    async def _api_error_handler(_request: Request, exc: ApiError):
+        headers = {"WWW-Authenticate": "Bearer"} if exc.code is ErrorCode.UNAUTHORIZED else None
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"code": exc.code.value, "message": exc.message},
+            headers=headers,
+        )
 
     @app.exception_handler(RequestValidationError)
     async def _validation_handler(_request: Request, exc: RequestValidationError):

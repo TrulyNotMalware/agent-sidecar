@@ -281,6 +281,9 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `cancelled` | 499 | Graceful cancel acknowledged |
 
 The **HTTP** column is the canonical mapping in `errors.py` (`ApiError.status_code`).
+Every JSON error body is `{"code": ..., "message": ...}` (one `ApiError` handler in
+`app.py`; validation errors are mapped to `bad_request`); `401` also sends
+`WWW-Authenticate: Bearer`.
 On `/v1/converse` only pre-stream errors are sent with that status and a JSON body:
 `bad_request`, `unauthorized`, and `busy` (plus `not_found` on `/cancel`). Once the
 SSE stream has opened the response is already HTTP 200, so `timeout`, `sdk_error`,
@@ -417,7 +420,7 @@ turn.cancel_event.set()              # same, from the cancel route / drain()
 ```python
 workspace_for(session_key, root=settings.workspace_root)  # → Path (deterministic SHA-256 shard)
 
-async with stateless_workspace(parent=settings.workspace_root) as ws:
+with stateless_workspace(parent=settings.workspace_root / ".stateless") as ws:
     ...  # tempdir, auto-deleted on exit
 ```
 

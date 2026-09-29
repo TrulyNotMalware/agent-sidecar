@@ -1,3 +1,6 @@
+import pytest
+
+
 def _install_recording_runner(monkeypatch):
     """Swap the runner accessor for a fake async generator that records kwargs.
 
@@ -55,6 +58,9 @@ def test_absent_turn_token_reaches_runner_as_none(client, monkeypatch):
 def test_converse_requires_bearer(client):
     r = client.post("/v1/converse", json={"sessionKey": "k", "prompt": "hi"})
     assert r.status_code == 401
+    # Same {"code", "message"} shape as every other error (openapi `Error`).
+    assert r.json() == {"code": "unauthorized", "message": "missing bearer token"}
+    assert r.headers["www-authenticate"] == "Bearer"
 
 
 def test_converse_rejects_wrong_bearer(client):
@@ -277,3 +283,48 @@ def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path):
 
     remember_session_id("k", sid, root=tmp_path)
     assert _preflight_resume(body, codex) is None
+
+
+@pytest.mark.parametrize(
+    ("header", "limit"), [("X-User-Id", 256), ("X-Turn-Token", 4096)]
+)
+def test_header_length_limits_from_the_contract_are_enforced(client, header, limit):
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k", "prompt": "hi"},
+        headers={"Authorization": "Bearer test-secret", header: "x" * (limit + 1)},
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "bad_request"
+
+
+def test_system_prompt_replaces_claude_md_without_reading_it(tmp_path):
+    from sidecar.routes.converse import _merge_system_prompt
+
+    unreadable = tmp_path / "CLAUDE.md"
+    unreadable.mkdir()  # reading it would raise IsADirectoryError
+
+    assert _merge_system_prompt(
+        base_path=unreadable, system_prompt="only this", append_system_prompt="ignored"
+    ) == "only this"
+
+
+def test_append_system_prompt_follows_the_documented_join(tmp_path):
+    from sidecar.routes.converse import _merge_system_prompt
+
+    base = tmp_path / "CLAUDE.md"
+    base.write_text("BASE\n")
+
+    assert _merge_system_prompt(
+        base_path=base, system_prompt=None, append_system_prompt="MORE"
+    ) == "BASE\n\n\nMORE"
+    assert _merge_system_prompt(
+        base_path=None, system_prompt=None, append_system_prompt="MORE"
+    ) == "MORE"
+    assert _merge_system_prompt(
+        base_path=base, system_prompt=None, append_system_prompt=None
+    ) == "BASE\n"
+    assert (
+        _merge_system_prompt(base_path=None, system_prompt=None, append_system_prompt=None)
+        is None
+    )

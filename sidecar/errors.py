@@ -24,10 +24,6 @@ _HTTP_STATUS = {
 }
 
 
-def http_status_for(code: ErrorCode) -> int:
-    return _HTTP_STATUS[code]
-
-
 class ApiError(Exception):
     def __init__(self, code: ErrorCode, message: str) -> None:
         self.code = code
@@ -36,4 +32,4 @@ class ApiError(Exception):
 
     @property
     def status_code(self) -> int:
-        return http_status_for(self.code)
+        return _HTTP_STATUS[self.code]

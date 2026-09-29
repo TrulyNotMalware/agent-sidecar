@@ -12,7 +12,7 @@ def test_cancel_unknown_session_returns_404(client):
         headers={"Authorization": "Bearer test-secret"},
     )
     assert r.status_code == 404
-    assert r.json()["detail"]["code"] == "not_found"
+    assert r.json() == {"code": "not_found", "message": "no active turn for sessionKey"}
 
 
 def test_cancel_requires_bearer(client):
@@ -64,3 +64,31 @@ async def test_cancel_active_sets_event_and_returns_202(app):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_key", ["team/task", "team%2Ftask"])
+async def test_session_key_with_a_slash_can_be_cancelled(app, path_key):
+    from httpx import ASGITransport, AsyncClient
+
+    from sidecar.inflight import InflightRegistry
+
+    if not hasattr(app.state, "inflight"):
+        app.state.inflight = InflightRegistry()
+    cancel_event = asyncio.Event()
+    task = asyncio.create_task(cancel_event.wait())
+    handle = InflightHandle(
+        session_key="team/task", user_id=None, cancel_event=cancel_event, task=task
+    )
+    await app.state.inflight.register(handle)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as ac:
+            r = await ac.post(
+                f"/v1/sessions/{path_key}/cancel",
+                headers={"Authorization": "Bearer test-secret"},
+            )
+        assert r.status_code == 202
+        assert cancel_event.is_set()
+    finally:
+        await app.state.inflight.unregister("team/task", handle)
+        task.cancel()

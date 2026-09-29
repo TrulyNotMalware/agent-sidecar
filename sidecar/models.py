@@ -40,7 +40,3 @@ class HealthStatus(BaseModel):
     status: Literal["ok", "degraded", "error"]
     detail: str | None = None
 
-
-class ApiErrorBody(BaseModel):
-    code: str
-    message: str

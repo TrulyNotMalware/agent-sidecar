@@ -15,13 +15,17 @@ Domain decoupling is intentional. The sidecar knows nothing about Slack, meeting
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-BEARER_SECRET=$(openssl rand -hex 32) .venv/bin/python -m sidecar
+export BEARER_SECRET=$(openssl rand -hex 32)
+echo "$BEARER_SECRET"   # the client needs the same value
+.venv/bin/python -m sidecar
 ```
 
-Default bind is `127.0.0.1:7300`. From another terminal:
+Default bind is `127.0.0.1:7300`. From another terminal (with the same secret):
 
 ```bash
+export BEARER_SECRET=<value printed above>
 curl -N -H "Authorization: Bearer $BEARER_SECRET" \
+     -H "Content-Type: application/json" \
      -H "Accept: text/event-stream" \
      -d '{"sessionKey":"demo","prompt":"hello"}' \
      http://127.0.0.1:7300/v1/converse
@@ -96,7 +100,7 @@ Minimal clients in three languages under [`examples/`](examples/):
 
 - [`examples/python/client.py`](examples/python/client.py) — httpx + manual SSE
 - [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/Client.kt`](examples/kotlin/Client.kt) — Ktor client + SSE plugin (coroutines)
+- [`examples/kotlin/src/main/kotlin/Client.kt`](examples/kotlin/src/main/kotlin/Client.kt) — Ktor client + SSE plugin (coroutines); `gradle run --args='hello'`
 
 Each is ~50 lines; the contract is meant to be trivial to adopt.
 
@@ -158,13 +162,17 @@ Anthropic의 **Claude Agent SDK**는 TypeScript와 Python 라이브러리만 제
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-BEARER_SECRET=$(openssl rand -hex 32) .venv/bin/python -m sidecar
+export BEARER_SECRET=$(openssl rand -hex 32)
+echo "$BEARER_SECRET"   # 클라이언트도 같은 값을 써야 합니다
+.venv/bin/python -m sidecar
 ```
 
-기본 `127.0.0.1:7300`에 바인딩됩니다. 다른 터미널에서:
+기본 `127.0.0.1:7300`에 바인딩됩니다. 다른 터미널에서 (같은 시크릿으로):
 
 ```bash
+export BEARER_SECRET=<위에서 출력된 값>
 curl -N -H "Authorization: Bearer $BEARER_SECRET" \
+     -H "Content-Type: application/json" \
      -H "Accept: text/event-stream" \
      -d '{"sessionKey":"demo","prompt":"안녕"}' \
      http://127.0.0.1:7300/v1/converse
@@ -237,7 +245,7 @@ SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` 
 
 - [`examples/python/client.py`](examples/python/client.py) — httpx + 수동 SSE
 - [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/Client.kt`](examples/kotlin/Client.kt) — Ktor 클라이언트 + SSE 플러그인 (코루틴)
+- [`examples/kotlin/src/main/kotlin/Client.kt`](examples/kotlin/src/main/kotlin/Client.kt) — Ktor 클라이언트 + SSE 플러그인 (코루틴); `gradle run --args='안녕'`
 
 각 50줄 내외. 계약 자체가 단순해서 도입 비용이 낮습니다.
 

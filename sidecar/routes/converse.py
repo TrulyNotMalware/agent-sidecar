@@ -47,8 +47,8 @@ _SEND_TIMEOUT_SEC = 30
 async def converse(
     body: ConverseRequest,
     request: Request,
-    x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
-    x_turn_token: Annotated[str | None, Header(alias="X-Turn-Token")] = None,
+    x_user_id: Annotated[str | None, Header(alias="X-User-Id", max_length=256)] = None,
+    x_turn_token: Annotated[str | None, Header(alias="X-Turn-Token", max_length=4096)] = None,
 ) -> EventSourceResponse | JSONResponse:
     settings = get_settings()
     gate = request.app.state.gate
@@ -120,7 +120,8 @@ async def converse(
 
     def workspace() -> AbstractContextManager[Path]:
         if body.mode == "stateless":
-            return stateless_workspace()
+            # Under WORKSPACE_ROOT (a volume in k8s), not the container's /tmp.
+            return stateless_workspace(parent=settings.workspace_root / ".stateless")
         return nullcontext(workspace_for(body.session_key, root=settings.workspace_root))
 
     state = _StreamState()
@@ -299,13 +300,13 @@ def _merge_system_prompt(
     system_prompt: str | None,
     append_system_prompt: str | None,
 ) -> str | None:
+    if system_prompt is not None:
+        return system_prompt  # replaces CLAUDE.md entirely: don't even read it
     base = ""
     if base_path is not None and base_path.exists():
         base = base_path.read_text(encoding="utf-8")
-    if system_prompt is not None:
-        return system_prompt
-    if append_system_prompt is not None:
-        return f"{base}\n\n{append_system_prompt}".strip() or None
+    if append_system_prompt:
+        return f"{base}\n\n{append_system_prompt}" if base else append_system_prompt
     return base or None
 
 

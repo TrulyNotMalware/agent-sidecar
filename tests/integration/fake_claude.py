@@ -73,6 +73,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_term)
     signal.alarm(int(os.environ.get("FAKE_MAX_LIFETIME", "120")))  # SIGALRM: not ignorable here
     log(f"start mode={mode} argv={json.dumps(sys.argv[1:])}")
+    log(f"cwd={json.dumps(os.getcwd())}")
     for name in ("BEARER_SECRET", "OPENAI_API_KEY"):
         log(f"env {name}={'set' if os.environ.get(name) else 'unset'}")
     if "--mcp-config" in sys.argv:
