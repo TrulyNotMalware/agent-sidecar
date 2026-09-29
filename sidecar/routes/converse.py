@@ -34,6 +34,8 @@ from ..turn import StopReason, Turn, TurnEnded, TurnStopped
 router = APIRouter()
 log = get_logger("sidecar.converse")
 
+_SEND_TIMEOUT_SEC = 30
+
 
 @router.post("/v1/converse", dependencies=[Depends(require_bearer)], response_model=None)
 async def converse(
@@ -122,6 +124,8 @@ async def converse(
     return EventSourceResponse(
         _event_stream(turn, open_runner, workspace, shutdown, settings, body.session_key, state),
         ping=15,
+        # A client that stops reading must not hold the connection forever.
+        send_timeout=_SEND_TIMEOUT_SEC,
         shutdown_event=shutdown,
         shutdown_grace_period=settings.shutdown_grace_sec,
         client_close_handler_callable=on_client_close,
@@ -170,6 +174,9 @@ async def _event_stream(
     get: asyncio.Future | None = None
     outcome: str | None = None  # "ok" or the error code of the terminal frame sent
     turn.start(open_runner, workspace)
+    # After `done` the stream stays open, sending nothing, until TurnEnded: the CLI has
+    # exited and the sessionKey / user slot are free again. End of stream therefore
+    # means "a new turn on this sessionKey will be accepted" (no 429 window).
     try:
         while True:
             get = asyncio.ensure_future(turn.events.get())
@@ -181,6 +188,8 @@ async def _event_stream(
                 done, _ = await asyncio.wait({get}, timeout=drain_deadline - loop.time())
             if get not in done:
                 get.cancel()
+                if outcome == "ok":
+                    return  # shutting down while the CLI winds down; drain() covers it
                 if drain_deadline is None:
                     # Shutting down: give the turn most of the grace period to finish.
                     drain_deadline = loop.time() + drain_budget
@@ -190,6 +199,10 @@ async def _event_stream(
                 continue
 
             item = get.result()
+            if outcome == "ok":
+                if isinstance(item, TurnEnded):
+                    return
+                continue  # never a second terminal: the turn logs what happens after done
             if isinstance(item, TurnStopped | TurnEnded):
                 code, message = _terminal_error(item, settings.turn_timeout_sec)
                 outcome = code
@@ -198,11 +211,8 @@ async def _event_stream(
                 return
             yield _to_sse(item)
             if isinstance(item, DoneEvent):
-                # The client has its answer. Anything the runner reports while it
-                # winds down is logged by the turn, never sent as a second terminal.
                 outcome = "ok"
                 state.done_delivered = True
-                return
     finally:
         # No awaits here: this may run inside an already-cancelled task group.
         shutdown_wait.cancel()

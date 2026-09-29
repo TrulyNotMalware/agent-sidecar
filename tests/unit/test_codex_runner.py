@@ -295,7 +295,7 @@ async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
             mcp_server_url="https://app.example/mcp",
             mcp_server_name="codecompanion",
             turn_token="tok-xyz",
-            )
+        )
     ]
 
     assert events[-1].__class__ is DoneEvent

@@ -252,7 +252,7 @@ Metrics:
 
 | Name | Type | Labels |
 |---|---|---|
-| `sidecar_requests_total` | counter | `outcome` ∈ `{ok, busy, timeout, sdk_error, internal, cancelled}` |
+| `sidecar_requests_total` | counter | `outcome` ∈ `{ok, busy, timeout, sdk_error, internal, cancelled, bad_request}` |
 | `sidecar_request_duration_seconds` | histogram | `outcome` |
 | `sidecar_inflight` | gauge | — (turns holding a slot, including the time spent closing their CLI) |
 | `sidecar_tool_calls_total` | counter | `tool_name`, `outcome` ∈ `{started, ok, error}` |
@@ -300,6 +300,11 @@ closing the CLI before the reservation is released. Consequences:
 - **Exactly one terminal frame.** Anything the runner reports after `done` (e.g. a
   non-zero exit while the CLI shuts down) is logged, not sent; a runner that ends
   without a result gets `error: sdk_error`.
+- **End of stream means the sessionKey is free.** After `done` the stream stays open,
+  sending nothing, until the CLI has exited (usually milliseconds). A client that
+  waits for end-of-stream and then sends the next turn on the same `sessionKey` or
+  `X-User-Id` is accepted, not rejected with `429`. Clients that act on `done`
+  immediately may still see `429` for that short window.
 
 ## Shutdown
 
@@ -313,10 +318,12 @@ closing the CLI before the reservation is released. Consequences:
      still closing their CLI, then force-cancels any survivors (logged as
      `shutdown.forced_cancel`; a forced turn may leave its CLI behind, which the
      container runtime reaps when PID 1 exits).
-- Worst case the process needs about `SHUTDOWN_GRACE_SEC` + 15 s. Keep
-  `terminationGracePeriodSeconds` at least that long (the default 30 s fits the
-  default `SHUTDOWN_GRACE_SEC=10`), or k8s SIGKILLs the pod while CLIs are being
-  closed.
+- Worst case the process needs about `SHUTDOWN_GRACE_SEC` + 15 s. As a native
+  sidecar (k8s ≥ 1.29) it receives SIGTERM only after the app container has
+  exited, out of the same `terminationGracePeriodSeconds`, so size that as app
+  shutdown time + `SHUTDOWN_GRACE_SEC` + 15 s (the default 30 s fits an app that
+  stops quickly and the default `SHUTDOWN_GRACE_SEC=10`); otherwise k8s SIGKILLs
+  the pod while CLIs are being closed.
 
 ## Operational gotchas
 

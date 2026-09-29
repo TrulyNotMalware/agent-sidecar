@@ -123,10 +123,9 @@ def test_sigterm_mid_turn_ends_stream_with_terminal_frame(start_sidecar):
     r = bg.result(timeout=30)
     srv.proc.wait(30)
 
+    # ~4s of turn left, 7s of grace: the turn must complete normally.
     assert r.terminated
-    assert r.terminal_events in (["done"], ["error"])
-    if r.terminal_events == ["error"]:
-        assert r.events[-1][1]["code"] == "cancelled"
+    assert r.terminal_events == ["done"]
     assert wait_until(lambda: not srv.alive_cli_pids(), timeout=5)
 
 
@@ -161,3 +160,21 @@ def test_sigterm_past_grace_sends_cancelled_and_closes_cli(start_sidecar):
     # Lifespan shutdown waits for the turn to close its CLI before the process exits.
     assert srv.proc.wait(30) is not None
     assert not pid_alive(cli_pid)
+
+
+# End of stream means the sessionKey is free: a client chaining turns must not get 429.
+@pytest.mark.parametrize(
+    ("mode", "terminal"),
+    [("result_then_linger", "done"), ("error_result_then_linger", "error")],
+)
+def test_end_of_stream_means_the_session_key_is_free(start_sidecar, mode, terminal):
+    srv = start_sidecar(mode=mode, FAKE_SLEEP="1.5")
+
+    first = converse(srv.port, "k-chain")
+    precondition(first.terminated, f"first stream not terminated: {first.events}")
+    [cli_pid] = srv.cli_pids()
+
+    assert first.terminal_events == [terminal]
+    assert not pid_alive(cli_pid)  # the stream ended only once the CLI had exited
+    second = converse(srv.port, "k-chain", read_timeout=3, disconnect_after=1)
+    assert second.status == 200

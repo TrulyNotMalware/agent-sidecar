@@ -141,6 +141,8 @@ class Turn:
                 session_key=self.session_key,
                 stop_reason=self._stop_reason,
                 error_type=type(error).__name__ if error else None,
+                error_code=error.code.value if isinstance(error, ApiError) else None,
+                error_message=error.message if isinstance(error, ApiError) else None,
                 duration_seconds=round(time.perf_counter() - started, 3),
             )
 

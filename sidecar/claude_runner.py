@@ -115,12 +115,19 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
     final_text_parts: list[str] = []
     pending_tool_names: dict[str, str] = {}
     session_emitted = False
+    # An error result is raised only after the SDK stream ends: raising inside the loop
+    # would aclose() the public query() at its yield, and its inner generator (which
+    # closes the CLI) would be finalized later in a detached task — releasing the
+    # turn's reservation while the CLI still runs.
+    result_error: ApiError | None = None
 
     try:
         # aclosing: closing this generator must close the SDK's query() (and so
         # the CLI) right away, in this task — not whenever the GC gets to it.
         async with contextlib.aclosing(query(prompt=prompt, options=options)) as messages:
             async for message in messages:
+                if result_error is not None:
+                    continue
                 if not session_emitted:
                     sid = _extract_session_id(message)
                     if sid:
@@ -156,7 +163,10 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
                         errs = getattr(message, "errors", None) or [
                             getattr(message, "stop_reason", None) or "claude reported error"
                         ]
-                        raise ApiError(ErrorCode.SDK_ERROR, "; ".join(str(e) for e in errs))
+                        result_error = ApiError(
+                            ErrorCode.SDK_ERROR, "; ".join(str(e) for e in errs)
+                        )
+                        continue
                     final_text = (
                         getattr(message, "result", None) or "".join(final_text_parts)
                     )
@@ -174,6 +184,8 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
         raise
     except Exception as exc:
         raise ApiError(ErrorCode.SDK_ERROR, f"{type(exc).__name__}: {exc}") from exc
+    if result_error is not None:
+        raise result_error
 
 
 def _extract_session_id(message: Any) -> str | None:

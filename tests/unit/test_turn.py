@@ -122,6 +122,7 @@ async def test_cancel_event_stops_the_turn():
     turn.cancel_event.set()
 
     assert await _next(turn) == TurnStopped("cancelled")
+    await _until_ended(turn)
 
 
 async def test_busy_session_key_ends_the_turn_without_opening_the_runner():

@@ -4,7 +4,8 @@ The integration harness points the real SDK at this script so turn lifecycle
 (cancel, disconnect, timeout, shutdown) can be exercised without a model or
 credentials. Behaviour is selected by environment variables:
 
-    FAKE_CLAUDE_MODE   normal | slow | hang | result_then_fail | no_result
+    FAKE_CLAUDE_MODE   normal | slow | hang | result_then_fail | no_result |
+                       result_then_linger | error_result_then_linger
     FAKE_SLEEP         seconds used by slow / hang (default 3600)
     FAKE_IGNORE_TERM   "1" to ignore SIGTERM (simulates a CLI stuck in a tool)
     FAKE_LOG           file receiving one "<ts> pid=<pid> <msg>" line per lifecycle step
@@ -40,13 +41,13 @@ def assistant(text: str) -> None:
     })
 
 
-def result() -> None:
+def result(is_error: bool = False) -> None:
     out({
         "type": "result",
-        "subtype": "success",
+        "subtype": "error_during_execution" if is_error else "success",
         "duration_ms": 1,
         "duration_api_ms": 1,
-        "is_error": False,
+        "is_error": is_error,
         "num_turns": 1,
         "session_id": SESSION_ID,
         "result": "final",
@@ -107,6 +108,11 @@ def main() -> int:
             return 1
         elif mode == "no_result":
             assistant("hello")
+        elif mode in ("result_then_linger", "error_result_then_linger"):
+            # The CLI keeps running after its result (session flush, MCP shutdown).
+            assistant("hello")
+            result(is_error=mode.startswith("error"))
+            time.sleep(sleep_s)
         else:
             log(f"unknown mode {mode}")
             return 2

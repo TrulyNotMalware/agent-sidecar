@@ -309,7 +309,10 @@ components:
 
     SseDone:
       type: object
-      description: Turn completed successfully. Terminal event; no further events follow.
+      description: |
+        Turn completed successfully. Terminal event; no further events follow. The
+        stream may stay open briefly after `done` while the CLI exits: end of stream
+        means the sessionKey is free for the next turn (no `429`).
       required: [finalText, usage]
       additionalProperties: false
       properties:

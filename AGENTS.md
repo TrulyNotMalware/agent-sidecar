@@ -270,7 +270,8 @@ SSE `error` frame with `code=busy` on an HTTP 200 stream.
 Every stream ends with exactly one terminal frame: after `done`, anything the
 runner reports while the CLI shuts down is logged, never sent. Timeout, cancel and
 shutdown send their `error` frame immediately; the CLI is closed afterwards in the
-turn's own task (see `sidecar/turn.py`).
+turn's own task (see `sidecar/turn.py`). After `done` the stream stays open (silent)
+until the CLI has exited, so end-of-stream means the `sessionKey` is free again.
 
 ---
 
@@ -340,8 +341,9 @@ Key manifests:
   policy (CronJob, emptyDir with size limit, etc.).
 - `CLAUDE.md` is re-read on every request (ConfigMap hot-reload, no restart needed).
 - `tini` is required as PID-1 to reap zombie claude subprocesses. Do not remove from Dockerfile.
-- Keep k8s `terminationGracePeriodSeconds` ≥ `SHUTDOWN_GRACE_SEC` + 15 s (stream grace +
-  uvicorn + up to 12 s for turns still closing their CLI).
+- Keep k8s `terminationGracePeriodSeconds` ≥ app shutdown + `SHUTDOWN_GRACE_SEC` + 15 s: a
+  native sidecar is SIGTERMed only after the app container exits (stream grace + uvicorn +
+  up to 12 s for turns still closing their CLI).
 
 ---
 
