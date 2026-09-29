@@ -96,7 +96,7 @@ async def test_default_policy_is_explicit_and_hermetic(monkeypatch):
 
 async def test_configured_mcp_servers_are_pre_approved(monkeypatch, tmp_path):
     static = tmp_path / "mcp.json"
-    static.write_text('{"mcpServers": {"domain-tools": {}, "search": {}}}')
+    static.write_text('{"mcpServers": {"domain-tools": {}, "search.v2": {}, "tools": {}}}')
     seen = _install_fake_query(monkeypatch)
 
     await _run(
@@ -110,8 +110,8 @@ async def test_configured_mcp_servers_are_pre_approved(monkeypatch, tmp_path):
     assert seen["options"].allowed_tools == [
         "WebFetch",
         "mcp__domain-tools",
-        "mcp__search",
-        "mcp__tools",
+        "mcp__search_v2",  # normalized like the CLI's tool names
+        "mcp__tools",  # static and per-turn server share a name: listed once
     ]
 
 
@@ -125,3 +125,11 @@ async def test_tools_can_be_restricted_or_disabled(monkeypatch):
     assert seen["options"].tools == ["Read", "Grep"]
     assert seen["options"].permission_mode == "default"
     assert seen["options"].setting_sources == ["project"]
+
+
+async def test_disallowed_tools_are_passed_through(monkeypatch):
+    seen = _install_fake_query(monkeypatch)
+
+    await _run(disallowed_tools=("mcp__domain-tools__delete_all", "WebFetch"))
+
+    assert seen["options"].disallowed_tools == ["mcp__domain-tools__delete_all", "WebFetch"]

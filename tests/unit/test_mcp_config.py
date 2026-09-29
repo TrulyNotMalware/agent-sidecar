@@ -122,12 +122,24 @@ def test_private_mcp_config_is_removed_when_the_turn_fails():
     assert not path.parent.exists()
 
 
-def test_static_server_names_that_would_split_allowed_tools_are_skipped(tmp_path):
+def test_tool_prefix_uses_the_cli_normalization():
+    from sidecar.mcp import mcp_tool_prefix
+
+    assert mcp_tool_prefix("domain-tools") == "mcp__domain-tools"
+    assert mcp_tool_prefix("v1.2") == "mcp__v1_2"  # the CLI names its tools mcp__v1_2__*
+    assert mcp_tool_prefix("x,Bash") == "mcp__x_Bash"  # cannot split --allowedTools
+    assert mcp_tool_prefix("has space") == "mcp__has_space"
+
+
+def test_static_server_names_tolerate_bad_files(tmp_path):
     from sidecar.mcp import static_mcp_server_names
 
-    static = tmp_path / "mcp.json"
-    static.write_text(
-        json.dumps({"mcpServers": {"domain-tools": {}, "x,Bash": {}, "has space": {}, "v1.2": {}}})
-    )
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("{ nope")
+    not_a_dict = tmp_path / "list.json"
+    not_a_dict.write_text(json.dumps({"mcpServers": ["a", "b"]}))
 
-    assert static_mcp_server_names(static) == ["domain-tools", "v1.2"]
+    assert static_mcp_server_names(None) == []
+    assert static_mcp_server_names(tmp_path / "missing.json") == []
+    assert static_mcp_server_names(bad_json) == []
+    assert static_mcp_server_names(not_a_dict) == []

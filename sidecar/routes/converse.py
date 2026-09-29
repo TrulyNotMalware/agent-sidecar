@@ -326,6 +326,7 @@ def _get_runner(settings: Settings):
         withheld_env=settings.codex_env_passthrough_names,
         tools=settings.claude_tools_list,
         allowed_tools=settings.claude_allowed_tools_names,
+        disallowed_tools=settings.claude_disallowed_tools_names,
         permission_mode=settings.claude_permission_mode,
         setting_sources=settings.claude_setting_sources_names,
     )

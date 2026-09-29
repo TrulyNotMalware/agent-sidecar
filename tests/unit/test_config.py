@@ -55,3 +55,20 @@ def test_whitespace_only_bearer_secret_is_rejected():
 def test_anthropic_api_key_is_not_exposed_in_repr():
     s = Settings(_env_file=None, bearer_secret="x", anthropic_api_key="sk-ant-secret")
     assert "sk-ant-secret" not in repr(s)
+
+
+def test_allowed_tool_rules_keep_commas_inside_parentheses():
+    s = Settings(
+        _env_file=None,
+        bearer_secret="x",
+        claude_allowed_tools="Bash(git log --format=a,b:*), Read ,WebFetch",
+        claude_disallowed_tools="mcp__domain-tools__delete_all",
+    )
+
+    assert s.claude_allowed_tools_names == ("Bash(git log --format=a,b:*)", "Read", "WebFetch")
+    assert s.claude_disallowed_tools_names == ("mcp__domain-tools__delete_all",)
+
+
+def test_unknown_setting_source_fails_at_startup():
+    with pytest.raises(ValidationError, match="bogus"):
+        Settings(_env_file=None, bearer_secret="x", claude_setting_sources="user,bogus")

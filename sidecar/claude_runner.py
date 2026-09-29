@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ApiError, ErrorCode
-from .mcp import build_mcp_servers, private_mcp_config, static_mcp_server_names
+from .mcp import (
+    build_mcp_servers,
+    mcp_tool_prefix,
+    private_mcp_config,
+    static_mcp_server_names,
+)
 
 # The SDK launches the CLI with the sidecar's full environment and only lets options
 # add or override keys. Blank the secrets that are the sidecar's own business so the
@@ -63,6 +68,7 @@ async def run_turn(
     withheld_env: tuple[str, ...] = (),
     tools: list[str] | None = None,
     allowed_tools: tuple[str, ...] = (),
+    disallowed_tools: tuple[str, ...] = (),
     permission_mode: str = "dontAsk",
     setting_sources: tuple[str, ...] = (),
     # Interface parity with codex. claude's transcript is keyed by the (deleted) temp
@@ -92,6 +98,8 @@ async def run_turn(
     }
     if tools is not None:
         options_kwargs["tools"] = list(tools)
+    if disallowed_tools:
+        options_kwargs["disallowed_tools"] = list(disallowed_tools)  # deny beats allow
     if system_prompt is not None:
         options_kwargs["system_prompt"] = system_prompt
     if resume_session_id:
@@ -105,9 +113,9 @@ async def run_turn(
     # Headless runs have nobody to approve tool prompts, so MCP servers the operator
     # configured must be pre-allowed ("mcp__<server>" covers every tool it exposes).
     # For the per-turn server, authorization is enforced server-side via the turn token.
-    approved = [*allowed_tools, *(f"mcp__{n}" for n in static_mcp_server_names(mcp_config_path))]
+    approved = [*allowed_tools, *map(mcp_tool_prefix, static_mcp_server_names(mcp_config_path))]
     if mcp_server_url is not None and turn_token is not None:
-        approved.append(f"mcp__{mcp_server_name}")
+        approved.append(mcp_tool_prefix(mcp_server_name))
     if approved:
         options_kwargs["allowed_tools"] = list(dict.fromkeys(approved))
 

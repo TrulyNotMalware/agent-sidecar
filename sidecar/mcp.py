@@ -12,9 +12,16 @@ from .observability.logging import get_logger
 
 log = get_logger("sidecar.mcp")
 
-# `mcp__<name>` goes into the CLI's comma/space-separated --allowedTools; a name with
-# "," or " " would split into extra entries (e.g. "x,Bash" would pre-approve Bash).
-_SERVER_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+# The CLI names MCP tools `mcp__<server>__<tool>` with every character outside
+# [A-Za-z0-9_-] replaced by "_", and matches permission rules against that form. A rule
+# must use the same normalization — "v1.2" only matches as "v1_2" — and it also keeps
+# "," or " " out of the comma/space-separated --allowedTools ("x,Bash" → "x_Bash").
+_NOT_IN_TOOL_NAME = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def mcp_tool_prefix(server_name: str) -> str:
+    """The permission rule covering every tool of `server_name`."""
+    return f"mcp__{_NOT_IN_TOOL_NAME.sub('_', server_name)}"
 
 
 def static_mcp_server_names(static_config_path: Path | None) -> list[str]:
@@ -23,14 +30,13 @@ def static_mcp_server_names(static_config_path: Path | None) -> list[str]:
         return []
     try:
         parsed = json.loads(static_config_path.read_text(encoding="utf-8"))
-        names = [str(name) for name in (parsed.get("mcpServers") or {})]
+        servers = parsed.get("mcpServers") or {}
+        if not isinstance(servers, dict):
+            raise TypeError("mcpServers must be an object")
+        return [str(name) for name in servers]
     except Exception as exc:  # noqa: BLE001
         log.warning("mcp.static_config_unreadable", error_type=type(exc).__name__)
         return []
-    unsafe = [n for n in names if not _SERVER_NAME.match(n)]
-    if unsafe:
-        log.warning("mcp.server_name_not_pre_approved", names=unsafe)
-    return [n for n in names if _SERVER_NAME.match(n)]
 
 
 def build_mcp_servers(

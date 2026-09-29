@@ -26,7 +26,8 @@ contract itself lives in `openapi.yaml`.
 | `OPENAI_API_KEY` | unset | **`PROVIDER=codex`.** Codex API key. Materialized into `~/.codex/auth.json` at startup (see [Codex provider](#codex-provider)). |
 | `CLAUDE_TOOLS` | unset | **`PROVIDER=claude`.** Built-in toolset. Unset keeps the CLI's default set; `""` disables every built-in tool (MCP only); otherwise a comma-separated list such as `Read,Glob,Grep`. |
 | `CLAUDE_ALLOWED_TOOLS` | unset | **`PROVIDER=claude`.** Comma-separated tools pre-approved on top of the configured MCP servers, e.g. `WebFetch,Bash(git status:*)`. |
-| `CLAUDE_PERMISSION_MODE` | `dontAsk` | **`PROVIDER=claude`.** `dontAsk` denies anything that would prompt (nobody can answer in a headless sidecar) unless pre-approved. Other modes: `default`, `acceptEdits`, `plan`, `bypassPermissions`, `auto`. |
+| `CLAUDE_DISALLOWED_TOOLS` | unset | **`PROVIDER=claude`.** Comma-separated tools denied even if allowed elsewhere (deny beats allow), e.g. one destructive tool of a pre-approved MCP server: `mcp__domain-tools__delete_all`. |
+| `CLAUDE_PERMISSION_MODE` | `dontAsk` | **`PROVIDER=claude`.** `dontAsk` denies anything that would prompt (nobody can answer in a headless sidecar) unless pre-approved. Also accepted: `default`, `acceptEdits`, and — not recommended for a service that runs untrusted prompts — `bypassPermissions` (no checks at all), `plan` (the agent cannot act) and `auto` (needs the CLI's classifier). |
 | `CLAUDE_SETTING_SOURCES` | unset | **`PROVIDER=claude`.** Comma-separated setting sources to load (`user`, `project`, `local`). Unset loads none, so settings, hooks and plugins under the sidecar's `$HOME` or the workspace never apply. |
 | `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. Leave unset: codex itself always uses `$CODEX_HOME/auth.json` (default `~/.codex`). |
 | `CODEX_SANDBOX` | `read-only` | **`PROVIDER=codex`.** Always passed as `codex exec --sandbox` so a `config.toml` cannot loosen it: `read-only`, `workspace-write`, or `danger-full-access`. |
@@ -240,8 +241,17 @@ environment it happens to run in:
   `CLAUDE_TOOLS` explicitly if the agent must not read files at all.
 - **Hermetic:** no setting sources are loaded (`CLAUDE_SETTING_SOURCES`) and the
   CLI runs with `--strict-mcp-config`, so `~/.claude` settings, hooks, plugins,
-  `~/.claude.json` MCP servers and a workspace `.claude/` or `.mcp.json` have no
-  effect.
+  `~/.claude.json` MCP servers, claude.ai account connectors and a workspace
+  `.claude/` or `.mcp.json` have no effect. Managed (enterprise) policy settings
+  still apply.
+- **MCP names:** a server named `v1.2` is pre-approved as `mcp__v1_2` — the CLI
+  replaces every character outside `[A-Za-z0-9_-]` with `_` in tool names, and
+  permission rules must match that form (so do rules you write yourself).
+- **Changed defaults (migration):** before this policy, a sidecar running where
+  `~/.claude` existed inherited its `permissions.allow`, `env`, `model`,
+  `apiKeyHelper`, MCP servers and memory files. None of that applies any more;
+  move what you need into `CLAUDE_ALLOWED_TOOLS` / `MCP_CONFIG_PATH` / the
+  sidecar's own environment, or opt back in with `CLAUDE_SETTING_SOURCES`.
 
 This is policy, not isolation: the CLI still runs as the sidecar's uid (see the
 scope note under [Codex provider](#codex-provider)).

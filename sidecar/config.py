@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     claude_permission_mode: Literal[
         "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"
     ] = "dontAsk"
+    # Comma-separated tools denied even if allowed elsewhere, e.g. one destructive tool
+    # of an otherwise pre-approved MCP server ("mcp__domain-tools__delete_all").
+    claude_disallowed_tools: str = ""
     # Comma-separated setting sources to load (user, project, local); empty = none.
     claude_setting_sources: str = ""
 
@@ -64,6 +67,15 @@ class Settings(BaseSettings):
         # token is stripped, so an unstripped secret would 401 every request.
         return v.strip() if isinstance(v, str) else v
 
+    @field_validator("claude_setting_sources")
+    @classmethod
+    def _known_setting_sources(cls, v: str) -> str:
+        # A typo would otherwise fail every turn ("Invalid setting source") at runtime.
+        unknown = set(_csv(v)) - {"user", "project", "local"}
+        if unknown:
+            raise ValueError(f"unknown setting source(s): {', '.join(sorted(unknown))}")
+        return v
+
     @property
     def codex_env_passthrough_names(self) -> tuple[str, ...]:
         return _csv(self.codex_env_passthrough)
@@ -74,7 +86,11 @@ class Settings(BaseSettings):
 
     @property
     def claude_allowed_tools_names(self) -> tuple[str, ...]:
-        return _csv(self.claude_allowed_tools)
+        return _tool_rules(self.claude_allowed_tools)
+
+    @property
+    def claude_disallowed_tools_names(self) -> tuple[str, ...]:
+        return _tool_rules(self.claude_disallowed_tools)
 
     @property
     def claude_setting_sources_names(self) -> tuple[str, ...]:
@@ -83,6 +99,22 @@ class Settings(BaseSettings):
 
 def _csv(value: str) -> tuple[str, ...]:
     return tuple(n.strip() for n in value.split(",") if n.strip())
+
+
+def _tool_rules(value: str) -> tuple[str, ...]:
+    """Split permission rules on commas outside parentheses: `Bash(git log -a,b:*)` stays one."""
+    rules: list[str] = []
+    depth = 0
+    current = ""
+    for ch in value:
+        if ch == "," and depth == 0:
+            rules.append(current)
+            current = ""
+            continue
+        depth += {"(": 1, ")": -1}.get(ch, 0)
+        current += ch
+    rules.append(current)
+    return tuple(r.strip() for r in rules if r.strip())
 
 
 @lru_cache(maxsize=1)

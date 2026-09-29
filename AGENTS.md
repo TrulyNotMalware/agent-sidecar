@@ -138,6 +138,7 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `OPENAI_API_KEY` | — | Codex provider auth (`PROVIDER=codex`) |
 | `CLAUDE_TOOLS` | unset | Built-in toolset: unset = CLI default, `""` = none, else comma list (`Read,Grep`) |
 | `CLAUDE_ALLOWED_TOOLS` | — | Comma list pre-approved on top of configured MCP servers (`WebFetch,Bash(git status:*)`) |
+| `CLAUDE_DISALLOWED_TOOLS` | — | Comma list denied even if allowed elsewhere (deny beats allow) |
 | `CLAUDE_PERMISSION_MODE` | `dontAsk` | Anything that would prompt is denied unless pre-approved |
 | `CLAUDE_SETTING_SOURCES` | — | Setting sources to load (`user,project,local`); empty = none (hermetic) |
 | `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location (leave unset; codex itself uses `$CODEX_HOME`, default `~/.codex`) |
@@ -175,10 +176,12 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   **bundled** binary, not a `claude` on PATH (`/readyz` checks the same one).
 - Agent policy is explicit, not inherited from wherever the sidecar runs:
   `permission_mode=dontAsk` (would-prompt → denied), `setting_sources=[]` and
-  `--strict-mcp-config` (no `~/.claude` / project settings, hooks, plugins or MCP
-  servers), MCP servers from `MCP_CONFIG_PATH` and the per-turn server
-  pre-approved (`mcp__<name>`). The built-in toolset stays the CLI default unless
-  `CLAUDE_TOOLS` is set. See `CLAUDE_*` in the configuration table.
+  `--strict-mcp-config` (no `~/.claude` / project settings, hooks, plugins, MCP
+  servers or claude.ai connectors; managed policy settings still apply), MCP
+  servers from `MCP_CONFIG_PATH` and the per-turn server pre-approved
+  (`mcp__<name>`, normalized like the CLI's tool names: `v1.2` → `mcp__v1_2`). The
+  built-in toolset stays the CLI default unless `CLAUDE_TOOLS` is set. See
+  `CLAUDE_*` in the configuration table.
 - Auth: `ANTHROPIC_API_KEY` for production / general use. `CLAUDE_CODE_OAUTH_TOKEN`
   (subscription) and `~/.claude.json` are for local testing only.
 
