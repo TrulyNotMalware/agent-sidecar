@@ -38,3 +38,12 @@ def test_claude_tools_empty_disables_built_ins(start_sidecar):
     argv = _cli_argv(srv)
 
     assert argv[argv.index("--tools") + 1] == ""
+
+
+def test_claude_restricted_reaches_the_cli(start_sidecar):
+    srv = start_sidecar(mode="normal", CLAUDE_RESTRICTED="true")
+
+    r = converse(srv.port, "k-restricted")
+    precondition(r.event_names == ["session", "text", "done"], f"turn failed: {r.events}")
+
+    assert "--restricted" in _cli_argv(srv)

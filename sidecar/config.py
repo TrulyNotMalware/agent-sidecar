@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     claude_md_path: Path | None = None
     mcp_config_path: Path | None = None
     mcp_server_url: str | None = None
-    mcp_server_name: str = "codecompanion"
+    # Name of the per-turn MCP server entry; its tools appear as mcp__<name>__<tool>.
+    mcp_server_name: str = Field(default="domain-tools", pattern=r"^[A-Za-z0-9_-]+$")
     claude_auth_path: Path | None = None  # defaults to ~/.claude.json at check time
 
     # Claude agent policy (PROVIDER=claude). CLAUDE_TOOLS unset keeps the CLI's default
@@ -45,6 +46,9 @@ class Settings(BaseSettings):
     claude_disallowed_tools: str = ""
     # Comma-separated setting sources to load (user, project, local); empty = none.
     claude_setting_sources: str = ""
+    # CLI --restricted: no code-running tools or WebFetch unless CLAUDE_TOOLS names them,
+    # file tools confined to the workspace, bypassPermissions refused. Opt-in.
+    claude_restricted: bool = False
 
     # Codex (PROVIDER=codex) — auth state written by `codex login`
     codex_auth_path: Path | None = None  # defaults to ~/.codex/auth.json at check time
@@ -55,10 +59,16 @@ class Settings(BaseSettings):
     codex_env_passthrough: str = ""
 
     log_prompts: bool = False
-    log_level: str = "INFO"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     tracing_enabled: bool = False
     otel_service_name: str = "claude-sidecar"
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _upper_log_level(cls, v: object) -> object:
+        # LOG_LEVEL=info used to crash logging setup at import (logging wants "INFO").
+        return v.upper() if isinstance(v, str) else v
 
     @field_validator("bearer_secret", mode="before")
     @classmethod

@@ -6,7 +6,7 @@ data:
   mcp.json: |
     {
       "mcpServers": {
-        "domain-tools": {
+        "extra-tools": {
           "type": "sse",
           "url": "http://localhost:8080/mcp/sse",
           "headers": {

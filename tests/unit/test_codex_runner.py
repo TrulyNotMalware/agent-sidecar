@@ -370,28 +370,28 @@ async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
 
     events = await _collect(
         mcp_server_url="https://app.example/mcp",
-        mcp_server_name="codecompanion",
+        mcp_server_name="domain-tools",
         turn_token="tok-xyz",
     )
 
     assert events[-1].__class__ is DoneEvent
-    assert 'mcp_servers.codecompanion.url="https://app.example/mcp"' in calls["cmd"]
+    assert 'mcp_servers.domain-tools.url="https://app.example/mcp"' in calls["cmd"]
     assert (
-        'mcp_servers.codecompanion.bearer_token_env_var="CODECOMPANION_MCP_TOKEN"'
+        'mcp_servers.domain-tools.bearer_token_env_var="SIDECAR_MCP_TURN_TOKEN"'
         in calls["cmd"]
     )
-    assert 'mcp_servers.codecompanion.default_tools_approval_mode="approve"' in calls["cmd"]
-    assert calls["kwargs"]["env"]["CODECOMPANION_MCP_TOKEN"] == "tok-xyz"
+    assert 'mcp_servers.domain-tools.default_tools_approval_mode="approve"' in calls["cmd"]
+    assert calls["kwargs"]["env"]["SIDECAR_MCP_TURN_TOKEN"] == "tok-xyz"
 
 
 async def test_without_mcp_override_no_config_flags_and_no_token_env(monkeypatch):
-    monkeypatch.setenv("CODECOMPANION_MCP_TOKEN", "stale-from-parent")
+    monkeypatch.setenv("SIDECAR_MCP_TURN_TOKEN", "stale-from-parent")
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
     await _collect()
 
     assert "-c" not in calls["cmd"]
-    assert "CODECOMPANION_MCP_TOKEN" not in calls["kwargs"]["env"]
+    assert "SIDECAR_MCP_TURN_TOKEN" not in calls["kwargs"]["env"]
 
 
 async def test_sandbox_is_always_explicit(monkeypatch):

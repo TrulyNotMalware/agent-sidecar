@@ -133,3 +133,13 @@ async def test_disallowed_tools_are_passed_through(monkeypatch):
     await _run(disallowed_tools=("mcp__domain-tools__delete_all", "WebFetch"))
 
     assert seen["options"].disallowed_tools == ["mcp__domain-tools__delete_all", "WebFetch"]
+
+
+async def test_restricted_mode_is_opt_in(monkeypatch):
+    seen = _install_fake_query(monkeypatch)
+
+    await _run()
+    assert "restricted" not in seen["options"].extra_args
+
+    await _run(restricted=True)
+    assert "restricted" in seen["options"].extra_args

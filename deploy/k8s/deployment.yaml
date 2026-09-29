@@ -16,16 +16,20 @@ spec:
       # after the app exits; then stream grace, uvicorn, and up to 12s for turns still
       # closing their CLI (see docs/operations.md#shutdown).
       terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 10001        # the image's non-root user owns the state volume
       initContainers:
-        # ── Codex auth Option B (PROVIDER=codex, OAuth): copy auth.json into a
-        # writable CODEX_HOME. codex writes session files and refreshed tokens there,
-        # so the Secret must not be mounted over the directory (read-only).
+        # ── Codex auth Option B (PROVIDER=codex, OAuth): copy auth.json into the
+        # writable CODEX_HOME (/var/lib/claude-sidecar/codex on the state volume).
+        # codex writes session files and refreshed tokens there, so the Secret must
+        # not be mounted over the directory (read-only).
         # - name: codex-home-init
         #   image: busybox:1.36
-        #   command: ["sh", "-c", "cp /secret/auth.json /codex-home/auth.json && chmod 600 /codex-home/auth.json"]
+        #   securityContext: { runAsUser: 10001, runAsGroup: 10001 }
+        #   command: ["sh", "-c", "mkdir -p /state/codex && cp /secret/auth.json /state/codex/auth.json && chmod 600 /state/codex/auth.json"]
         #   volumeMounts:
         #     - { name: codex-oauth, mountPath: /secret, readOnly: true }
-        #     - { name: codex-home,  mountPath: /codex-home }
+        #     - { name: state,       mountPath: /state }
         #
         # k8s 1.28+ native sidecar via restartPolicy=Always on an initContainer.
         #
@@ -36,6 +40,16 @@ spec:
         - name: claude-sidecar
           image: ghcr.io/REPLACE_ORG/claude-sidecar:1.0.0
           restartPolicy: Always
+          # Not verified on a cluster yet: if a CLI needs to write somewhere else,
+          # add an emptyDir there rather than dropping readOnlyRootFilesystem.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
           ports:
             # Informational only: the sidecar listens on 127.0.0.1, reachable from
             # the app container over the shared loopback, not on the Pod IP.
@@ -74,11 +88,12 @@ spec:
           volumeMounts:
             - { name: mcp-config,  mountPath: /etc/sidecar,     readOnly: true }
             - { name: claude-md,   mountPath: /workspace,       readOnly: true }
-            - { name: sessions,    mountPath: /var/lib/claude-sidecar/sessions }
-            # ── Codex (uncomment when PROVIDER=codex): writable CODEX_HOME. Option B
-            # fills it via codex-home-init above; Option A materializes auth.json into it
-            # from OPENAI_API_KEY at startup.
-            # - { name: codex-home, mountPath: /root/.codex }
+            # All mutable state: session workspaces, claude transcripts/config
+            # (CLAUDE_CONFIG_DIR) and codex auth/rollouts (CODEX_HOME). Use a
+            # persistent volume instead to keep conversations across Pod restarts.
+            - { name: state,       mountPath: /var/lib/claude-sidecar }
+            - { name: tmp,         mountPath: /tmp }           # per-turn MCP config files
+            - { name: home,        mountPath: /home/sidecar }  # CLI caches
           # exec probes, not httpGet: kubelet sends httpGet to the Pod IP, which a
           # BIND=127.0.0.1 server never answers. The app container still reaches the
           # sidecar over the shared loopback; nothing else in the cluster can.
@@ -117,12 +132,15 @@ spec:
         - name: claude-md
           configMap:
             name: app-claude-md
-        - name: sessions
+        - name: state
+          emptyDir:
+            sizeLimit: 10Gi   # transcripts and rollouts grow; size for your retention
+        - name: tmp
           emptyDir: {}
-        # ── Codex volumes (uncomment when PROVIDER=codex) ─
-        # - name: codex-home
-        #   emptyDir: {}
-        # - name: codex-oauth          # Option B only
+        - name: home
+          emptyDir: {}
+        # ── Codex Option B only (uncomment when PROVIDER=codex) ─
+        # - name: codex-oauth
         #   secret:
         #     secretName: openai-codex-oauth
         #     items:

@@ -70,7 +70,8 @@ examples/                # Client examples: Python, Go, Kotlin
 scripts/                 # test.sh (lint + pytest), smoke.py (e2e)
 docs/operations.md       # Full operational reference
 openapi.yaml             # Source-of-truth API contract
-Dockerfile               # python:3.12-slim + node20 + tini
+Dockerfile               # python:3.12-slim-bookworm + Node 24 LTS + pinned codex + tini, uid 10001
+constraints.txt          # runtime dependency lock used by the image
 ```
 
 ---
@@ -131,7 +132,9 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `SHUTDOWN_GRACE_SEC` | `10` | On SIGTERM, how long turns may keep streaming before `error: cancelled` (min 1) |
 | `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Session workspaces root |
 | `CLAUDE_MD_PATH` | — | Base system prompt file (hot-reloaded per request) |
-| `MCP_CONFIG_PATH` | — | Path to `mcp.json` |
+| `MCP_CONFIG_PATH` | — | Path to `mcp.json` (extra static servers; the image ships an empty one) |
+| `MCP_SERVER_URL` | — | Streamable-HTTP MCP server scoped per turn with `X-Turn-Token` |
+| `MCP_SERVER_NAME` | `domain-tools` | Per-turn server name (`[A-Za-z0-9_-]+`); tools appear as `mcp__<name>__*` |
 | `CLAUDE_CODE_OAUTH_TOKEN` | — | Claude subscription auth — **local testing only** |
 | `ANTHROPIC_API_KEY` | — | Claude API auth — **production / general use** |
 | `ANTHROPIC_MODE` | `subscription` | Set `api` so `/readyz` requires `ANTHROPIC_API_KEY` specifically |
@@ -142,11 +145,12 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `CLAUDE_DISALLOWED_TOOLS` | — | Comma list denied even if allowed elsewhere (deny beats allow) |
 | `CLAUDE_PERMISSION_MODE` | `dontAsk` | Anything that would prompt is denied unless pre-approved |
 | `CLAUDE_SETTING_SOURCES` | — | Setting sources to load (`user,project,local`); empty = none (hermetic) |
+| `CLAUDE_RESTRICTED` | `false` | Opt-in CLI `--restricted`: no code-running tools/WebFetch unless `CLAUDE_TOOLS` names them; file tools confined to the workspace |
 | `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location (leave unset; codex itself uses `$CODEX_HOME`, default `~/.codex`) |
 | `CODEX_SANDBOX` | `read-only` | Always passed as `codex exec --sandbox`; `read-only` \| `workspace-write` \| `danger-full-access` |
 | `CODEX_ENV_PASSTHROUGH` | — | Comma-separated extra env var names codex may inherit (e.g. a custom provider's `env_key`) |
 | `LOG_PROMPTS` | `false` | `true` disables prompt redaction |
-| `LOG_LEVEL` | `INFO` | |
+| `LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`, case-insensitive |
 | `TRACING_ENABLED` | `false` | OTel trace export |
 | `OTEL_SERVICE_NAME` | `claude-sidecar` | |
 
@@ -312,7 +316,9 @@ until the CLI has exited, so end-of-stream means the `sessionKey` is free again.
 
 ### Prerequisites
 - Python 3.12+
-- Node.js 20 (for `claude` / `codex` CLI)
+- Node.js 24 LTS + `@openai/codex` only for `PROVIDER=codex` (the claude CLI is bundled
+  with `claude-agent-sdk`). `claude-agent-sdk` is pinned `>=0.2.161,<0.3` — the runners
+  depend on its CLI flag semantics; bump it deliberately and rerun the full suite.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -374,6 +380,8 @@ Key manifests:
   policy (CronJob, emptyDir with size limit, etc.).
 - `CLAUDE.md` is re-read on every request (ConfigMap hot-reload, no restart needed).
 - `tini` is required as PID-1 to reap zombie claude subprocesses. Do not remove from Dockerfile.
+- The image runs as uid 10001; all mutable state is under `/var/lib/claude-sidecar`
+  (`WORKSPACE_ROOT`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) — mount one volume there.
 - Keep k8s `terminationGracePeriodSeconds` ≥ app shutdown + `SHUTDOWN_GRACE_SEC` + 15 s: a
   native sidecar is SIGTERMed only after the app container exits (stream grace + uvicorn +
   up to 12 s for turns still closing their CLI).

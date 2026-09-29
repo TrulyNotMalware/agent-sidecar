@@ -35,8 +35,8 @@ async def readyz() -> JSONResponse:
             failures.append("claude CLI not found (neither bundled with the SDK nor on PATH)")
         if not _identity_ready(settings):
             failures.append(
-                "no anthropic identity (set CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, "
-                "or mount ~/.claude.json)"
+                "no anthropic identity (set ANTHROPIC_API_KEY, or for local testing "
+                "CLAUDE_CODE_OAUTH_TOKEN / a .claude.json in CLAUDE_CONFIG_DIR or ~)"
             )
 
     if failures:
@@ -68,8 +68,10 @@ def _identity_ready(settings: Settings) -> bool:
         return True
     if os.environ.get("ANTHROPIC_API_KEY"):
         return True
-    auth_path = settings.claude_auth_path or (Path.home() / ".claude.json")
-    return auth_path.exists()
+    # With CLAUDE_CONFIG_DIR set (as in the image) the CLI keeps .claude.json there.
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    default = Path(config_dir) / ".claude.json" if config_dir else Path.home() / ".claude.json"
+    return (settings.claude_auth_path or default).exists()
 
 
 def _codex_binary_ready() -> bool:

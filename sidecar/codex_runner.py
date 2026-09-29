@@ -67,7 +67,7 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
     return proc.returncode == 0 and path.exists()
 
 
-_MCP_TOKEN_ENV_VAR = "CODECOMPANION_MCP_TOKEN"
+_MCP_TOKEN_ENV_VAR = "SIDECAR_MCP_TURN_TOKEN"
 _LOGIN_TIMEOUT_SEC = 30
 
 # codex and the shell commands the model runs inherit only these. The sidecar's own
@@ -107,7 +107,7 @@ async def run_turn(
     resume_session_id: str | None,
     mcp_config_path: Path | None,  # interface parity only; static MCP servers are claude-only
     mcp_server_url: str | None = None,
-    mcp_server_name: str = "codecompanion",
+    mcp_server_name: str = "domain-tools",
     turn_token: str | None = None,
     sandbox: str = "read-only",
     env_passthrough: Iterable[str] = (),

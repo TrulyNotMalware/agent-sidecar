@@ -334,6 +334,7 @@ def _get_runner(settings: Settings):
         disallowed_tools=settings.claude_disallowed_tools_names,
         permission_mode=settings.claude_permission_mode,
         setting_sources=settings.claude_setting_sources_names,
+        restricted=settings.claude_restricted,
     )
 
 

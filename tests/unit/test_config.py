@@ -72,3 +72,19 @@ def test_allowed_tool_rules_keep_commas_inside_parentheses():
 def test_unknown_setting_source_fails_at_startup():
     with pytest.raises(ValidationError, match="bogus"):
         Settings(_env_file=None, bearer_secret="x", claude_setting_sources="user,bogus")
+
+
+@pytest.mark.parametrize("given", ["info", "Info", "INFO"])
+def test_log_level_is_case_insensitive(given):
+    assert Settings(_env_file=None, bearer_secret="x", log_level=given).log_level == "INFO"
+
+
+def test_unknown_log_level_fails_at_startup():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, bearer_secret="x", log_level="verbose")
+
+
+def test_mcp_server_name_default_is_neutral_and_validated():
+    assert Settings(_env_file=None, bearer_secret="x").mcp_server_name == "domain-tools"
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, bearer_secret="x", mcp_server_name="a.b")  # TOML key path

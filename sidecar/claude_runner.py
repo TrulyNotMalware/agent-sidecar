@@ -63,7 +63,7 @@ async def run_turn(
     resume_session_id: str | None,
     mcp_config_path: Path | None,
     mcp_server_url: str | None = None,
-    mcp_server_name: str = "codecompanion",
+    mcp_server_name: str = "domain-tools",
     turn_token: str | None = None,
     withheld_env: tuple[str, ...] = (),
     tools: list[str] | None = None,
@@ -71,9 +71,11 @@ async def run_turn(
     disallowed_tools: tuple[str, ...] = (),
     permission_mode: str = "dontAsk",
     setting_sources: tuple[str, ...] = (),
+    restricted: bool = False,
     # Interface parity with codex. claude's transcript is keyed by the (deleted) temp
     # cwd, so a stateless turn cannot be resumed; the file itself stays under
-    # ~/.claude/projects (--no-session-persistence is --print-only, not SDK mode).
+    # $CLAUDE_CONFIG_DIR/projects (default ~/.claude/projects; --no-session-persistence
+    # is --print-only, not SDK mode).
     ephemeral: bool = False,
 ) -> AsyncIterator[RunnerEvent]:
     """Drive one Claude turn via the Agent SDK and yield internal events.
@@ -94,7 +96,7 @@ async def run_turn(
         "env": dict.fromkeys((*_WITHHELD_FROM_CLI, *withheld_env), ""),
         "permission_mode": permission_mode,
         "setting_sources": list(setting_sources),
-        "extra_args": {"strict-mcp-config": None},
+        "extra_args": {"strict-mcp-config": None, **({"restricted": None} if restricted else {})},
     }
     if tools is not None:
         options_kwargs["tools"] = list(tools)

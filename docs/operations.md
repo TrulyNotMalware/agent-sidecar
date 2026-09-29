@@ -18,7 +18,7 @@ contract itself lives in `openapi.yaml`.
 | `CLAUDE_MD_PATH` | unset | Path to the static base system prompt (typically a ConfigMap mount, e.g. `/workspace/CLAUDE.md`). |
 | `MCP_CONFIG_PATH` | unset | Path to `mcp.json` for **extra** static MCP servers (typically `/etc/sidecar/mcp.json`). For `PROVIDER=claude` these are merged with the per-turn scoped entry; the per-turn entry wins on a name collision. |
 | `MCP_SERVER_URL` | unset | Streamable-HTTP URL of the consumer's domain-tools MCP server. When set together with a per-turn `X-Turn-Token`, the sidecar injects a scoped MCP entry for both providers and forwards the token as its `Authorization` bearer. |
-| `MCP_SERVER_NAME` | `codecompanion` | Name of the injected per-turn MCP server entry (the key under `mcpServers` / `-c mcp_servers.<name>`). |
+| `MCP_SERVER_NAME` | `domain-tools` | Name of the injected per-turn MCP server entry (the key under `mcpServers` / `-c mcp_servers.<name>`). | Letters, digits, `_` and `-` only.
 | `ANTHROPIC_API_KEY` | unset | **Production / general use.** Pay-as-you-go API key from the Anthropic Console. |
 | `ANTHROPIC_MODE` | `subscription` | Set to `api` in production so `/readyz` requires `ANTHROPIC_API_KEY` specifically. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | unset | **Local testing only.** Long-lived subscription token from `claude setup-token`. Never deploy it. |
@@ -29,11 +29,12 @@ contract itself lives in `openapi.yaml`.
 | `CLAUDE_DISALLOWED_TOOLS` | unset | **`PROVIDER=claude`.** Comma-separated tools denied even if allowed elsewhere (deny beats allow), e.g. one destructive tool of a pre-approved MCP server: `mcp__domain-tools__delete_all`. |
 | `CLAUDE_PERMISSION_MODE` | `dontAsk` | **`PROVIDER=claude`.** `dontAsk` denies anything that would prompt (nobody can answer in a headless sidecar) unless pre-approved. Also accepted: `default`, `acceptEdits`, and — not recommended for a service that runs untrusted prompts — `bypassPermissions` (no checks at all), `plan` (the agent cannot act) and `auto` (needs the CLI's classifier). |
 | `CLAUDE_SETTING_SOURCES` | unset | **`PROVIDER=claude`.** Comma-separated setting sources to load (`user`, `project`, `local`). Unset loads none, so settings, hooks and plugins under the sidecar's `$HOME` or the workspace never apply. |
+| `CLAUDE_RESTRICTED` | `false` | **`PROVIDER=claude`.** Opt-in CLI `--restricted` mode: removes code-running tools and WebFetch unless `CLAUDE_TOOLS` names them, confines file tools to the workspace, refuses `bypassPermissions`. |
 | `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. Leave unset: codex itself always uses `$CODEX_HOME/auth.json` (default `~/.codex`). |
 | `CODEX_SANDBOX` | `read-only` | **`PROVIDER=codex`.** Always passed as `codex exec --sandbox` so a `config.toml` cannot loosen it: `read-only`, `workspace-write`, or `danger-full-access`. |
 | `CODEX_ENV_PASSTHROUGH` | unset | **`PROVIDER=codex`.** Comma-separated extra env var names codex may inherit (e.g. a custom model provider's `env_key`). Everything outside the built-in allowlist is withheld. |
 | `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. |
-| `LOG_LEVEL` | `INFO` | structlog level. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (case-insensitive; anything else fails startup). |
 | `TRACING_ENABLED` | `false` | When `true`, enable OpenTelemetry tracing (`OTLP/HTTP`). |
 | `OTEL_SERVICE_NAME` | `claude-sidecar` | Service name attached to traces. |
 
@@ -120,11 +121,12 @@ subscription quota.
 ### Alternative (local dev): mount `~/.claude.json`
 
 If you prefer the interactive-login flow, run `claude` once on a host with
-the subscription, copy the resulting `~/.claude.json` into a Secret, and
-mount it at `$HOME` of the sidecar container (`/root` for the default
-Dockerfile user). The OAuth state inside that file rotates more often than
-the `setup-token` output, so plan to refresh the Secret on the same cadence
-as the upstream host. `CLAUDE_AUTH_PATH` overrides the location.
+the subscription and make the resulting `~/.claude.json` available to the
+sidecar. The default image sets `CLAUDE_CONFIG_DIR=/var/lib/claude-sidecar/claude`,
+and the CLI then reads `$CLAUDE_CONFIG_DIR/.claude.json` (not `~/.claude.json`) — put
+it there; `/readyz` checks that path too (`CLAUDE_AUTH_PATH` overrides). The OAuth
+state inside that file rotates more often than the `setup-token` output, so plan
+to refresh it on the same cadence as the upstream host.
 
 ### Why no API-key multi-tenancy in 1.x
 
@@ -282,7 +284,8 @@ that the consumer (the app that talks to the sidecar) implements. Examples:
 shared by every turn, the consumer mints a **short-lived signed token per
 `/v1/converse` call** and sends it as `X-Turn-Token`. Point the sidecar at the
 MCP server with `MCP_SERVER_URL` (and optionally `MCP_SERVER_NAME`, default
-`codecompanion`); for each turn the sidecar injects a streamable-HTTP MCP entry
+`domain-tools`; `codecompanion` in earlier releases — set it explicitly if your prompts or
+tool allow-lists name `mcp__codecompanion__*`); for each turn the sidecar injects a streamable-HTTP MCP entry
 for **both** providers:
 
 - **`claude`** — a per-turn `mcp_servers` entry
@@ -292,7 +295,7 @@ for **both** providers:
   argv — a dict would be inlined as `--mcp-config '<json>'`); the file is deleted
   when the runner finishes.
 - **`codex`** — `-c mcp_servers.<name>.url="…"` and
-  `-c mcp_servers.<name>.bearer_token_env_var="CODECOMPANION_MCP_TOKEN"` config
+  `-c mcp_servers.<name>.bearer_token_env_var="SIDECAR_MCP_TURN_TOKEN"` config
   overrides, with the token passed only through that env var (never on argv).
 
 The MCP server validates the token and resolves identity from its claims. The
@@ -398,6 +401,20 @@ closing the CLI before the reservation is released. Consequences:
 
 - **Stateless leftovers.** A turn killed hard (SIGKILL, OOM) can leave a directory
   under `WORKSPACE_ROOT/.stateless/`; it is safe to delete whenever no turn runs.
+- **Where state lives.** The image keeps all mutable state under
+  `/var/lib/claude-sidecar`: `sessions/` (`WORKSPACE_ROOT`), `claude/`
+  (`CLAUDE_CONFIG_DIR`: claude transcripts, needed to resume) and `codex/`
+  (`CODEX_HOME`: auth and rollouts). Mount one volume there; an `emptyDir` loses
+  conversations when the Pod goes away, a persistent volume keeps them. Size it
+  for transcripts too, and clean all three together (keep `.session-ids/`).
+- **Image.** Runs as uid/gid 10001 on `python:3.12-slim-bookworm` with Node.js 24
+  LTS and a pinned `@openai/codex`; the claude CLI is the one bundled with
+  `claude-agent-sdk`. Python dependencies are installed from `constraints.txt`.
+  The example manifest adds `runAsNonRoot`, `readOnlyRootFilesystem` (with
+  `emptyDir`s for `/tmp` and `$HOME`), no capabilities and `RuntimeDefault` seccomp
+  (not yet verified on a cluster; codex's own shell sandbox needs Landlock /
+  user-namespace support from the node). Upgrading from an image that ran as root:
+  `chown -R 10001:10001` an existing state volume first.
 - **Workspace cardinality.** `WORKSPACE_ROOT` accumulates one sub-directory per
   unique `sessionKey` in session mode. Mount it on a volume that has retention
   policy / cleanup — the sidecar does not GC.

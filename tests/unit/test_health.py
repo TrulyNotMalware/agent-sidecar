@@ -189,3 +189,16 @@ def test_claude_cli_resolves_the_sdk_bundled_binary_first(monkeypatch):
 
     assert path is not None
     assert path.endswith("_bundled/claude")
+
+
+def test_identity_file_follows_claude_config_dir(monkeypatch, tmp_path):
+    _clear_identity_env(monkeypatch)
+    from sidecar.config import Settings
+    from sidecar.routes.health import _identity_ready
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    s = Settings(bearer_secret="x", anthropic_mode="subscription")
+    assert _identity_ready(s) is False
+
+    (tmp_path / ".claude.json").write_text("{}")
+    assert _identity_ready(s) is True
