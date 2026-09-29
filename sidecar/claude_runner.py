@@ -65,6 +65,10 @@ async def run_turn(
     allowed_tools: tuple[str, ...] = (),
     permission_mode: str = "dontAsk",
     setting_sources: tuple[str, ...] = (),
+    # Interface parity with codex. claude's transcript is keyed by the (deleted) temp
+    # cwd, so a stateless turn cannot be resumed; the file itself stays under
+    # ~/.claude/projects (--no-session-persistence is --print-only, not SDK mode).
+    ephemeral: bool = False,
 ) -> AsyncIterator[RunnerEvent]:
     """Drive one Claude turn via the Agent SDK and yield internal events.
 

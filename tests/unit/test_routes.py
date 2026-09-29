@@ -258,3 +258,22 @@ def test_claude_policy_defaults():
     assert runner.keywords["tools"] is None  # CLI default toolset unless CLAUDE_TOOLS is set
     assert runner.keywords["permission_mode"] == "dontAsk"
     assert runner.keywords["setting_sources"] == ()
+
+
+def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path):
+    from sidecar.config import Settings
+    from sidecar.models import ConverseRequest
+    from sidecar.routes.converse import _preflight_resume
+    from sidecar.session import remember_session_id
+
+    sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
+    codex = Settings(_env_file=None, bearer_secret="x", provider="codex", workspace_root=tmp_path)
+    claude = Settings(_env_file=None, bearer_secret="x", workspace_root=tmp_path)
+    body = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": sid})
+
+    rejected = _preflight_resume(body, codex)
+    assert rejected is not None and rejected.status_code == 400
+    assert _preflight_resume(body, claude) is None  # claude scopes transcripts by cwd
+
+    remember_session_id("k", sid, root=tmp_path)
+    assert _preflight_resume(body, codex) is None

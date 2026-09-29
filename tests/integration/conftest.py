@@ -24,21 +24,26 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _fake_cli_wrapper(directory: Path) -> Path:
-    wrapper = directory / "claude"
-    wrapper.write_text(
-        f'#!/bin/sh\nexec "{sys.executable}" "{HERE / "fake_claude.py"}" "$@"\n'
-    )
+def _fake_cli_wrapper(directory: Path, name: str, script: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    wrapper = directory / name
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{HERE / script}" "$@"\n')
     wrapper.chmod(0o755)
     return wrapper
 
 
 @pytest.fixture
 def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
-    """Factory: start_sidecar(mode=..., **ENV) -> a running SidecarServer on a free port."""
+    """Factory: start_sidecar(mode=..., provider=..., **ENV) -> a running SidecarServer.
+
+    provider="claude" points the real SDK at fake_claude.py; provider="codex" puts a
+    fake `codex` first on PATH (the runner spawns `codex` by name).
+    """
     servers: list[SidecarServer] = []
 
-    def _start(*, mode: str = "normal", **env_overrides: str) -> SidecarServer:
+    def _start(
+        *, mode: str = "normal", provider: str = "claude", **env_overrides: str
+    ) -> SidecarServer:
         port = _free_port()
         run_dir = tmp_path / f"server-{port}"
         home = run_dir / "home"
@@ -50,6 +55,9 @@ def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
         server_log = run_dir / "server.log"
 
         env = {k: os.environ[k] for k in _INHERITED_ENV if k in os.environ}
+        bin_dir = run_dir / "bin"
+        _fake_cli_wrapper(bin_dir, "codex", "fake_codex.py")
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env.update(
             HOME=str(home),
             CLAUDE_CONFIG_DIR=str(home / ".claude"),
@@ -59,13 +67,19 @@ def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
             BIND="127.0.0.1",
             PORT=str(port),
             WORKSPACE_ROOT=str(workspace),
-            FAKE_CLI=str(_fake_cli_wrapper(run_dir)),
+            PROVIDER=provider,
+            FAKE_CLI=str(_fake_cli_wrapper(bin_dir, "claude", "fake_claude.py")),
             FAKE_LOG=str(fake_log),
             FAKE_CLAUDE_MODE=mode,
+            FAKE_CODEX_MODE=mode,
             LOG_LEVEL="INFO",
             TURN_TIMEOUT_SEC="30",
             SHUTDOWN_GRACE_SEC="5",
         )
+        if provider == "codex":
+            # codex only inherits an allowlisted env: let the fake's own knobs through.
+            # (Not for claude: passthrough names are blanked in the claude CLI's env.)
+            env["CODEX_ENV_PASSTHROUGH"] = "FAKE_LOG,FAKE_CODEX_MODE,FAKE_MAX_LIFETIME"
         env.update(env_overrides)
 
         # Log to a file, not a pipe: an orphaned CLI inheriting a pipe would block reads.

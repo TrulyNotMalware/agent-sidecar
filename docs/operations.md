@@ -166,23 +166,43 @@ where the sidecar looks unless `CODEX_AUTH_PATH` points elsewhere.
 
 In k8s the container filesystem is ephemeral, so a `codex login`-created
 `auth.json` is lost on restart. Either set `OPENAI_API_KEY` (re-materialized on
-every start) or mount `auth.json` as a Secret at `/root/.codex/auth.json`.
+every start) or copy `auth.json` from a Secret into a writable `CODEX_HOME` with an
+init container (see `deploy/k8s/deployment.yaml`, Option B). Do not mount the
+Secret over `~/.codex` itself: codex writes session files and refreshed OAuth
+tokens there, and a read-only mount breaks both.
 
 **How the runner invokes codex:** each turn runs
-`codex exec --json --skip-git-repo-check --sandbox <CODEX_SANDBOX> -- <prompt>`
-(or `… resume -- <sessionId> <prompt>`) with `stdin` set to `DEVNULL`.
+`codex exec --json --skip-git-repo-check --sandbox <CODEX_SANDBOX> -- -`
+(or `… resume -- <sessionId> -`) in its own process group, writes the prompt
+(system prompt + user prompt, since the CLI has no separate system-prompt flag)
+to stdin and closes it.
 
 - `--skip-git-repo-check` — session workspaces are plain scratch directories, not
   git repos, and `codex exec` refuses to run outside a trusted git repo without
   this flag.
-- `stdin=DEVNULL` — an inherited stdin pipe makes codex block on "Reading
-  additional input from stdin", hanging the turn until `TURN_TIMEOUT_SEC`.
+- Prompt on stdin (`-`) — no `ARG_MAX` limit and never visible in `ps`. stdin is
+  closed right after the prompt; an open pipe makes codex wait for "additional
+  input from stdin" until `TURN_TIMEOUT_SEC`.
+- Own process group — stopping a turn SIGTERMs codex *and* everything it started
+  (the native binary behind the npm `codex` node wrapper, shell commands, stdio MCP
+  servers), then SIGKILLs the group after 2 s; every wait is bounded.
+- Events — `type:"error"` is not terminal (e.g. "Reconnecting… 2/5" while falling
+  back from WebSocket to HTTPS, common behind proxies). The turn fails on
+  `turn.failed`, a non-zero exit, or an exit without `turn.completed` (then the
+  last `error` message is reported). Event lines over 8 MiB are skipped.
+- Sessions — `mode=stateless` adds `--ephemeral`. A resume must use a thread id the
+  same `sessionKey` was issued (recorded under `WORKSPACE_ROOT/.session-ids/`,
+  outside the workspaces the agent can write to); others get `400` before the
+  stream opens, because codex resolves ids across all of `CODEX_HOME`. Threads
+  created before this rule was introduced cannot be resumed. Each resume makes
+  codex fork and report a new thread id (recorded too): continue with the latest
+  `session` id.
 - `--sandbox` — always explicit, so the sandbox *mode* for model-run shell commands
   is decided by `CODEX_SANDBOX`, not by whatever `config.toml` is present (other
   `config.toml` sandbox settings, e.g. `writable_roots`, still apply). Deployments
   that set `sandbox_mode` in `config.toml` must move it to `CODEX_SANDBOX`.
-- `--` — ends option parsing, so a prompt or `sessionId` starting with `-`
-  (`--last`, `-c sandbox_mode=…`) is never read as a flag. `sessionId` must be a
+- `--` — ends option parsing, so a `sessionId` starting with `-` (`--last`,
+  `-c sandbox_mode=…`) is never read as a flag. `sessionId` must be a
   UUID (checked up front, `400` otherwise): codex also resolves free-form thread
   names across all sessions in `CODEX_HOME`.
 - Environment — codex (and every shell command it runs) inherits only an
@@ -203,9 +223,6 @@ every start) or mount `auth.json` as a Secret at `/root/.codex/auth.json`.
   `mcp.json`, not from the sidecar's environment (keys the sidecar withholds are
   blanked for the claude CLI and its children).
 
-The codex runner enforces a 100 KB combined-prompt limit (system prompt + user
-prompt are concatenated, since the CLI has no separate system-prompt flag) to
-guard against `ARG_MAX` exhaustion.
 
 ## Claude agent policy
 

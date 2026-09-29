@@ -192,17 +192,29 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   SDK can only add or override variables, not remove them).
 
 ### `codex`
-- Spawns `codex exec --json --skip-git-repo-check --sandbox <CODEX_SANDBOX>`
-  (from `@openai/codex`) as a subprocess with `stdin=DEVNULL`, then parses the
-  NDJSON event stream. `--skip-git-repo-check` is required because session
-  workspaces are plain scratch dirs (not git repos); `stdin=DEVNULL` stops codex
-  from blocking on "Reading additional input from stdin". `--sandbox` is always
+- Spawns `codex exec --json --skip-git-repo-check --sandbox <CODEX_SANDBOX> -- -`
+  (from `@openai/codex`) in its **own process group**, writes the prompt to stdin
+  and closes it, then parses the NDJSON event stream. The prompt never appears in
+  argv (no ARG_MAX limit, not visible in `ps`); closing stdin keeps codex from
+  waiting for "additional input". `--skip-git-repo-check` is required because
+  session workspaces are plain scratch dirs (not git repos). `--sandbox` is always
   explicit, so a `config.toml` cannot change the sandbox *mode* (its other sandbox
   settings, e.g. `writable_roots`, still apply). A `config.toml` that relied on
   `sandbox_mode = "danger-full-access"` must now set `CODEX_SANDBOX` instead.
-- The prompt (and resume id) follow `--`, so a value starting with `-` is never
-  parsed as a flag. `sessionId` must be a UUID (codex also resolves free-form thread
-  names across sessions, so names are refused).
+- The resume id follows `--`, so a value starting with `-` is never parsed as a
+  flag. `sessionId` must be a UUID, and for codex it must have been issued to the
+  same `sessionKey` (recorded under `WORKSPACE_ROOT/.session-ids/`, outside the
+  workspaces): codex resolves thread ids across every session in `CODEX_HOME`.
+  Each resume makes codex fork and report a **new** thread id (also recorded):
+  continue with the latest `session` id. `mode=stateless` runs with
+  `--ephemeral` and cannot be resumed.
+- Stopping a turn (timeout, cancel, disconnect, shutdown) SIGTERMs the whole
+  process group — codex, the native binary behind the npm wrapper, and the shell
+  commands / MCP servers it started — then SIGKILLs it after 2 s. Waits are bounded.
+- `type:"error"` events are not terminal (codex reports "Reconnecting… n/5" that
+  way while falling back from WebSocket to HTTPS). A turn fails on `turn.failed`,
+  a non-zero exit, or an exit without `turn.completed`. Oversized event lines are
+  skipped; the stderr tail in error messages is the *end* of stderr.
 - codex gets an **allowlisted** environment (`PATH`, `HOME`, `CODEX_HOME`, locale,
   proxy and CA variables, `OPENAI_BASE_URL`/`OPENAI_ORGANIZATION`/`OPENAI_PROJECT`,
   plus `CODEX_ENV_PASSTHROUGH`); `BEARER_SECRET` and provider API keys are withheld
@@ -218,9 +230,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   `PROVIDER=codex`) `ensure_codex_auth()` runs `codex login --with-api-key` to
   materialize `~/.codex/auth.json` from the key — a no-op when `auth.json`
   already exists (subscription mode).
-- Resume uses `codex exec resume -- <sessionId> <prompt>`.
+- Resume uses `codex exec resume -- <sessionId> -`.
 - System prompt is prepended to the user prompt (no separate flag in the CLI).
-- 100 KB combined-prompt hard limit (ARG_MAX guard).
 
 ---
 

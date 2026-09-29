@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import functools
 import time
 from collections.abc import AsyncIterator
@@ -27,7 +28,12 @@ from ..inflight import InflightRegistry
 from ..models import ConverseRequest
 from ..observability.logging import get_logger
 from ..observability.metrics import REQUEST_DURATION, REQUESTS
-from ..session import stateless_workspace, workspace_for
+from ..session import (
+    known_session_ids,
+    remember_session_id,
+    stateless_workspace,
+    workspace_for,
+)
 from ..sse import sse_event
 from ..turn import StopReason, Turn, TurnEnded, TurnStopped
 
@@ -62,14 +68,16 @@ async def converse(
     # status line can still carry it. The turn re-checks atomically when it
     # reserves; a limit hit only in that race window still arrives as a
     # terminal SSE `error` frame with code=busy.
-    busy = await _preflight_busy(body, x_user_id, gate, registry)
-    if busy is not None:
-        log.warning("converse.reject", code=busy.code.value, message=busy.message)
-        REQUESTS.labels(outcome=busy.code.value).inc()
-        REQUEST_DURATION.labels(outcome=busy.code.value).observe(0.0)
+    rejected = _preflight_resume(body, settings) or await _preflight_busy(
+        body, x_user_id, gate, registry
+    )
+    if rejected is not None:
+        log.warning("converse.reject", code=rejected.code.value, message=rejected.message)
+        REQUESTS.labels(outcome=rejected.code.value).inc()
+        REQUEST_DURATION.labels(outcome=rejected.code.value).observe(0.0)
         return JSONResponse(
-            status_code=busy.status_code,
-            content={"code": busy.code.value, "message": busy.message},
+            status_code=rejected.status_code,
+            content={"code": rejected.code.value, "message": rejected.message},
         )
 
     span_attributes: dict[str, str | bool] = {
@@ -91,7 +99,7 @@ async def converse(
     run_turn = _get_runner(settings)
 
     def open_runner(cwd: Path) -> AsyncIterator[RunnerEvent]:
-        return run_turn(
+        events = run_turn(
             prompt=body.prompt,
             cwd=cwd,
             system_prompt=_merge_system_prompt(
@@ -104,7 +112,11 @@ async def converse(
             mcp_server_url=settings.mcp_server_url,
             mcp_server_name=settings.mcp_server_name,
             turn_token=x_turn_token,
+            ephemeral=body.mode == "stateless",
         )
+        if body.mode == "stateless":
+            return events
+        return _remembering_session_ids(events, body.session_key, settings.workspace_root)
 
     def workspace() -> AbstractContextManager[Path]:
         if body.mode == "stateless":
@@ -130,6 +142,28 @@ async def converse(
         shutdown_grace_period=settings.shutdown_grace_sec,
         client_close_handler_callable=on_client_close,
     )
+
+
+def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | None:
+    """codex resolves a thread id across *all* sessions in CODEX_HOME, so a resume is
+    only allowed for ids this sessionKey was issued. (claude scopes transcripts by the
+    workspace cwd, which is already per-sessionKey.)"""
+    if settings.provider != "codex" or body.session_id is None:
+        return None
+    known = known_session_ids(body.session_key, root=settings.workspace_root)
+    if body.session_id not in known:
+        return ApiError(ErrorCode.BAD_REQUEST, "sessionId was not issued for this sessionKey")
+    return None
+
+
+async def _remembering_session_ids(
+    events: AsyncIterator[RunnerEvent], session_key: str, root: Path
+) -> AsyncIterator[RunnerEvent]:
+    async with contextlib.aclosing(events) as runner:
+        async for ev in runner:
+            if isinstance(ev, SessionEvent):
+                remember_session_id(session_key, ev.session_id, root=root)
+            yield ev
 
 
 async def _preflight_busy(

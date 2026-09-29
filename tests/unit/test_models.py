@@ -18,12 +18,12 @@ def test_camelcase_aliases_round_trip():
         "sessionId": "01a0ec1c-14d2-7d12-aaa7-47100d58f161",
         "systemPrompt": "be terse",
         "appendSystemPrompt": None,
-        "mode": "stateless",
+        "mode": "session",
     }
     req = ConverseRequest.model_validate(payload)
     assert req.session_id == "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
     assert req.system_prompt == "be terse"
-    assert req.mode == "stateless"
+    assert req.mode == "session"
 
 
 def test_extra_fields_rejected():
@@ -78,3 +78,15 @@ def test_empty_session_id_means_start_fresh():
 def test_null_session_id_means_start_fresh():
     req = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": None})
     assert req.session_id is None
+
+
+def test_stateless_turns_cannot_resume():
+    with pytest.raises(ValidationError, match="stateless"):
+        ConverseRequest.model_validate(
+            {
+                "sessionKey": "k",
+                "prompt": "hi",
+                "mode": "stateless",
+                "sessionId": "01a0ec1c-14d2-7d12-aaa7-47100d58f161",
+            }
+        )

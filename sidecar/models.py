@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Both CLIs issue UUIDs (claude v4, codex v7). Anything else is refused: a leading "-"
 # is parsed as a flag, and codex also resolves free-form *thread names* globally.
@@ -28,6 +28,12 @@ class ConverseRequest(BaseModel):
         if v == "":
             return None
         return v.lower() if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _stateless_cannot_resume(self) -> "ConverseRequest":
+        if self.mode == "stateless" and self.session_id is not None:
+            raise ValueError("sessionId cannot be used with mode=stateless (nothing to resume)")
+        return self
 
 
 class HealthStatus(BaseModel):

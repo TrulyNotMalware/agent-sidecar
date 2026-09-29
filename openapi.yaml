@@ -177,7 +177,9 @@ components:
           description: |
             Session id (a UUID) from a prior `session` event. When provided,
             resumes that conversation; when null or `""`, starts fresh under
-            sessionKey. Anything that is not a UUID is rejected with `400`.
+            sessionKey. Rejected with `400` when it is not a UUID, when
+            `mode=stateless`, or (codex provider) when it was not issued for this
+            sessionKey.
         systemPrompt:
           type:
             - string
@@ -203,8 +205,9 @@ components:
             resume. Concurrent requests for the same sessionKey are rejected
             with `busy`.
             `stateless`: a fresh ephemeral workspace is created per request and
-            removed when the turn ends; any returned `sessionId` is not
-            resumable since the workspace is gone.
+            removed when the turn ends; the returned `sessionId` is not
+            resumable (codex runs with `--ephemeral`), and sending a
+            `sessionId` with `mode=stateless` is rejected with `400`.
 
       # System prompt merge rules (Phase 3 contract):
       #   1. systemPrompt set         → final = systemPrompt
