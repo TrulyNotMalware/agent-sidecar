@@ -32,7 +32,7 @@ async def readyz() -> JSONResponse:
             )
     else:
         if not _binary_ready():
-            failures.append("claude binary not found on PATH")
+            failures.append("claude CLI not found (neither bundled with the SDK nor on PATH)")
         if not _identity_ready(settings):
             failures.append(
                 "no anthropic identity (set CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, "
@@ -46,7 +46,18 @@ async def readyz() -> JSONResponse:
 
 
 def _binary_ready() -> bool:
-    return shutil.which("claude") is not None
+    return _claude_cli_path() is not None
+
+
+def _claude_cli_path() -> str | None:
+    """The CLI the Agent SDK will run: its bundled binary first, then `claude` on PATH."""
+    try:
+        import claude_agent_sdk
+    except ImportError:
+        return shutil.which("claude")
+    name = "claude.exe" if os.name == "nt" else "claude"
+    bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / name
+    return str(bundled) if bundled.is_file() else shutil.which("claude")
 
 
 def _identity_ready(settings: Settings) -> bool:

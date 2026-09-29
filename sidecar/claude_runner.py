@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ApiError, ErrorCode
-from .mcp import build_mcp_servers, private_mcp_config
+from .mcp import build_mcp_servers, private_mcp_config, static_mcp_server_names
 
 # The SDK launches the CLI with the sidecar's full environment and only lets options
 # add or override keys. Blank the secrets that are the sidecar's own business so the
@@ -61,16 +61,33 @@ async def run_turn(
     mcp_server_name: str = "codecompanion",
     turn_token: str | None = None,
     withheld_env: tuple[str, ...] = (),
+    tools: list[str] | None = None,
+    allowed_tools: tuple[str, ...] = (),
+    permission_mode: str = "dontAsk",
+    setting_sources: tuple[str, ...] = (),
 ) -> AsyncIterator[RunnerEvent]:
     """Drive one Claude turn via the Agent SDK and yield internal events.
 
     No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
     task that iterates this generator exactly once, so the SDK can close the CLI.
+
+    Agent policy is explicit rather than inherited from the CLI's defaults:
+    - tools: built-in toolset (None = the CLI's default set, [] = none).
+    - permission_mode "dontAsk": anything that would prompt is denied (headless),
+      unless pre-approved via allowed_tools. MCP servers the operator configured are
+      pre-approved automatically.
+    - setting_sources () + --strict-mcp-config: no ~/.claude or project settings,
+      hooks, plugins or MCP servers leak in from wherever the sidecar runs.
     """
     options_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
         "env": dict.fromkeys((*_WITHHELD_FROM_CLI, *withheld_env), ""),
+        "permission_mode": permission_mode,
+        "setting_sources": list(setting_sources),
+        "extra_args": {"strict-mcp-config": None},
     }
+    if tools is not None:
+        options_kwargs["tools"] = list(tools)
     if system_prompt is not None:
         options_kwargs["system_prompt"] = system_prompt
     if resume_session_id:
@@ -81,11 +98,14 @@ async def run_turn(
         server_url=mcp_server_url,
         turn_token=turn_token,
     )
+    # Headless runs have nobody to approve tool prompts, so MCP servers the operator
+    # configured must be pre-allowed ("mcp__<server>" covers every tool it exposes).
+    # For the per-turn server, authorization is enforced server-side via the turn token.
+    approved = [*allowed_tools, *(f"mcp__{n}" for n in static_mcp_server_names(mcp_config_path))]
     if mcp_server_url is not None and turn_token is not None:
-        # Headless runs have nobody to approve tool prompts, so the scoped server's tools
-        # must be pre-allowed ("mcp__<server>" covers every tool it exposes). Authorization
-        # is enforced server-side per call via the turn token; this only unblocks the SDK.
-        options_kwargs["allowed_tools"] = [f"mcp__{mcp_server_name}"]
+        approved.append(f"mcp__{mcp_server_name}")
+    if approved:
+        options_kwargs["allowed_tools"] = list(dict.fromkeys(approved))
 
     with contextlib.ExitStack() as cleanup:
         if isinstance(mcp_servers, dict):

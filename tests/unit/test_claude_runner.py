@@ -80,3 +80,48 @@ async def test_extra_withheld_names_are_blanked_too(monkeypatch):
 
     assert seen["options"].env["AZURE_OPENAI_KEY"] == ""
     assert seen["options"].env["BEARER_SECRET"] == ""
+
+
+async def test_default_policy_is_explicit_and_hermetic(monkeypatch):
+    seen = _install_fake_query(monkeypatch)
+
+    await _run()
+
+    options = seen["options"]
+    assert options.permission_mode == "dontAsk"
+    assert options.setting_sources == []  # no ~/.claude or project settings/hooks/plugins
+    assert "strict-mcp-config" in options.extra_args  # no MCP servers from elsewhere
+    assert options.tools is None  # CLI default built-in toolset (operator choice)
+
+
+async def test_configured_mcp_servers_are_pre_approved(monkeypatch, tmp_path):
+    static = tmp_path / "mcp.json"
+    static.write_text('{"mcpServers": {"domain-tools": {}, "search": {}}}')
+    seen = _install_fake_query(monkeypatch)
+
+    await _run(
+        mcp_config_path=static,
+        mcp_server_url="https://app.example/mcp",
+        mcp_server_name="tools",
+        turn_token="tok",
+        allowed_tools=("WebFetch",),
+    )
+
+    assert seen["options"].allowed_tools == [
+        "WebFetch",
+        "mcp__domain-tools",
+        "mcp__search",
+        "mcp__tools",
+    ]
+
+
+async def test_tools_can_be_restricted_or_disabled(monkeypatch):
+    seen = _install_fake_query(monkeypatch)
+
+    await _run(tools=[])
+    assert seen["options"].tools == []
+
+    await _run(tools=["Read", "Grep"], permission_mode="default", setting_sources=("project",))
+    assert seen["options"].tools == ["Read", "Grep"]
+    assert seen["options"].permission_mode == "default"
+    assert seen["options"].setting_sources == ["project"]

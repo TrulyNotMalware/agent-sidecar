@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     mcp_server_name: str = "codecompanion"
     claude_auth_path: Path | None = None  # defaults to ~/.claude.json at check time
 
+    # Claude agent policy (PROVIDER=claude). CLAUDE_TOOLS unset keeps the CLI's default
+    # built-in toolset; "" disables all built-ins; otherwise a comma-separated list.
+    claude_tools: str | None = None
+    # Comma-separated tools pre-approved on top of the configured MCP servers, e.g.
+    # "WebFetch,Bash(git status:*)". Under dontAsk everything else that would prompt is denied.
+    claude_allowed_tools: str = ""
+    claude_permission_mode: Literal[
+        "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"
+    ] = "dontAsk"
+    # Comma-separated setting sources to load (user, project, local); empty = none.
+    claude_setting_sources: str = ""
+
     # Codex (PROVIDER=codex) — auth state written by `codex login`
     codex_auth_path: Path | None = None  # defaults to ~/.codex/auth.json at check time
     # Always passed as `codex exec --sandbox`, so a config.toml cannot loosen it.
@@ -54,7 +66,23 @@ class Settings(BaseSettings):
 
     @property
     def codex_env_passthrough_names(self) -> tuple[str, ...]:
-        return tuple(n.strip() for n in self.codex_env_passthrough.split(",") if n.strip())
+        return _csv(self.codex_env_passthrough)
+
+    @property
+    def claude_tools_list(self) -> list[str] | None:
+        return None if self.claude_tools is None else list(_csv(self.claude_tools))
+
+    @property
+    def claude_allowed_tools_names(self) -> tuple[str, ...]:
+        return _csv(self.claude_allowed_tools)
+
+    @property
+    def claude_setting_sources_names(self) -> tuple[str, ...]:
+        return _csv(self.claude_setting_sources)
+
+
+def _csv(value: str) -> tuple[str, ...]:
+    return tuple(n.strip() for n in value.split(",") if n.strip())
 
 
 @lru_cache(maxsize=1)

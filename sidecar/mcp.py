@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterator
@@ -10,6 +11,26 @@ from typing import Any
 from .observability.logging import get_logger
 
 log = get_logger("sidecar.mcp")
+
+# `mcp__<name>` goes into the CLI's comma/space-separated --allowedTools; a name with
+# "," or " " would split into extra entries (e.g. "x,Bash" would pre-approve Bash).
+_SERVER_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def static_mcp_server_names(static_config_path: Path | None) -> list[str]:
+    """Server names in the operator's mcp.json (empty if unset or unreadable)."""
+    if static_config_path is None:
+        return []
+    try:
+        parsed = json.loads(static_config_path.read_text(encoding="utf-8"))
+        names = [str(name) for name in (parsed.get("mcpServers") or {})]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mcp.static_config_unreadable", error_type=type(exc).__name__)
+        return []
+    unsafe = [n for n in names if not _SERVER_NAME.match(n)]
+    if unsafe:
+        log.warning("mcp.server_name_not_pre_approved", names=unsafe)
+    return [n for n in names if _SERVER_NAME.match(n)]
 
 
 def build_mcp_servers(

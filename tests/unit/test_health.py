@@ -9,7 +9,7 @@ def test_readyz_503_when_binary_missing(client, monkeypatch):
     monkeypatch.setattr("sidecar.routes.health._identity_ready", lambda s: True)
     r = client.get("/readyz")
     assert r.status_code == 503
-    assert "claude binary" in r.json()["detail"]
+    assert "claude CLI" in r.json()["detail"]
 
 
 def test_readyz_503_when_identity_missing(client, monkeypatch):
@@ -178,3 +178,14 @@ def test_identity_ready_api_without_key(monkeypatch):
 
     s = Settings(bearer_secret="x", anthropic_mode="api", anthropic_api_key=None)
     assert _identity_ready(s) is False
+
+
+def test_claude_cli_resolves_the_sdk_bundled_binary_first(monkeypatch):
+    # The SDK runs its bundled CLI even when another `claude` is on PATH (or none is).
+    from sidecar.routes.health import _claude_cli_path
+
+    monkeypatch.setenv("PATH", "")
+    path = _claude_cli_path()
+
+    assert path is not None
+    assert path.endswith("_bundled/claude")

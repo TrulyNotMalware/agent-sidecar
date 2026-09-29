@@ -226,3 +226,35 @@ def test_codex_runner_gets_sandbox_and_passthrough_bound():
         "sandbox": "workspace-write",
         "env_passthrough": ("AZURE_OPENAI_KEY",),
     }
+
+
+def test_claude_runner_gets_the_agent_policy_bound():
+    from sidecar.config import Settings
+    from sidecar.routes.converse import _get_runner
+
+    runner = _get_runner(
+        Settings(
+            _env_file=None,
+            bearer_secret="x",
+            claude_tools="",
+            claude_allowed_tools="WebFetch, Bash(git status:*)",
+            claude_permission_mode="default",
+            claude_setting_sources="project",
+        )
+    )
+
+    assert runner.keywords["tools"] == []
+    assert runner.keywords["allowed_tools"] == ("WebFetch", "Bash(git status:*)")
+    assert runner.keywords["permission_mode"] == "default"
+    assert runner.keywords["setting_sources"] == ("project",)
+
+
+def test_claude_policy_defaults():
+    from sidecar.config import Settings
+    from sidecar.routes.converse import _get_runner
+
+    runner = _get_runner(Settings(_env_file=None, bearer_secret="x"))
+
+    assert runner.keywords["tools"] is None  # CLI default toolset unless CLAUDE_TOOLS is set
+    assert runner.keywords["permission_mode"] == "dontAsk"
+    assert runner.keywords["setting_sources"] == ()

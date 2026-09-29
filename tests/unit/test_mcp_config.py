@@ -120,3 +120,14 @@ def test_private_mcp_config_is_removed_when_the_turn_fails():
     with pytest.raises(RuntimeError), private_mcp_config({"s": {}}) as path:
         raise RuntimeError("turn failed")
     assert not path.parent.exists()
+
+
+def test_static_server_names_that_would_split_allowed_tools_are_skipped(tmp_path):
+    from sidecar.mcp import static_mcp_server_names
+
+    static = tmp_path / "mcp.json"
+    static.write_text(
+        json.dumps({"mcpServers": {"domain-tools": {}, "x,Bash": {}, "has space": {}, "v1.2": {}}})
+    )
+
+    assert static_mcp_server_names(static) == ["domain-tools", "v1.2"]

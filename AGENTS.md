@@ -112,7 +112,7 @@ Returns `202` immediately. The stream ends with `error: cancelled` right away; t
 closed in the background and the `sessionKey` stays busy (`429`) until it has exited.
 
 ### `GET /healthz` — always 200
-### `GET /readyz` — 200 if CLI binary + auth credential present, else 503
+### `GET /readyz` — 200 if the provider CLI (claude: the SDK's bundled binary, else PATH) + auth credential present, else 503
 ### `GET /metrics` — Prometheus text format
 
 ---
@@ -136,6 +136,10 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `ANTHROPIC_MODE` | `subscription` | Set `api` so `/readyz` requires `ANTHROPIC_API_KEY` specifically |
 | `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth-file location (local dev) |
 | `OPENAI_API_KEY` | — | Codex provider auth (`PROVIDER=codex`) |
+| `CLAUDE_TOOLS` | unset | Built-in toolset: unset = CLI default, `""` = none, else comma list (`Read,Grep`) |
+| `CLAUDE_ALLOWED_TOOLS` | — | Comma list pre-approved on top of configured MCP servers (`WebFetch,Bash(git status:*)`) |
+| `CLAUDE_PERMISSION_MODE` | `dontAsk` | Anything that would prompt is denied unless pre-approved |
+| `CLAUDE_SETTING_SOURCES` | — | Setting sources to load (`user,project,local`); empty = none (hermetic) |
 | `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location (leave unset; codex itself uses `$CODEX_HOME`, default `~/.codex`) |
 | `CODEX_SANDBOX` | `read-only` | Always passed as `codex exec --sandbox`; `read-only` \| `workspace-write` \| `danger-full-access` |
 | `CODEX_ENV_PASSTHROUGH` | — | Comma-separated extra env var names codex may inherit (e.g. a custom provider's `env_key`) |
@@ -167,7 +171,14 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 ## Providers
 
 ### `claude` (default)
-- Runs `@anthropic-ai/claude-code` CLI via the `claude-agent-sdk` Python package.
+- Runs the Claude Code CLI via the `claude-agent-sdk` Python package — the SDK's
+  **bundled** binary, not a `claude` on PATH (`/readyz` checks the same one).
+- Agent policy is explicit, not inherited from wherever the sidecar runs:
+  `permission_mode=dontAsk` (would-prompt → denied), `setting_sources=[]` and
+  `--strict-mcp-config` (no `~/.claude` / project settings, hooks, plugins or MCP
+  servers), MCP servers from `MCP_CONFIG_PATH` and the per-turn server
+  pre-approved (`mcp__<name>`). The built-in toolset stays the CLI default unless
+  `CLAUDE_TOOLS` is set. See `CLAUDE_*` in the configuration table.
 - Auth: `ANTHROPIC_API_KEY` for production / general use. `CLAUDE_CODE_OAUTH_TOKEN`
   (subscription) and `~/.claude.json` are for local testing only.
 

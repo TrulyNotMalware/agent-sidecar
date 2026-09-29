@@ -24,6 +24,10 @@ contract itself lives in `openapi.yaml`.
 | `CLAUDE_CODE_OAUTH_TOKEN` | unset | **Local testing only.** Long-lived subscription token from `claude setup-token`. Never deploy it. |
 | `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth file location (local dev alternative). Used by `/readyz` validation. |
 | `OPENAI_API_KEY` | unset | **`PROVIDER=codex`.** Codex API key. Materialized into `~/.codex/auth.json` at startup (see [Codex provider](#codex-provider)). |
+| `CLAUDE_TOOLS` | unset | **`PROVIDER=claude`.** Built-in toolset. Unset keeps the CLI's default set; `""` disables every built-in tool (MCP only); otherwise a comma-separated list such as `Read,Glob,Grep`. |
+| `CLAUDE_ALLOWED_TOOLS` | unset | **`PROVIDER=claude`.** Comma-separated tools pre-approved on top of the configured MCP servers, e.g. `WebFetch,Bash(git status:*)`. |
+| `CLAUDE_PERMISSION_MODE` | `dontAsk` | **`PROVIDER=claude`.** `dontAsk` denies anything that would prompt (nobody can answer in a headless sidecar) unless pre-approved. Other modes: `default`, `acceptEdits`, `plan`, `bypassPermissions`, `auto`. |
+| `CLAUDE_SETTING_SOURCES` | unset | **`PROVIDER=claude`.** Comma-separated setting sources to load (`user`, `project`, `local`). Unset loads none, so settings, hooks and plugins under the sidecar's `$HOME` or the workspace never apply. |
 | `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. Leave unset: codex itself always uses `$CODEX_HOME/auth.json` (default `~/.codex`). |
 | `CODEX_SANDBOX` | `read-only` | **`PROVIDER=codex`.** Always passed as `codex exec --sandbox` so a `config.toml` cannot loosen it: `read-only`, `workspace-write`, or `danger-full-access`. |
 | `CODEX_ENV_PASSTHROUGH` | unset | **`PROVIDER=codex`.** Comma-separated extra env var names codex may inherit (e.g. a custom model provider's `env_key`). Everything outside the built-in allowlist is withheld. |
@@ -203,6 +207,28 @@ The codex runner enforces a 100 KB combined-prompt limit (system prompt + user
 prompt are concatenated, since the CLI has no separate system-prompt flag) to
 guard against `ARG_MAX` exhaustion.
 
+## Claude agent policy
+
+The `claude` provider does not inherit tool permissions or settings from the
+environment it happens to run in:
+
+- **Permissions:** `CLAUDE_PERMISSION_MODE=dontAsk` (default). A tool call that
+  would need approval is denied — a headless sidecar has nobody to ask. MCP
+  servers from `MCP_CONFIG_PATH` and the per-turn server are pre-approved as
+  `mcp__<name>`; add more with `CLAUDE_ALLOWED_TOOLS`.
+- **Built-in tools:** the CLI's default set unless `CLAUDE_TOOLS` is set
+  (`""` = MCP only). Tools the CLI runs without asking still run under `dontAsk`;
+  those that would ask (typically Bash, Write, Edit, WebFetch) are denied unless
+  pre-approved. Which calls need approval is the CLI's decision — set
+  `CLAUDE_TOOLS` explicitly if the agent must not read files at all.
+- **Hermetic:** no setting sources are loaded (`CLAUDE_SETTING_SOURCES`) and the
+  CLI runs with `--strict-mcp-config`, so `~/.claude` settings, hooks, plugins,
+  `~/.claude.json` MCP servers and a workspace `.claude/` or `.mcp.json` have no
+  effect.
+
+This is policy, not isolation: the CLI still runs as the sidecar's uid (see the
+scope note under [Codex provider](#codex-provider)).
+
 ## Consumer contract: writing the MCP server
 
 The sidecar is the MCP **client**. Domain operations live in MCP **servers**
@@ -248,7 +274,7 @@ that opens a prompt-injection vector where the model invents IDs.
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `/healthz` | none | Liveness — process responding. |
-| `/readyz` | none | Readiness — the provider's CLI on PATH (`claude`, or `codex` when `PROVIDER=codex`) **and** a matching identity present. 503 with `detail` when not ready. |
+| `/readyz` | none | Readiness — the provider's CLI (the SDK's bundled `claude`, else `claude` on PATH; `codex` on PATH when `PROVIDER=codex`) **and** a matching identity present. 503 with `detail` when not ready. |
 | `/metrics` | none | Prometheus text format with five collectors. |
 
 Metrics:
