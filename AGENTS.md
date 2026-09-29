@@ -60,7 +60,8 @@ sidecar/                 # Application package
 
 tests/
 ├── conftest.py          # pytest fixtures (app, client, settings)
-└── unit/                # 11 files, one per module
+├── unit/                # one file per module
+└── integration/         # real uvicorn + claude-agent-sdk + fake stream-json CLI (no quota)
 
 deploy/k8s/              # Kubernetes manifests
 examples/                # Client examples: Python, Go, Kotlin
@@ -263,8 +264,15 @@ BEARER_SECRET=dev-secret python -m sidecar
 ### Lint + Test
 ```bash
 ruff check .
-pytest tests/ -v
+pytest tests/ -v                      # everything (integration tests take ~30s)
+pytest tests/ -m "not integration"    # fast unit-only loop
 ```
+
+`tests/integration/` starts the real server per test with the SDK pointed at
+`tests/integration/fake_claude.py`, so cancel / disconnect / timeout / SIGTERM
+behaviour is exercised end to end without credentials. Tests marked
+`known_bug(...)` reproduce open `review.md` findings as strict xfails — the fix
+for a finding must remove its marker.
 
 Or via the helper script:
 ```bash

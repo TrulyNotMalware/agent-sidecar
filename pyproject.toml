@@ -45,3 +45,6 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: real uvicorn + claude-agent-sdk + fake CLI subprocesses (slow; deselect with -m 'not integration')",
+]
