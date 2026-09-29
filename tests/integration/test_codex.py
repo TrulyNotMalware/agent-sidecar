@@ -48,7 +48,7 @@ def test_prompt_reaches_codex_on_stdin_and_transient_errors_are_tolerated(start_
     assert 'prompt="--last hello"' in messages
 
 
-def test_timeout_kills_codex_and_everything_it_started(start_sidecar):
+def test_timeout_kills_codex_and_the_rest_of_its_process_group(start_sidecar):
     srv = start_sidecar(mode="hang_with_child", provider="codex", TURN_TIMEOUT_SEC="2")
 
     r = converse(srv.port, "k-codex-timeout")
@@ -78,17 +78,18 @@ def test_resume_is_limited_to_ids_issued_for_the_session_key(start_sidecar):
     assert foreign[1]["code"] == "bad_request"
 
 
-def test_resume_chain_follows_the_forked_thread_ids(start_sidecar):
-    # codex forks on resume and reports a new thread id; each one must be resumable
-    # by the same sessionKey, so a conversation can go on turn after turn.
-    srv = start_sidecar(provider="codex")
+@pytest.mark.parametrize("resume", ["fork", "same"])
+def test_resume_chain_follows_whatever_id_codex_reports(start_sidecar, resume):
+    # codex may report a new (forked) or the same thread id on resume; the latest one
+    # must stay resumable by the same sessionKey, turn after turn.
+    srv = start_sidecar(provider="codex", FAKE_CODEX_RESUME=resume)
 
     first = converse(srv.port, "k-chain")
     second = _resume(srv, "k-chain", first.events[0][1]["sessionId"])
     third = _resume(srv, "k-chain", second.events[0][1]["sessionId"])
 
     ids = [r.events[0][1]["sessionId"] for r in (first, second, third)]
-    assert len(set(ids)) == 3
+    assert len(set(ids)) == (3 if resume == "fork" else 1)
     assert [r.terminal_events for r in (first, second, third)] == [["done"]] * 3
 
 

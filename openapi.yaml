@@ -171,6 +171,7 @@ components:
         prompt:
           type: string
           minLength: 1
+          maxLength: 1000000
           description: The user's prompt for this turn.
         sessionId:
           type:

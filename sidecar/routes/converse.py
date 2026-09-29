@@ -114,8 +114,8 @@ async def converse(
             turn_token=x_turn_token,
             ephemeral=body.mode == "stateless",
         )
-        if body.mode == "stateless":
-            return events
+        if body.mode == "stateless" or settings.provider != "codex":
+            return events  # only codex resumes are bound to recorded ids
         return _remembering_session_ids(events, body.session_key, settings.workspace_root)
 
     def workspace() -> AbstractContextManager[Path]:
@@ -163,7 +163,11 @@ async def _remembering_session_ids(
     async with contextlib.aclosing(events) as runner:
         async for ev in runner:
             if isinstance(ev, SessionEvent):
-                remember_session_id(session_key, ev.session_id, root=root)
+                try:
+                    remember_session_id(session_key, ev.session_id, root=root)
+                except OSError as exc:
+                    # The turn itself is fine; only a later resume of this id gets 400.
+                    log.warning("session_id.not_recorded", error_type=type(exc).__name__)
             yield ev
 
 

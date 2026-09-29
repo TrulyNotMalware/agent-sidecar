@@ -210,12 +210,15 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   flag. `sessionId` must be a UUID, and for codex it must have been issued to the
   same `sessionKey` (recorded under `WORKSPACE_ROOT/.session-ids/`, outside the
   workspaces): codex resolves thread ids across every session in `CODEX_HOME`.
-  Each resume makes codex fork and report a **new** thread id (also recorded):
-  continue with the latest `session` id. `mode=stateless` runs with
+  On resume codex may report the same or a new (forked) thread id — both are
+  recorded; continue with the latest `session` id. `mode=stateless` runs with
   `--ephemeral` and cannot be resumed.
-- Stopping a turn (timeout, cancel, disconnect, shutdown) SIGTERMs the whole
-  process group — codex, the native binary behind the npm wrapper, and the shell
-  commands / MCP servers it started — then SIGKILLs it after 2 s. Waits are bounded.
+- Stopping a turn (timeout, cancel, disconnect, shutdown) SIGTERMs codex's process
+  group — the npm node wrapper, the native codex binary and anything left in their
+  group — then always SIGKILLs the group after 2 s; a natural exit also sweeps it.
+  codex runs model shell commands in their own session (setsid), so those are
+  outside the group and codex's own responsibility. Every wait is bounded (Python
+  3.12's `wait()` only returns once all pipes close).
 - `type:"error"` events are not terminal (codex reports "Reconnecting… n/5" that
   way while falling back from WebSocket to HTTPS). A turn fails on `turn.failed`,
   a non-zero exit, or an exit without `turn.completed`. Oversized event lines are

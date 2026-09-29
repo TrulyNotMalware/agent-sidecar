@@ -55,14 +55,14 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
         )
     except FileNotFoundError:
         return False  # /readyz reports the missing binary
     try:
         await asyncio.wait_for(proc.communicate(key.encode()), _LOGIN_TIMEOUT_SEC)
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await _terminate(proc)
         return False
     return proc.returncode == 0 and path.exists()
 
@@ -232,7 +232,13 @@ async def run_turn(
                     # Kept for the error message if the turn then ends without a result.
                     last_error = event.get("message") or "codex error"
 
-            await proc.wait()
+            # Bounded: on Python 3.12 wait() only returns once every pipe is closed, and a
+            # leftover process can hold stderr open. returncode is set at exit regardless.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(proc.wait()), _EXIT_WAIT_SEC)
+            if proc.returncode is None:
+                raise ApiError(ErrorCode.SDK_ERROR, "codex closed its output but did not exit")
+            await _terminate(proc)  # sweep leftovers now so they cannot hold stderr open
             await _finish(stderr_task)
             if proc.returncode != 0:
                 tail = stderr_tail.text()
@@ -269,6 +275,7 @@ _MAX_EVENT_LINE_BYTES = 8 * 1024 * 1024
 _STDERR_TAIL_BYTES = 4096
 _TERM_GRACE_SEC = 2.0
 _KILL_WAIT_SEC = 5.0
+_EXIT_WAIT_SEC = 5.0
 
 
 async def _send_prompt(proc, prompt: str) -> None:
@@ -326,14 +333,18 @@ async def _drain(reader, tail: _Tail) -> None:
 
 
 async def _finish(task: asyncio.Task) -> None:
-    """Wait (bounded) for a helper task; never raise into the caller's cleanup."""
+    """Wait (bounded) for a helper task; its failure never reaches the caller's cleanup.
+
+    asyncio.wait never raises the task's exception, but does let a cancellation of the
+    *calling* task through (e.g. drain's force-cancel) instead of swallowing it.
+    """
     if not task.done():
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), 1.0)
+        await asyncio.wait({task}, timeout=1.0)
     if not task.done():
         task.cancel()
-    with contextlib.suppress(BaseException):
-        await task
+        await asyncio.wait({task})
+    if not task.cancelled():
+        task.exception()  # mark retrieved; helpers only feed the error message
 
 
 def _signal_group(pid: int, sig: int) -> None:
@@ -342,18 +353,21 @@ def _signal_group(pid: int, sig: int) -> None:
 
 
 async def _terminate(proc) -> None:
-    """Stop codex and everything it started, with bounded waits (never raises)."""
-    if proc.returncode is not None:
-        # codex is gone, but a shell command or MCP server it started may not be.
-        # Safe: a process group id is never reused while any member is alive, and an
-        # empty group just yields ESRCH.
-        _signal_group(proc.pid, signal.SIGKILL)
-        return
-    _signal_group(proc.pid, signal.SIGTERM)
-    with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(asyncio.shield(proc.wait()), _TERM_GRACE_SEC)
+    """Stop codex's process group with bounded waits (never raises).
+
+    The group holds the npm node wrapper, the native codex binary and anything else
+    left in it. codex runs model shell commands in their own session (setsid), so
+    those are outside the group — codex itself is responsible for them.
+    """
     if proc.returncode is None:
-        _signal_group(proc.pid, signal.SIGKILL)
+        _signal_group(proc.pid, signal.SIGTERM)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(proc.wait()), _TERM_GRACE_SEC)
+    # Always sweep: a member that ignored SIGTERM, or outlived a natural exit, goes now.
+    # Safe: a process group id is never reused while any member is alive; an empty
+    # group just yields ESRCH.
+    _signal_group(proc.pid, signal.SIGKILL)
+    if proc.returncode is None:
         # Bounded: on Python 3.12 wait() only returns once every pipe is closed.
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(asyncio.shield(proc.wait()), _KILL_WAIT_SEC)

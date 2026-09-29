@@ -66,6 +66,7 @@ class FakeProc:
         stderr_lines: list[bytes] | None = None,
         hang: bool = False,
         ignore_sigterm: bool = False,
+        wait_stuck: bool = False,
     ) -> None:
         self.pid = 424242
         self.stdin = _Stdin()
@@ -77,6 +78,11 @@ class FakeProc:
         self._exit_code = returncode
         self._hang = hang
         self._ignore_sigterm = ignore_sigterm
+        # Python 3.12: returncode is set at exit, but wait() blocks until every pipe
+        # is closed — a leftover process can keep stderr open.
+        self._wait_stuck = wait_stuck
+        if wait_stuck:
+            self.returncode = returncode
 
     @property
     def killed(self) -> bool:
@@ -90,6 +96,8 @@ class FakeProc:
         self.signalled.set()
 
     async def wait(self) -> int:
+        if self._wait_stuck:
+            await asyncio.Event().wait()
         if self._hang and not self.signalled.is_set():
             await self.signalled.wait()
         for _ in range(5):  # let the stderr reader finish deterministically
@@ -436,7 +444,8 @@ async def test_cancelling_the_turn_terminates_the_process_group(monkeypatch):
         async with asyncio.timeout(0.05):
             await _collect()
 
-    assert proc.signals == [signal.SIGTERM]
+    # SIGTERM first; then the group is always swept, in case a member ignored it.
+    assert proc.signals == [signal.SIGTERM, signal.SIGKILL]
 
 
 async def test_group_is_killed_when_sigterm_is_ignored(monkeypatch):
@@ -543,4 +552,15 @@ async def test_group_is_swept_after_codex_exits_on_its_own(monkeypatch):
 
     await _collect()
 
-    assert proc.signals == [signal.SIGKILL]
+    assert proc.signals and set(proc.signals) == {signal.SIGKILL}
+
+
+async def test_finished_turn_does_not_hang_when_wait_is_stuck(monkeypatch):
+    # Python 3.12: a leftover holding a pipe keeps wait() from returning after exit.
+    monkeypatch.setattr(codex_runner, "_EXIT_WAIT_SEC", 0.05)
+    _install(monkeypatch, FakeProc([COMPLETED], wait_stuck=True))
+
+    async with asyncio.timeout(3):
+        events = await _collect()
+
+    assert isinstance(events[-1], DoneEvent)

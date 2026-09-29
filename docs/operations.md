@@ -166,9 +166,11 @@ file lives at `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`), which is a
 where the sidecar looks unless `CODEX_AUTH_PATH` points elsewhere.
 
 In k8s the container filesystem is ephemeral, so a `codex login`-created
-`auth.json` is lost on restart. Either set `OPENAI_API_KEY` (re-materialized on
-every start) or copy `auth.json` from a Secret into a writable `CODEX_HOME` with an
-init container (see `deploy/k8s/deployment.yaml`, Option B). Do not mount the
+`auth.json` is lost when the Pod is recreated. Either set `OPENAI_API_KEY`
+(materialized at startup when `auth.json` is absent — with an emptyDir
+`CODEX_HOME` the file survives in-place container restarts, so after rotating the
+key recreate the Pod or delete `auth.json`) or copy `auth.json` from a Secret into
+a writable `CODEX_HOME` with an init container (see `deploy/k8s/deployment.yaml`, Option B). Do not mount the
 Secret over `~/.codex` itself: codex writes session files and refreshed OAuth
 tokens there, and a read-only mount breaks both.
 
@@ -184,9 +186,12 @@ to stdin and closes it.
 - Prompt on stdin (`-`) — no `ARG_MAX` limit and never visible in `ps`. stdin is
   closed right after the prompt; an open pipe makes codex wait for "additional
   input from stdin" until `TURN_TIMEOUT_SEC`.
-- Own process group — stopping a turn SIGTERMs codex *and* everything it started
-  (the native binary behind the npm `codex` node wrapper, shell commands, stdio MCP
-  servers), then SIGKILLs the group after 2 s; every wait is bounded.
+- Own process group — stopping a turn SIGTERMs codex's group (the npm `codex` node
+  wrapper and the native binary behind it, which a plain kill used to orphan, plus
+  anything left in the group), then always SIGKILLs the group after 2 s; a natural
+  exit sweeps it too. codex runs model shell commands in their own session
+  (setsid), so a group kill does not reach those — codex terminates them itself
+  (on Linux via PDEATHSIG for the direct child). Every wait is bounded.
 - Events — `type:"error"` is not terminal (e.g. "Reconnecting… 2/5" while falling
   back from WebSocket to HTTPS, common behind proxies). The turn fails on
   `turn.failed`, a non-zero exit, or an exit without `turn.completed` (then the
@@ -195,9 +200,17 @@ to stdin and closes it.
   same `sessionKey` was issued (recorded under `WORKSPACE_ROOT/.session-ids/`,
   outside the workspaces the agent can write to); others get `400` before the
   stream opens, because codex resolves ids across all of `CODEX_HOME`. Threads
-  created before this rule was introduced cannot be resumed. Each resume makes
-  codex fork and report a new thread id (recorded too): continue with the latest
-  `session` id.
+  created before this rule was introduced cannot be resumed. On resume codex may
+  report the same or a new (forked) thread id; both are recorded — continue with
+  the latest `session` id. Do not delete `WORKSPACE_ROOT/.session-ids/` in a
+  workspace cleanup job, or every resume returns `400`. With
+  `CODEX_SANDBOX=workspace-write`, keep `WORKSPACE_ROOT` outside the sandbox's
+  writable roots (e.g. not under `/tmp`), or the agent could forge that record.
+- Transcripts — codex keeps every session's rollout in `CODEX_HOME/sessions/`, and
+  its sandbox modes allow reading the whole filesystem. A model-run shell command
+  can therefore read other sessions' transcripts (and `auth.json`); the resume
+  binding prevents *continuing* a foreign thread, not reading it. Run one sidecar
+  per trust domain (or a CLI uid per tenant) if that matters.
 - `--sandbox` — always explicit, so the sandbox *mode* for model-run shell commands
   is decided by `CODEX_SANDBOX`, not by whatever `config.toml` is present (other
   `config.toml` sandbox settings, e.g. `writable_roots`, still apply). Deployments

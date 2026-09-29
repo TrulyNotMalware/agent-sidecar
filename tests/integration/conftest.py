@@ -79,7 +79,9 @@ def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
         if provider == "codex":
             # codex only inherits an allowlisted env: let the fake's own knobs through.
             # (Not for claude: passthrough names are blanked in the claude CLI's env.)
-            env["CODEX_ENV_PASSTHROUGH"] = "FAKE_LOG,FAKE_CODEX_MODE,FAKE_MAX_LIFETIME"
+            env["CODEX_ENV_PASSTHROUGH"] = (
+                "FAKE_LOG,FAKE_CODEX_MODE,FAKE_CODEX_RESUME,FAKE_MAX_LIFETIME"
+            )
         env.update(env_overrides)
 
         # Log to a file, not a pipe: an orphaned CLI inheriting a pipe would block reads.

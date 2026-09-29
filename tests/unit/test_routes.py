@@ -344,3 +344,25 @@ def test_auth_is_checked_before_header_validation(client):
         headers={"X-User-Id": "x" * 300},  # invalid, but unauthenticated first
     )
     assert r.status_code == 401
+
+
+def test_stateless_turn_asks_the_runner_not_to_persist(client, monkeypatch):
+    recorded = _install_recording_runner(monkeypatch)
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k-stateless", "prompt": "hi", "mode": "stateless"},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 200
+    assert recorded["ephemeral"] is True
+
+
+def test_prompt_size_is_bounded(client):
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k", "prompt": "x" * 1_000_001},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+    assert r.status_code == 400

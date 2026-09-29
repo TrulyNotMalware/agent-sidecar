@@ -13,7 +13,8 @@ class ConverseRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     session_key: str = Field(alias="sessionKey", min_length=1, max_length=256)
-    prompt: str = Field(min_length=1)
+    # Generous (~250k tokens) but bounded: the whole body is held in memory.
+    prompt: str = Field(min_length=1, max_length=1_000_000)
     # Handed to the CLI as `--resume <id>` / `resume <id>`; see SESSION_ID_PATTERN.
     session_id: str | None = Field(default=None, alias="sessionId", pattern=SESSION_ID_PATTERN)
     system_prompt: str | None = Field(default=None, alias="systemPrompt")

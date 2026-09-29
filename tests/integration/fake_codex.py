@@ -1,11 +1,14 @@
 """Fake `codex` CLI speaking the subset of `codex exec --json` the runner parses.
 
     FAKE_CODEX_MODE    normal | hang_with_child
+    FAKE_CODEX_RESUME  fork (default: resume reports a new thread id) | same
     FAKE_LOG           shared with fake_claude.py: "<ts> pid=<pid> <msg>" lines
     FAKE_MAX_LIFETIME  hard self-destruct in seconds (default 120)
 
-`hang_with_child` starts a long-running child (like a model-run shell command or a
-stdio MCP server) and then blocks, so tests can check the whole process group dies.
+`hang_with_child` starts a long-running child that stays in codex's process group
+and then blocks, so tests can check the group is killed. (Real codex runs model
+shell commands in their own session, which a group kill does not reach; what the
+group kill must reach is the native binary behind the npm node wrapper.)
 """
 
 import json
@@ -42,15 +45,17 @@ def main() -> int:
     log(f"prompt={json.dumps(prompt)}")
     mode = os.environ.get("FAKE_CODEX_MODE", "normal")
 
-    # Like codex 0.153: resuming forks the thread, so a *new* id is reported.
+    # Real codex has been seen both keeping the thread id on resume and reporting a
+    # new (forked) one; the sidecar must work either way.
     thread_id = THREAD_ID
     if "resume" in argv:
         resumed = argv[argv.index("resume") + 2]  # resume -- <id> -
-        thread_id = str(uuid.uuid5(uuid.NAMESPACE_URL, resumed))
+        forks = os.environ.get("FAKE_CODEX_RESUME", "fork") == "fork"
+        thread_id = str(uuid.uuid5(uuid.NAMESPACE_URL, resumed)) if forks else resumed
     out({"type": "thread.started", "thread_id": thread_id})
     out({"type": "turn.started"})
     if mode == "hang_with_child":
-        child = subprocess.Popen(["sleep", "3600"])
+        child = subprocess.Popen(["sleep", "120"])  # bounded even if a kill regresses
         log(f"child pid={child.pid}")
         time.sleep(3600)
     # codex reports transient trouble as type=error; the runner must not give up on it.
