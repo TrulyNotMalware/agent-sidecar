@@ -41,6 +41,23 @@ class _HangingLines:
         raise AssertionError("unreachable")
 
 
+class _HangingAfter:
+    """Yield the wrapped lines, then block like a quiet pipe."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return await self._inner.__anext__()
+        except StopAsyncIteration:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable") from None
+
+
 class FakeProc:
     def __init__(
         self,
@@ -89,7 +106,6 @@ async def _collect(
     prompt: str = "hi",
     system_prompt: str | None = None,
     resume_session_id: str | None = None,
-    timeout_sec: float = 5,
 ) -> list:
     return [
         ev
@@ -99,7 +115,6 @@ async def _collect(
             system_prompt=system_prompt,
             resume_session_id=resume_session_id,
             mcp_config_path=None,
-            timeout_sec=timeout_sec,
         )
     ]
 
@@ -280,8 +295,7 @@ async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
             mcp_server_url="https://app.example/mcp",
             mcp_server_name="codecompanion",
             turn_token="tok-xyz",
-            timeout_sec=5,
-        )
+            )
     ]
 
     assert events[-1].__class__ is DoneEvent
@@ -330,7 +344,6 @@ async def test_sandbox_is_always_explicit(monkeypatch):
         system_prompt=None,
         resume_session_id="sess-1",
         mcp_config_path=None,
-        timeout_sec=5,
         sandbox="workspace-write",
     )]
 
@@ -361,7 +374,6 @@ async def test_child_env_withholds_sidecar_secrets(monkeypatch):
         system_prompt=None,
         resume_session_id=None,
         mcp_config_path=None,
-        timeout_sec=5,
         env_passthrough=("CUSTOM_PROVIDER_KEY",),
     )]
 
@@ -374,14 +386,32 @@ async def test_child_env_withholds_sidecar_secrets(monkeypatch):
     assert env["CUSTOM_PROVIDER_KEY"] == "k"
 
 
-async def test_timeout_raises_and_kills_process(monkeypatch):
+async def test_cancelling_the_turn_kills_the_process(monkeypatch):
+    # The caller (sidecar.turn.Turn) bounds a turn by cancelling the task that
+    # iterates the runner; the runner must then kill codex before it finishes.
     proc = FakeProc([], hang=True)
     _install(monkeypatch, proc)
 
-    with pytest.raises(ApiError) as exc_info:
-        await _collect(timeout_sec=0.05)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await _collect()
 
-    assert exc_info.value.code is ErrorCode.TIMEOUT
+    assert proc.killed
+
+
+async def test_closing_the_runner_early_kills_the_process(monkeypatch):
+    proc = FakeProc([_line({"type": "thread.started", "thread_id": "t-1"})], hang=False)
+    proc.stdout = _HangingAfter(proc.stdout)
+    _install(monkeypatch, proc)
+
+    agen = run_turn(
+        prompt="hi", cwd=Path("/tmp"), system_prompt=None, resume_session_id=None,
+        mcp_config_path=None,
+    )
+    assert await anext(agen) == SessionEvent(session_id="t-1")
+    await agen.aclose()
+
+    assert proc.killed
 
 
 class _FakeLoginProc:

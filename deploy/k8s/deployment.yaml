@@ -12,6 +12,9 @@ spec:
       labels:
         app: example-app
     spec:
+      # ≥ SHUTDOWN_GRACE_SEC + 15s: stream grace, uvicorn, then up to 12s for turns
+      # still closing their CLI (see docs/operations.md#shutdown).
+      terminationGracePeriodSeconds: 30
       initContainers:
         # k8s 1.28+ native sidecar via restartPolicy=Always on an initContainer.
         #

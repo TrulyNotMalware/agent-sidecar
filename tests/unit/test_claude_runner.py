@@ -29,7 +29,6 @@ async def _run(**overrides) -> list:
         "system_prompt": None,
         "resume_session_id": None,
         "mcp_config_path": None,
-        "timeout_sec": 5,
     }
     kwargs.update(overrides)
     return [ev async for ev in claude_runner.run_turn(**kwargs)]

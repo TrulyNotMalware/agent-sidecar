@@ -1,10 +1,13 @@
 import asyncio
 import functools
 import time
-from contextlib import nullcontext
+from collections.abc import AsyncIterator
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
+import anyio
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
@@ -12,6 +15,7 @@ from sse_starlette.sse import EventSourceResponse
 from ..auth import require_bearer
 from ..claude_runner import (
     DoneEvent,
+    RunnerEvent,
     SessionEvent,
     TextEvent,
     ToolResultEvent,
@@ -19,17 +23,16 @@ from ..claude_runner import (
 )
 from ..config import Settings, get_settings
 from ..errors import ApiError, ErrorCode
-from ..inflight import InflightHandle, InflightRegistry
+from ..inflight import InflightRegistry
 from ..models import ConverseRequest
 from ..observability.logging import get_logger
-from ..observability.metrics import INFLIGHT, REQUEST_DURATION, REQUESTS, TOKENS, TOOL_CALLS
-from ..observability.tracing import get_tracer
+from ..observability.metrics import REQUEST_DURATION, REQUESTS
 from ..session import stateless_workspace, workspace_for
 from ..sse import sse_event
+from ..turn import StopReason, Turn, TurnEnded, TurnStopped
 
 router = APIRouter()
 log = get_logger("sidecar.converse")
-tracer = get_tracer("sidecar.converse")
 
 
 @router.post("/v1/converse", dependencies=[Depends(require_bearer)], response_model=None)
@@ -54,9 +57,9 @@ async def converse(
     )
 
     # Preflight: reject over-limit requests with a real HTTP 429 while the
-    # status line can still carry it. The stream path re-checks atomically on
-    # registration/acquire; a limit hit only in that race window still arrives
-    # as a terminal SSE `error` frame with code=busy.
+    # status line can still carry it. The turn re-checks atomically when it
+    # reserves; a limit hit only in that race window still arrives as a
+    # terminal SSE `error` frame with code=busy.
     busy = await _preflight_busy(body, x_user_id, gate, registry)
     if busy is not None:
         log.warning("converse.reject", code=busy.code.value, message=busy.message)
@@ -67,9 +70,61 @@ async def converse(
             content={"code": busy.code.value, "message": busy.message},
         )
 
+    span_attributes: dict[str, str | bool] = {
+        "session.key": body.session_key,
+        "session.mode": body.mode,
+        "session.resume": bool(body.session_id),
+    }
+    if x_user_id:
+        span_attributes["user.id"] = x_user_id
+    turn = Turn(
+        session_key=body.session_key,
+        user_id=x_user_id,
+        gate_session_key=body.session_key if body.mode == "session" else None,
+        gate=gate,
+        registry=registry,
+        timeout_sec=settings.turn_timeout_sec,
+        span_attributes=span_attributes,
+    )
+    run_turn = _get_runner(settings)
+
+    def open_runner(cwd: Path) -> AsyncIterator[RunnerEvent]:
+        return run_turn(
+            prompt=body.prompt,
+            cwd=cwd,
+            system_prompt=_merge_system_prompt(
+                base_path=settings.claude_md_path,
+                system_prompt=body.system_prompt,
+                append_system_prompt=body.append_system_prompt,
+            ),
+            resume_session_id=body.session_id,
+            mcp_config_path=settings.mcp_config_path,
+            mcp_server_url=settings.mcp_server_url,
+            mcp_server_name=settings.mcp_server_name,
+            turn_token=x_turn_token,
+        )
+
+    def workspace() -> AbstractContextManager[Path]:
+        if body.mode == "stateless":
+            return stateless_workspace()
+        return nullcontext(workspace_for(body.session_key, root=settings.workspace_root))
+
+    state = _StreamState()
+
+    async def on_client_close(_message) -> None:
+        # After `done` the client leaving is expected; let the CLI wind down on its own.
+        if not state.done_delivered:
+            turn.stop("disconnected")
+
+    # On SIGTERM sse-starlette sets `shutdown` and keeps the stream alive for the
+    # grace period; the stream uses it to let the turn finish or end it cleanly.
+    shutdown = anyio.Event()
     return EventSourceResponse(
-        _event_stream(body, x_user_id, x_turn_token, settings, gate, registry),
+        _event_stream(turn, open_runner, workspace, shutdown, settings, body.session_key, state),
         ping=15,
+        shutdown_event=shutdown,
+        shutdown_grace_period=settings.shutdown_grace_sec,
+        client_close_handler_callable=on_client_close,
     )
 
 
@@ -94,132 +149,104 @@ async def _preflight_busy(
 
 
 async def _event_stream(
-    body: ConverseRequest,
-    x_user_id: str | None,
-    x_turn_token: str | None,
+    turn: Turn,
+    open_runner,
+    workspace,
+    shutdown: anyio.Event,
     settings: Settings,
-    gate,
-    registry: InflightRegistry,
+    session_key: str,
+    state: "_StreamState",
 ):
+    """Relay the turn's queue as SSE: session → events → exactly one `done` | `error`.
+
+    Runs inside sse-starlette's task group, so it never awaits cleanup: every exit
+    path only *signals* the turn (Turn.stop), whose own task closes the runner.
+    """
     started = time.perf_counter()
-    outcome = "ok"
-    cancel_event = asyncio.Event()
-
-    handle = InflightHandle(
-        session_key=body.session_key,
-        user_id=x_user_id,
-        cancel_event=cancel_event,
-        task=asyncio.current_task(),
-    )
-
-    span_cm = tracer.start_as_current_span("claude.turn")
-    workspace_cm = (
-        stateless_workspace() if body.mode == "stateless"
-        else nullcontext(workspace_for(body.session_key, root=settings.workspace_root))
-    )
-
+    loop = asyncio.get_running_loop()
+    drain_budget = max(0.0, settings.shutdown_grace_sec - 1.0)
+    drain_deadline: float | None = None
+    shutdown_wait = asyncio.ensure_future(shutdown.wait())
+    get: asyncio.Future | None = None
+    outcome: str | None = None  # "ok" or the error code of the terminal frame sent
+    turn.start(open_runner, workspace)
     try:
-        await registry.register(handle)
-    except ApiError as exc:
-        outcome = exc.code.value
-        log.warning("converse.reject", code=exc.code.value, message=exc.message)
-        yield sse_event("error", {"code": exc.code.value, "message": exc.message})
-        REQUESTS.labels(outcome=outcome).inc()
-        REQUEST_DURATION.labels(outcome=outcome).observe(time.perf_counter() - started)
-        return
-
-    try:
-        with span_cm as span:
-            _set_span_attrs(span, body, x_user_id)
-            with workspace_cm as cwd:
-                merged_system = _merge_system_prompt(
-                    base_path=settings.claude_md_path,
-                    system_prompt=body.system_prompt,
-                    append_system_prompt=body.append_system_prompt,
+        while True:
+            get = asyncio.ensure_future(turn.events.get())
+            if drain_deadline is None:
+                done, _ = await asyncio.wait(
+                    {get, shutdown_wait}, return_when=asyncio.FIRST_COMPLETED
                 )
-                async with gate.acquire(
-                    user_id=x_user_id,
-                    session_key=body.session_key if body.mode == "session" else None,
-                ):
-                    INFLIGHT.inc()
-                    run_turn = _get_runner(settings)
-                    try:
-                        async for ev in run_turn(
-                            prompt=body.prompt,
-                            cwd=cwd,
-                            system_prompt=merged_system,
-                            resume_session_id=body.session_id,
-                            mcp_config_path=settings.mcp_config_path,
-                            mcp_server_url=settings.mcp_server_url,
-                            mcp_server_name=settings.mcp_server_name,
-                            turn_token=x_turn_token,
-                            timeout_sec=settings.turn_timeout_sec,
-                        ):
-                            if cancel_event.is_set():
-                                outcome = ErrorCode.CANCELLED.value
-                                yield sse_event("error", {
-                                    "code": outcome,
-                                    "message": "turn cancelled by client",
-                                })
-                                return
-                            _instrument(ev, span)
-                            yield _to_sse(ev)
-                    finally:
-                        INFLIGHT.dec()
-            _record_outcome_attr(span, outcome)
-    except ApiError as exc:
-        outcome = exc.code.value
-        log.warning("converse.error", code=exc.code.value, message=exc.message)
-        yield sse_event("error", {"code": exc.code.value, "message": exc.message})
-    except asyncio.CancelledError:
-        outcome = ErrorCode.CANCELLED.value
-        log.info("converse.force_cancelled", session_key=body.session_key)
-        raise
-    except Exception as exc:  # noqa: BLE001
-        outcome = ErrorCode.INTERNAL.value
-        log.error("converse.unhandled", exc_type=type(exc).__name__)
-        yield sse_event("error", {
-            "code": outcome,
-            "message": f"{type(exc).__name__}: {exc}",
-        })
+            else:
+                done, _ = await asyncio.wait({get}, timeout=drain_deadline - loop.time())
+            if get not in done:
+                get.cancel()
+                if drain_deadline is None:
+                    # Shutting down: give the turn most of the grace period to finish.
+                    drain_deadline = loop.time() + drain_budget
+                    log.info("converse.draining", session_key=session_key)
+                else:
+                    turn.stop("shutdown")  # queues TurnStopped, read on the next pass
+                continue
+
+            item = get.result()
+            if isinstance(item, TurnStopped | TurnEnded):
+                code, message = _terminal_error(item, settings.turn_timeout_sec)
+                outcome = code
+                log.warning("converse.error", code=code, message=message)
+                yield sse_event("error", {"code": code, "message": message})
+                return
+            yield _to_sse(item)
+            if isinstance(item, DoneEvent):
+                # The client has its answer. Anything the runner reports while it
+                # winds down is logged by the turn, never sent as a second terminal.
+                outcome = "ok"
+                state.done_delivered = True
+                return
     finally:
-        await registry.unregister(body.session_key, handle)
+        # No awaits here: this may run inside an already-cancelled task group.
+        shutdown_wait.cancel()
+        if get is not None:
+            get.cancel()
+        if outcome != "ok":
+            turn.stop("disconnected")  # no-op if the turn already stopped or ended
+        outcome = outcome or ErrorCode.CANCELLED.value
         REQUESTS.labels(outcome=outcome).inc()
         REQUEST_DURATION.labels(outcome=outcome).observe(time.perf_counter() - started)
         log.info(
             "converse.finish",
-            session_key=body.session_key,
+            session_key=session_key,
             outcome=outcome,
             duration_seconds=round(time.perf_counter() - started, 3),
         )
 
 
-def _set_span_attrs(span, body: ConverseRequest, user_id: str | None) -> None:
-    span.set_attribute("session.key", body.session_key)
-    span.set_attribute("session.mode", body.mode)
-    span.set_attribute("session.resume", bool(body.session_id))
-    if user_id:
-        span.set_attribute("user.id", user_id)
+@dataclass
+class _StreamState:
+    done_delivered: bool = False
 
 
-def _record_outcome_attr(span, outcome: str) -> None:
-    span.set_attribute("outcome", outcome)
+_STOP_ERRORS: dict[StopReason, tuple[ErrorCode, str]] = {
+    "timeout": (ErrorCode.TIMEOUT, "turn exceeded {timeout}s"),
+    "cancelled": (ErrorCode.CANCELLED, "turn cancelled by client"),
+    "shutdown": (ErrorCode.CANCELLED, "sidecar is shutting down"),
+    "disconnected": (ErrorCode.CANCELLED, "client disconnected"),
+}
 
 
-def _instrument(ev, span) -> None:
-    if isinstance(ev, ToolUseEvent):
-        TOOL_CALLS.labels(tool_name=ev.name, outcome="started").inc()
-        log.info("converse.tool_use", tool_name=ev.name, args=ev.args)
-        span.add_event("tool_use", {"name": ev.name})
-    elif isinstance(ev, ToolResultEvent):
-        TOOL_CALLS.labels(tool_name=ev.name, outcome="ok" if ev.ok else "error").inc()
-        log.info("converse.tool_result", tool_name=ev.name, ok=ev.ok)
-        span.add_event("tool_result", {"name": ev.name, "ok": ev.ok})
-    elif isinstance(ev, DoneEvent):
-        TOKENS.labels(kind="input").inc(ev.input_tokens)
-        TOKENS.labels(kind="output").inc(ev.output_tokens)
-        span.set_attribute("tokens.input", ev.input_tokens)
-        span.set_attribute("tokens.output", ev.output_tokens)
+def _terminal_error(item: TurnStopped | TurnEnded, timeout_sec: float) -> tuple[str, str]:
+    reason = item.reason if isinstance(item, TurnStopped) else item.stop_reason
+    if reason is not None:
+        code, template = _STOP_ERRORS[reason]
+        return code.value, template.format(timeout=timeout_sec)
+    error = item.error  # TurnEnded without a stop: the runner finished or failed
+    if isinstance(error, ApiError):
+        return error.code.value, error.message
+    if error is None:
+        return ErrorCode.SDK_ERROR.value, "runner ended without a result"
+    if isinstance(error, asyncio.CancelledError):
+        return ErrorCode.CANCELLED.value, "turn cancelled"
+    return ErrorCode.INTERNAL.value, f"{type(error).__name__}: {error}"
 
 
 def _merge_system_prompt(

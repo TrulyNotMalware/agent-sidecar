@@ -12,9 +12,8 @@ contract itself lives in `openapi.yaml`.
 | `PORT` | `7300` | Listen port. |
 | `BEARER_SECRET` | **required** | Shared secret expected in `Authorization: Bearer …`. Provision via Kubernetes Secret. Startup fails if unset or empty. |
 | `MAX_CONCURRENT` | `8` | Global in-flight `/v1/converse` cap; further requests get HTTP 429 (`busy`). |
-| `TURN_TIMEOUT_SEC` | `90` | Hard ceiling per turn. Past this, the SDK subprocess is SIGKILL'd and the SSE stream emits `error: timeout`. |
-| `CANCEL_GRACE_SEC` | `5` | Grace window between `/cancel` and force-cancel of the underlying task. |
-| `SHUTDOWN_GRACE_SEC` | `10` | Window during process shutdown for in-flight turns to drain before force-cancel. Also sets `uvicorn --timeout-graceful-shutdown`. |
+| `TURN_TIMEOUT_SEC` | `90` | Hard ceiling per turn. At the deadline the stream emits `error: timeout` and the CLI is closed in the background (see [Turn lifecycle](#turn-lifecycle-timeout-cancel-disconnect-shutdown)). |
+| `SHUTDOWN_GRACE_SEC` | `10` | On SIGTERM, how long in-flight turns may keep streaming before they end with `error: cancelled` (see [Shutdown](#shutdown)). Minimum `1`. |
 | `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Per-`sessionKey` workspace root (session mode). Stateless mode uses an OS temp dir. Non-root / local runs (e.g. macOS dev) must override this to a writable directory — otherwise startup fails with `PermissionError` creating the default path. |
 | `CLAUDE_MD_PATH` | unset | Path to the static base system prompt (typically a ConfigMap mount, e.g. `/workspace/CLAUDE.md`). |
 | `MCP_CONFIG_PATH` | unset | Path to `mcp.json` for **extra** static MCP servers (typically `/etc/sidecar/mcp.json`). For `PROVIDER=claude` these are merged with the per-turn scoped entry; the per-turn entry wins on a name collision. |
@@ -241,7 +240,7 @@ Metrics:
 |---|---|---|
 | `sidecar_requests_total` | counter | `outcome` ∈ `{ok, busy, timeout, sdk_error, internal, cancelled}` |
 | `sidecar_request_duration_seconds` | histogram | `outcome` |
-| `sidecar_inflight` | gauge | — |
+| `sidecar_inflight` | gauge | — (turns holding a slot, including the time spent closing their CLI) |
 | `sidecar_tool_calls_total` | counter | `tool_name`, `outcome` ∈ `{started, ok, error}` |
 | `sidecar_tokens_total` | counter | `kind` ∈ `{input, output}` |
 
@@ -255,10 +254,10 @@ in-cluster scrapers and probes can hit them without secret distribution.
 - After the SSE stream opens, every error is reported as the terminal
   `event: error` frame. No HTTP status changes mid-stream.
 - Error codes: `timeout | sdk_error | busy | internal | cancelled`.
-- **Benign `cancelled`:** a client that closes the SSE connection right after the
-  `done` frame causes the ASGI server to cancel the turn task, and the completed
-  turn is logged with `outcome=cancelled` even though the client already received
-  its answer. This is expected and not an error condition.
+- `cancel` via `/v1/sessions/{sessionKey}/cancel` and a shutdown past
+  `SHUTDOWN_GRACE_SEC` both end the stream with `error: cancelled`. A client that
+  disconnects gets no frame (it is gone); its turn is stopped and recorded with
+  `outcome=cancelled`.
 
 ## Client integration notes
 
@@ -269,16 +268,41 @@ in-cluster scrapers and probes can hit them without secret distribution.
   `body: Field required`. Set the client to `Version.HTTP_1_1` explicitly. Other
   clients that default to HTTP/1.1 (curl, most HTTP libraries) are unaffected.
 
+## Turn lifecycle: timeout, cancel, disconnect, shutdown
+
+Each turn runs in its own asyncio task (`sidecar/turn.py`), outside the SSE
+response's task group. That task owns the concurrency reservation, the workspace
+and the runner, and is cancelled at most once, so the runner always finishes
+closing the CLI before the reservation is released. Consequences:
+
+- **The terminal frame never waits for the CLI.** On timeout, cancel or shutdown
+  the stream gets its `error` frame at once and ends cleanly; the CLI is closed in
+  the background (claude: the SDK waits up to 5 s for it to exit, then SIGTERM, then
+  SIGKILL after another 5 s).
+- **The sessionKey stays busy until the CLI has exited.** A retry during that
+  window gets `429 busy` instead of starting a second CLI in the same workspace.
+- **Client disconnect** stops the turn the same way: the CLI is closed, never left
+  running.
+- **Exactly one terminal frame.** Anything the runner reports after `done` (e.g. a
+  non-zero exit while the CLI shuts down) is logged, not sent; a runner that ends
+  without a result gets `error: sdk_error`.
+
 ## Shutdown
 
 - `SIGTERM` (k8s rolling restart, scale down):
   1. uvicorn stops accepting new connections.
-  2. Lifespan shutdown calls `InflightRegistry.drain()` → every in-flight turn
-     receives a cancel event → SSE generators emit `error: cancelled` and
-     close.
-  3. After `SHUTDOWN_GRACE_SEC` any survivors are force-cancelled.
-- For long turns, set `SHUTDOWN_GRACE_SEC` higher than `terminationGracePeriodSeconds` is **not** advised — k8s will SIGKILL the pod
-  first. Keep `SHUTDOWN_GRACE_SEC` ≤ pod grace period minus 5 s.
+  2. Every open stream is told the server is shutting down. In-flight turns get
+     `SHUTDOWN_GRACE_SEC` − 1 s to finish normally (`done`); the rest end with
+     `error: cancelled` and a clean end of stream.
+  3. uvicorn waits up to `SHUTDOWN_GRACE_SEC` + 2 s for connections to close.
+  4. Lifespan shutdown (`InflightRegistry.drain()`) waits up to 12 s for turns
+     still closing their CLI, then force-cancels any survivors (logged as
+     `shutdown.forced_cancel`; a forced turn may leave its CLI behind, which the
+     container runtime reaps when PID 1 exits).
+- Worst case the process needs about `SHUTDOWN_GRACE_SEC` + 15 s. Keep
+  `terminationGracePeriodSeconds` at least that long (the default 30 s fits the
+  default `SHUTDOWN_GRACE_SEC=10`), or k8s SIGKILLs the pod while CLIs are being
+  closed.
 
 ## Operational gotchas
 

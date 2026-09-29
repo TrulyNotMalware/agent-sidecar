@@ -2,6 +2,9 @@ import asyncio
 from dataclasses import dataclass
 
 from .errors import ApiError, ErrorCode
+from .observability.logging import get_logger
+
+log = get_logger("sidecar.inflight")
 
 
 @dataclass
@@ -43,26 +46,31 @@ class InflightRegistry:
         return len(self._by_session)
 
     async def drain(self, *, grace_sec: float = 10.0) -> int:
-        """Signal cancel to every in-flight turn and wait up to grace_sec for natural drain.
+        """Stop every in-flight turn and wait up to grace_sec for its cleanup.
 
-        Returns the count of turns that had to be force-cancelled because they
-        did not exit within grace_sec. Used during application shutdown.
+        Runs at application shutdown, after the HTTP streams have ended: what is
+        left are turn tasks still closing their CLI. Setting cancel_event makes a
+        turn stop itself (a single cancel, so the runner's cleanup can finish).
+        Returns the count of turns force-cancelled because they were still running
+        after grace_sec.
         """
         async with self._lock:
             handles = list(self._by_session.values())
         for h in handles:
             h.cancel_event.set()
 
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + grace_sec
-        while self.active_count > 0 and loop.time() < deadline:
-            await asyncio.sleep(0.05)
-
-        async with self._lock:
-            leftover = list(self._by_session.values())
-        forced = 0
-        for h in leftover:
-            if not h.task.done():
-                h.task.cancel()
-                forced += 1
-        return forced
+        tasks = {h.task: h.session_key for h in handles if not h.task.done()}
+        if not tasks:
+            return 0
+        _, pending = await asyncio.wait(tasks, timeout=grace_sec)
+        if pending:
+            # A second cancel interrupts the runner's cleanup, so these CLIs may
+            # outlive the process (in a container, PID 1 exiting takes them down).
+            log.warning(
+                "shutdown.forced_cancel",
+                session_keys=sorted(tasks[t] for t in pending),
+                grace_sec=grace_sec,
+            )
+        for task in pending:
+            task.cancel()
+        return len(pending)

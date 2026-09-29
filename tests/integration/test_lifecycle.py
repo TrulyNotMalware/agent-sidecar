@@ -1,9 +1,8 @@
 """Turn lifecycle against a real server: terminal frames, cancel, disconnect, timeout, shutdown.
 
-Tests marked known_bug reproduce open bugs (finding ID first in the reason). They are
-expected to fail today; the change that fixes a finding removes its marker. Setup
-steps use precondition()/BackgroundConverse so a broken harness fails the run
-instead of passing as the known bug.
+Each test pins a lifecycle guarantee that was broken before the turn moved into its
+own task (sidecar.turn); the finding ID is in the comment above the test. Setup steps
+use precondition()/BackgroundConverse so a broken harness fails the run loudly.
 """
 
 import shutil
@@ -15,7 +14,6 @@ import pytest
 from .harness import (
     BackgroundConverse,
     converse,
-    known_bug,
     pid_alive,
     precondition,
     wait_until,
@@ -46,7 +44,7 @@ def test_turn_timeout_emits_timeout_frame(start_sidecar):
     assert r.terminated
 
 
-@known_bug("A10: SDK close() delays the timeout frame ~5s past TURN_TIMEOUT_SEC")
+# A10: the timeout frame must not wait for the CLI to be closed.
 def test_turn_timeout_is_reported_promptly(start_sidecar):
     srv = start_sidecar(mode="hang", TURN_TIMEOUT_SEC="2")
 
@@ -56,7 +54,7 @@ def test_turn_timeout_is_reported_promptly(start_sidecar):
     assert r.elapsed < 2 + 3
 
 
-@known_bug("A6: a CLI failure after the result emits `done` and then `error`")
+# A6: a CLI failure after the result must not add a second terminal frame.
 def test_failure_after_result_keeps_a_single_terminal_frame(start_sidecar):
     srv = start_sidecar(mode="result_then_fail")
 
@@ -66,7 +64,7 @@ def test_failure_after_result_keeps_a_single_terminal_frame(start_sidecar):
     assert r.terminated
 
 
-@known_bug("A6: a runner that ends without a result emits no terminal frame")
+# A6: a runner that ends without a result still gets a terminal frame.
 def test_exit_without_result_emits_error_terminal(start_sidecar):
     srv = start_sidecar(mode="no_result")
 
@@ -77,11 +75,13 @@ def test_exit_without_result_emits_error_terminal(start_sidecar):
     assert r.terminated
 
 
-@known_bug("A2/A3: cancelling a silent turn cuts the stream without `error: cancelled`")
+# A2/A3: cancel is honoured while the turn is silent, with a clean end of stream.
 def test_cancel_of_silent_turn_emits_cancelled_frame(start_sidecar):
-    srv = start_sidecar(mode="hang", CANCEL_GRACE_SEC="1")
+    srv = start_sidecar(mode="hang")
     bg = BackgroundConverse(srv.port, "k-cancel")
     bg.wait_first_event(10)
+
+    [cli_pid] = srv.cli_pids()
 
     status, body = srv.post_json("/v1/sessions/k-cancel/cancel")
     precondition(status == 202, f"cancel returned {status}: {body!r}")
@@ -90,9 +90,11 @@ def test_cancel_of_silent_turn_emits_cancelled_frame(start_sidecar):
     assert r.terminal_events == ["error"]
     assert r.events[-1][1]["code"] == "cancelled"
     assert r.terminated
+    assert r.elapsed < 5  # the frame does not wait for the CLI to exit
+    assert wait_until(lambda: not pid_alive(cli_pid), timeout=12)
 
 
-@known_bug("A4: a client disconnect leaves the CLI running and frees the sessionKey early")
+# A4: an abandoned CLI is terminated, and its sessionKey stays busy until then.
 def test_client_disconnect_terminates_cli_before_releasing_session(start_sidecar):
     srv = start_sidecar(mode="hang")
 
@@ -111,7 +113,7 @@ def test_client_disconnect_terminates_cli_before_releasing_session(start_sidecar
     assert wait_until(lambda: not pid_alive(cli_pid), timeout=12)
 
 
-@known_bug("A1: SIGTERM cuts in-flight streams without a terminal frame; drain() never runs")
+# A1: SIGTERM lets a turn finish within SHUTDOWN_GRACE_SEC.
 def test_sigterm_mid_turn_ends_stream_with_terminal_frame(start_sidecar):
     srv = start_sidecar(mode="slow", FAKE_SLEEP="2", SHUTDOWN_GRACE_SEC="8")
     bg = BackgroundConverse(srv.port, "k-sigterm")
@@ -128,7 +130,7 @@ def test_sigterm_mid_turn_ends_stream_with_terminal_frame(start_sidecar):
     assert wait_until(lambda: not srv.alive_cli_pids(), timeout=5)
 
 
-@known_bug("A7: a workspace failure escapes before the try block (HTTP 200, zero frames)")
+# A7: a workspace failure is reported as an error frame.
 def test_workspace_failure_emits_error_frame(start_sidecar, tmp_path):
     srv = start_sidecar(mode="normal")
     # Replace the (valid at startup) workspace root with a regular file.
@@ -140,3 +142,22 @@ def test_workspace_failure_emits_error_frame(start_sidecar, tmp_path):
 
     assert r.terminal_events == ["error"]
     assert r.terminated
+
+
+# A1: past SHUTDOWN_GRACE_SEC the stream still ends with a frame, and the CLI is closed.
+def test_sigterm_past_grace_sends_cancelled_and_closes_cli(start_sidecar):
+    srv = start_sidecar(mode="hang", SHUTDOWN_GRACE_SEC="3")
+    bg = BackgroundConverse(srv.port, "k-sigterm-grace")
+    bg.wait_first_event(10)
+    [cli_pid] = srv.cli_pids()
+
+    srv.proc.send_signal(signal.SIGTERM)
+    r = bg.result(timeout=30)
+
+    assert r.terminated
+    assert r.terminal_events == ["error"]
+    assert r.events[-1][1]["code"] == "cancelled"
+    assert r.elapsed < 3 + 5
+    # Lifespan shutdown waits for the turn to close its CLI before the process exits.
+    assert srv.proc.wait(30) is not None
+    assert not pid_alive(cli_pid)

@@ -1,4 +1,3 @@
-import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -61,10 +60,13 @@ async def run_turn(
     mcp_server_url: str | None = None,
     mcp_server_name: str = "codecompanion",
     turn_token: str | None = None,
-    timeout_sec: float,
     withheld_env: tuple[str, ...] = (),
 ) -> AsyncIterator[RunnerEvent]:
-    """Drive one Claude turn via the Agent SDK and yield internal events."""
+    """Drive one Claude turn via the Agent SDK and yield internal events.
+
+    No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
+    task that iterates this generator exactly once, so the SDK can close the CLI.
+    """
     options_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
         "env": dict.fromkeys((*_WITHHELD_FROM_CLI, *withheld_env), ""),
@@ -91,13 +93,12 @@ async def run_turn(
             mcp_servers = str(cleanup.enter_context(private_mcp_config(mcp_servers)))
         if mcp_servers is not None:
             options_kwargs["mcp_servers"] = mcp_servers
-        async for ev in _run(options_kwargs, prompt=prompt, timeout_sec=timeout_sec):
-            yield ev
+        async with contextlib.aclosing(_run(options_kwargs, prompt=prompt)) as events:
+            async for ev in events:
+                yield ev
 
 
-async def _run(
-    options_kwargs: dict[str, Any], *, prompt: str, timeout_sec: float
-) -> AsyncIterator[RunnerEvent]:
+async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[RunnerEvent]:
     # Lazy import keeps the rest of the app usable without the SDK (e.g. auth/health tests).
     from claude_agent_sdk import (
         AssistantMessage,
@@ -111,14 +112,15 @@ async def _run(
     )
 
     options = ClaudeAgentOptions(**options_kwargs)
+    final_text_parts: list[str] = []
+    pending_tool_names: dict[str, str] = {}
+    session_emitted = False
 
-    async def _stream() -> AsyncIterator[RunnerEvent]:
-        final_text_parts: list[str] = []
-        pending_tool_names: dict[str, str] = {}
-        session_emitted = False
-
-        try:
-            async for message in query(prompt=prompt, options=options):
+    try:
+        # aclosing: closing this generator must close the SDK's query() (and so
+        # the CLI) right away, in this task — not whenever the GC gets to it.
+        async with contextlib.aclosing(query(prompt=prompt, options=options)) as messages:
+            async for message in messages:
                 if not session_emitted:
                     sid = _extract_session_id(message)
                     if sid:
@@ -168,17 +170,10 @@ async def _run(
                             "cache_creation_input_tokens"
                         ),
                     )
-        except ApiError:
-            raise
-        except Exception as exc:
-            raise ApiError(ErrorCode.SDK_ERROR, f"{type(exc).__name__}: {exc}") from exc
-
-    try:
-        async with asyncio.timeout(timeout_sec):
-            async for ev in _stream():
-                yield ev
-    except TimeoutError as exc:
-        raise ApiError(ErrorCode.TIMEOUT, f"turn exceeded {timeout_sec}s") from exc
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(ErrorCode.SDK_ERROR, f"{type(exc).__name__}: {exc}") from exc
 
 
 def _extract_session_id(message: Any) -> str | None:

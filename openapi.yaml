@@ -82,9 +82,10 @@ paths:
     post:
       summary: Cancel an in-flight turn for a sessionKey.
       description: |
-        Issues a graceful cancel to the in-flight turn (if any) for the given
-        `sessionKey`. After a short grace period the underlying claude
-        subprocess is sent SIGKILL.
+        Cancels the in-flight turn (if any) for the given `sessionKey`. Its
+        stream ends right away with `event: error` (`code: cancelled`); the
+        underlying CLI is closed in the background, and the `sessionKey` stays
+        busy (`429`) until it has exited.
       operationId: cancelSession
       parameters:
         - name: sessionKey
@@ -329,9 +330,10 @@ components:
           enum: [timeout, sdk_error, busy, internal, cancelled]
           description: |
             `cancelled` is emitted when /v1/sessions/{sessionKey}/cancel is invoked
-            for an in-flight turn. After the configured grace period (default 5s)
-            without a graceful exit the underlying claude subprocess is force-killed
-            and the SSE connection closes without a final event.
+            for an in-flight turn, and when the sidecar shuts down before the turn
+            finishes within its grace period. The frame is sent at once and the
+            stream ends normally; the CLI is closed in the background. `timeout`
+            likewise arrives at the deadline without waiting for the CLI.
         message:
           type: string
 

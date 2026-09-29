@@ -102,15 +102,15 @@ async def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="sidecar-smoke-") as td:
         try:
-            async for ev in run_turn(
-                prompt=PROMPT,
-                cwd=Path(td),
-                system_prompt=None,
-                resume_session_id=None,
-                mcp_config_path=None,
-                timeout_sec=60,
-            ):
-                print(f"{type(ev).__name__:>16s}  {ev}")
+            async with asyncio.timeout(60):
+                async for ev in run_turn(
+                    prompt=PROMPT,
+                    cwd=Path(td),
+                    system_prompt=None,
+                    resume_session_id=None,
+                    mcp_config_path=None,
+                ):
+                    print(f"{type(ev).__name__:>16s}  {ev}")
         except Exception as exc:
             print(f"\nFAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1

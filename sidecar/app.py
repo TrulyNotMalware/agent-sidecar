@@ -14,6 +14,11 @@ from .routes import cancel, converse, health, metrics
 
 log = get_logger("sidecar.app")
 
+# After the HTTP streams have ended on shutdown, how long to wait for turns that
+# are still closing their CLI (the SDK waits up to 5s for exit, then SIGTERMs and
+# waits another 5s before SIGKILL).
+TURN_CLEANUP_BUDGET_SEC = 12.0
+
 
 def create_app() -> FastAPI:
     settings = get_settings()
@@ -21,6 +26,8 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Fail at startup, not on the first request, if the workspace root is unusable.
+        settings.workspace_root.mkdir(parents=True, exist_ok=True)
         if settings.provider == "codex":
             authed = await ensure_codex_auth(settings.codex_auth_path)
             log.info("codex.auth", materialized=authed)
@@ -29,9 +36,7 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
-            forced = await app.state.inflight.drain(
-                grace_sec=settings.shutdown_grace_sec
-            )
+            forced = await app.state.inflight.drain(grace_sec=TURN_CLEANUP_BUDGET_SEC)
             log.info("shutdown.drained", forced_cancellations=forced)
 
     app = FastAPI(title="Claude Sidecar", version="1.0.0", lifespan=lifespan)

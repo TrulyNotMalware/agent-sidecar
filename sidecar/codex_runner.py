@@ -83,7 +83,6 @@ async def run_turn(
     mcp_server_url: str | None = None,
     mcp_server_name: str = "codecompanion",
     turn_token: str | None = None,
-    timeout_sec: float,
     sandbox: str = "read-only",
     env_passthrough: Iterable[str] = (),
 ) -> AsyncIterator[RunnerEvent]:
@@ -227,12 +226,11 @@ async def run_turn(
                 proc.kill()
                 await proc.wait()
 
-    try:
-        async with asyncio.timeout(timeout_sec):
-            async for ev in _stream():
-                yield ev
-    except TimeoutError as exc:
-        raise ApiError(ErrorCode.TIMEOUT, f"turn exceeded {timeout_sec}s") from exc
+    # No timeout here: the caller bounds the turn (sidecar.turn.Turn). aclosing makes
+    # closing this generator kill the process now, in this task.
+    async with contextlib.aclosing(_stream()) as events:
+        async for ev in events:
+            yield ev
 
 
 def _tool_use_from_item(item: dict) -> list[RunnerEvent]:

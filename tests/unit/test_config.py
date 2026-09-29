@@ -35,3 +35,8 @@ def test_codex_defaults_to_read_only_sandbox_and_parses_passthrough():
 def test_codex_sandbox_rejects_unknown_modes():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, bearer_secret="x", codex_sandbox="yolo")
+
+
+def test_shutdown_grace_must_leave_room_for_a_frame():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, bearer_secret="x", shutdown_grace_sec=0)

@@ -71,3 +71,26 @@ async def test_drain_force_cancels_after_grace():
         await task
     assert task.done()
     await reg.unregister("stuck", h)
+
+
+@pytest.mark.asyncio
+async def test_drain_waits_for_turn_tasks_not_polling_the_registry():
+    # A turn unregisters itself only after its runner closed the CLI; drain must wait
+    # on the task (cleanup), not just for the registry entry to disappear.
+    reg = InflightRegistry()
+    ev = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def turn():
+        await ev.wait()
+        await asyncio.sleep(0.1)  # closing the CLI
+        cleaned.set()
+
+    task = asyncio.create_task(turn())
+    h = InflightHandle(session_key="k", user_id=None, cancel_event=ev, task=task)
+    await reg.register(h)
+
+    forced = await reg.drain(grace_sec=2)
+
+    assert forced == 0
+    assert cleaned.is_set()

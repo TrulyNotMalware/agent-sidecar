@@ -64,7 +64,6 @@ def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
             FAKE_CLAUDE_MODE=mode,
             LOG_LEVEL="INFO",
             TURN_TIMEOUT_SEC="30",
-            CANCEL_GRACE_SEC="1",
             SHUTDOWN_GRACE_SEC="5",
         )
         env.update(env_overrides)

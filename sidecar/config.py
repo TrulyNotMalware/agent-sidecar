@@ -18,8 +18,8 @@ class Settings(BaseSettings):
 
     max_concurrent: int = 8
     turn_timeout_sec: int = 90
-    cancel_grace_sec: int = 5
-    shutdown_grace_sec: int = 10
+    # >= 1: with 0, sse-starlette cancels streams at SIGTERM before a frame can be sent.
+    shutdown_grace_sec: int = Field(default=10, ge=1)
 
     anthropic_mode: Literal["subscription", "api"] = "subscription"
     anthropic_api_key: str | None = None

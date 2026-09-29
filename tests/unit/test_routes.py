@@ -192,3 +192,17 @@ def test_claude_runner_withholds_codex_passthrough_names():
     )
 
     assert runner.keywords["withheld_env"] == ("AZURE_OPENAI_KEY",)
+
+
+def test_terminal_error_mapping():
+    from sidecar.routes.converse import _terminal_error
+    from sidecar.turn import TurnEnded, TurnStopped
+
+    assert _terminal_error(TurnStopped("timeout"), 90) == ("timeout", "turn exceeded 90s")
+    assert _terminal_error(TurnStopped("cancelled"), 90)[0] == "cancelled"
+    assert _terminal_error(TurnStopped("shutdown"), 90)[0] == "cancelled"
+    assert _terminal_error(TurnEnded(None, None), 90) == (
+        "sdk_error",
+        "runner ended without a result",
+    )
+    assert _terminal_error(TurnEnded(None, ValueError("x")), 90) == ("internal", "ValueError: x")

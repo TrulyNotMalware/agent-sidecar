@@ -19,10 +19,11 @@ and session continuity via simple HTTP, with no SDK integration required.
 │  ┌─────────────────────────────────────────────┐   │
 │  │          claude-sidecar (this repo)         │   │
 │  │                                             │   │
-│  │  FastAPI ──► ConcurrencyGate                │   │
-│  │           ──► InflightRegistry              │   │
+│  │  FastAPI ──► SSE stream (EventSource)       │   │
+│  │               │ reads Turn.events           │   │
+│  │           Turn task (sidecar/turn.py)       │   │
+│  │           ──► InflightRegistry + Gate       │   │
 │  │           ──► claude_runner / codex_runner  │   │
-│  │           ──► SSE stream (EventSource)      │   │
 │  └─────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────┘
 ```
@@ -45,6 +46,7 @@ sidecar/                 # Application package
 ├── config.py            # Pydantic Settings (env-based)
 ├── errors.py            # ErrorCode enum + ApiError
 ├── inflight.py          # Cancel registry + drain
+├── turn.py              # One turn in its own task: reservation, runner, stop/timeout
 ├── models.py            # ConverseRequest + response models
 ├── session.py           # Workspace path logic
 ├── sse.py               # SSE event serializer
@@ -106,7 +108,8 @@ contract in `openapi.yaml`.
 
 ### `POST /v1/sessions/{session_key}/cancel`
 
-Returns `202` immediately. Graceful cancel (waits up to `CANCEL_GRACE_SEC`), then hard `task.cancel()`.
+Returns `202` immediately. The stream ends with `error: cancelled` right away; the CLI is
+closed in the background and the `sessionKey` stays busy (`429`) until it has exited.
 
 ### `GET /healthz` — always 200
 ### `GET /readyz` — 200 if CLI binary + auth credential present, else 503
@@ -124,8 +127,7 @@ Returns `202` immediately. Graceful cancel (waits up to `CANCEL_GRACE_SEC`), the
 | `PORT` | `7300` | |
 | `MAX_CONCURRENT` | `8` | Global in-flight cap |
 | `TURN_TIMEOUT_SEC` | `90` | Per-turn hard timeout |
-| `CANCEL_GRACE_SEC` | `5` | Soft cancel window |
-| `SHUTDOWN_GRACE_SEC` | `10` | SIGTERM drain window |
+| `SHUTDOWN_GRACE_SEC` | `10` | On SIGTERM, how long turns may keep streaming before `error: cancelled` (min 1) |
 | `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Session workspaces root |
 | `CLAUDE_MD_PATH` | — | Base system prompt file (hot-reloaded per request) |
 | `MCP_CONFIG_PATH` | — | Path to `mcp.json` |
@@ -256,9 +258,10 @@ preflight check in the converse route. A limit hit only in the narrow race
 window between preflight and in-stream registration still arrives as a terminal
 SSE `error` frame with `code=busy` on an HTTP 200 stream.
 
-`cancelled` also appears benignly when a client closes the SSE connection right
-after `done`: the ASGI server cancels the turn task, and the finished turn is
-logged with `outcome=cancelled` even though the client already has its answer.
+Every stream ends with exactly one terminal frame: after `done`, anything the
+runner reports while the CLI shuts down is logged, never sent. Timeout, cancel and
+shutdown send their `error` frame immediately; the CLI is closed afterwards in the
+turn's own task (see `sidecar/turn.py`).
 
 ---
 
@@ -328,7 +331,8 @@ Key manifests:
   policy (CronJob, emptyDir with size limit, etc.).
 - `CLAUDE.md` is re-read on every request (ConfigMap hot-reload, no restart needed).
 - `tini` is required as PID-1 to reap zombie claude subprocesses. Do not remove from Dockerfile.
-- Set `SHUTDOWN_GRACE_SEC` to at least 5 s less than k8s `terminationGracePeriodSeconds`.
+- Keep k8s `terminationGracePeriodSeconds` ≥ `SHUTDOWN_GRACE_SEC` + 15 s (stream grace +
+  uvicorn + up to 12 s for turns still closing their CLI).
 
 ---
 
@@ -346,17 +350,30 @@ await gate.check(user_id=..., session_key=...)  # same BUSY checks, reserves not
 ```python
 handle = InflightHandle(session_key, user_id, cancel_event, task)
 await registry.register(handle)    # raises BUSY on duplicate
-await registry.unregister(handle)  # stale handles are no-ops
-await registry.drain(grace_sec)    # returns count of force-cancelled tasks
+await registry.unregister(session_key, handle)  # stale handles are no-ops
+await registry.drain(grace_sec)    # stop all turns, wait for cleanup; returns force-cancelled count
 ```
 
 ### `sidecar/claude_runner.py — run_turn()`
 ```python
 async for event in run_turn(
     prompt=..., cwd=..., system_prompt=...,
-    resume_session_id=..., mcp_config_path=..., timeout_sec=...
+    resume_session_id=..., mcp_config_path=...,
 ):
     # event: SessionEvent | TextEvent | ToolUseEvent | ToolResultEvent | DoneEvent
+```
+Runners have no timeout of their own; the caller bounds the turn by cancelling the
+task that iterates the generator **once**, and each runner closes its CLI on the way
+out (`contextlib.aclosing` at every level).
+
+### `sidecar/turn.py — Turn`
+```python
+turn = Turn(session_key=..., user_id=..., gate_session_key=..., gate=..., registry=...,
+            timeout_sec=...)
+turn.start(open_runner, workspace)   # own asyncio task: register → acquire → workspace → runner
+item = await turn.events.get()       # RunnerEvent* … then TurnStopped? … then exactly one TurnEnded
+turn.stop("cancelled")               # first call wins; queues TurnStopped, cancels the task once
+turn.cancel_event.set()              # same, from the cancel route / drain()
 ```
 `claude-agent-sdk` is lazy-imported — tests without the SDK installed remain importable.
 

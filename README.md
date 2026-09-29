@@ -42,7 +42,7 @@ for `ANTHROPIC_API_KEY`, `mcp.json`, and `CLAUDE.md`.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/v1/converse` | Bearer | Run one turn; streams SSE events |
-| `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | Cancel an in-flight turn (graceful → SIGKILL after grace) |
+| `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | Cancel an in-flight turn (`error: cancelled` at once; CLI closed in the background) |
 | `GET` | `/healthz` | none | Liveness |
 | `GET` | `/readyz` | none | Readiness — provider CLI (`claude`/`codex`) + auth present |
 | `GET` | `/metrics` | none | Prometheus text format |
@@ -110,6 +110,7 @@ sidecar/                  # the application
 ├── codex_runner.py       # OpenAI Codex CLI adapter (PROVIDER=codex)
 ├── concurrency.py        # global / user / session gates
 ├── inflight.py           # cancel registry + drain
+├── turn.py               # one turn in its own task (reservation, runner, stop/timeout)
 ├── observability/        # metrics, structured logging, OTel tracing
 └── …
 tests/                    # unit tests
@@ -182,7 +183,7 @@ docker build -t claude-sidecar:1.0.0 .
 | 메서드 | 경로 | 인증 | 용도 |
 |---|---|---|---|
 | `POST` | `/v1/converse` | Bearer | 1턴 실행, SSE 이벤트 스트림 |
-| `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | 진행 중 turn 취소 (graceful → grace 후 SIGKILL) |
+| `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | 진행 중 turn 취소 (즉시 `error: cancelled`, CLI는 백그라운드에서 종료) |
 | `GET` | `/healthz` | 없음 | Liveness |
 | `GET` | `/readyz` | 없음 | Readiness — provider CLI (`claude`/`codex`) 바이너리 + 인증 검증 |
 | `GET` | `/metrics` | 없음 | Prometheus text 포맷 |
@@ -250,6 +251,7 @@ sidecar/                  # 애플리케이션
 ├── codex_runner.py       # OpenAI Codex CLI 어댑터 (PROVIDER=codex)
 ├── concurrency.py        # 글로벌 / user / session 게이트
 ├── inflight.py           # 취소 레지스트리 + drain
+├── turn.py               # turn 하나를 독립 태스크로 실행 (예약, 러너, 중단/타임아웃)
 ├── observability/        # 메트릭, 구조화 로깅, OTel 트레이싱
 └── …
 tests/                    # unit 테스트
