@@ -20,11 +20,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+import uuid
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from opentelemetry.trace import Status, StatusCode
 
 from .admission import Admission
 from .errors import ApiError
@@ -66,7 +69,10 @@ class Turn:
         admission: Admission,
         timeout_sec: float,
         span_attributes: dict[str, str | bool] | None = None,
+        turn_id: str | None = None,
     ) -> None:
+        # Correlates the client's error frame (and X-Turn-Id) with the sidecar's log.
+        self.turn_id = turn_id or uuid.uuid4().hex
         self.session_key = session_key
         self.user_id = user_id
         self.events: asyncio.Queue[TurnItem] = asyncio.Queue()
@@ -120,13 +126,25 @@ class Turn:
         error: BaseException | None = None
         try:
             with tracer.start_as_current_span(
-                "claude.turn", attributes=self._span_attributes
+                "claude.turn",
+                attributes=self._span_attributes,
+                # The defaults would export the exception's text and its __cause__ chain
+                # (CLI stderr, output lines): unscrubbed, and past LOG_PROMPTS.
+                record_exception=False,
+                set_status_on_exception=False,
             ) as span:
                 outcome = "completed"
                 try:
                     await self._run(open_runner, workspace, span)
                 except BaseException as exc:
                     outcome = exc.code.value if isinstance(exc, ApiError) else type(exc).__name__
+                    if not isinstance(exc, asyncio.CancelledError):
+                        span.set_status(Status(StatusCode.ERROR, outcome))
+                        span.add_event("exception", {
+                            "exception.type": type(exc).__name__,
+                            # Only what the client was told; details are in the log.
+                            "exception.message": exc.message if isinstance(exc, ApiError) else "",
+                        })
                     raise
                 finally:
                     span.set_attribute("outcome", self._stop_reason or outcome)
@@ -136,6 +154,8 @@ class Turn:
             error = exc
         except Exception as exc:  # noqa: BLE001 — reported to the client as TurnEnded
             error = exc
+            if not isinstance(exc, ApiError):  # a bug or an environment problem
+                log.error("turn.internal_error", error_type=type(exc).__name__, exc_info=exc)
         finally:
             deadline.cancel()
             # Released before TurnEnded is queued: once the stream has read it (and
@@ -149,6 +169,8 @@ class Turn:
                 error_type=type(error).__name__ if error else None,
                 error_code=error.code.value if isinstance(error, ApiError) else None,
                 error_message=error.message if isinstance(error, ApiError) else None,
+                # CLI stderr / exception text: never sent to the client (secret-scrubbed).
+                error_detail=error.detail if isinstance(error, ApiError) else None,
                 duration_seconds=round(time.perf_counter() - started, 3),
             )
 

@@ -28,5 +28,5 @@ async def cancel(
     # The stream gets `error: cancelled` right away; the sessionKey stays busy until
     # the turn's task has closed the CLI.
     turn.stop("cancelled")
-    log.info("cancel.requested", session_key=session_key)
+    log.info("cancel.requested", session_key=session_key, target_turn_id=turn.turn_id)
     return {"status": "accepted", "sessionKey": session_key}

@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from sidecar import claude_runner
+from sidecar.errors import ApiError, ErrorCode
 
 
 def _install_fake_query(monkeypatch) -> dict:
@@ -143,3 +146,74 @@ async def test_restricted_mode_is_opt_in(monkeypatch):
 
     await _run(restricted=True)
     assert "restricted" in seen["options"].extra_args
+
+
+def _install_failing_query(monkeypatch, exc: Exception, *messages, stderr=()) -> None:
+    import claude_agent_sdk
+
+    async def fake_query(*, prompt, options):
+        for line in stderr:
+            options.stderr(line)  # what the SDK does with each line the CLI writes
+        for m in messages:
+            yield m
+        raise exc
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+
+def _error_result(**fields):
+    from claude_agent_sdk import ResultMessage
+
+    return ResultMessage(
+        subtype=fields.pop("subtype", "success"), duration_ms=1, duration_api_ms=1,
+        is_error=True, num_turns=1, session_id="s", **fields,
+    )
+
+
+async def test_error_result_raised_by_the_sdk_is_the_clients_to_see(monkeypatch):
+    from claude_agent_sdk import ResultError
+
+    data = {"subtype": "success", "result": "Prompt is too long", "is_error": True}
+    _install_failing_query(
+        monkeypatch, ResultError("Claude Code returned an error result: …", data, exit_code=1)
+    )
+
+    with pytest.raises(ApiError) as exc_info:
+        await _run()
+
+    assert exc_info.value.code is ErrorCode.SDK_ERROR
+    assert exc_info.value.message == "Prompt is too long"
+    assert exc_info.value.detail is None
+
+
+async def test_error_result_message_wins_over_the_sdk_restating_it(monkeypatch):
+    from claude_agent_sdk import ResultError
+
+    result = _error_result(subtype="error_max_turns", errors=["Reached max turns (3)"])
+    _install_failing_query(monkeypatch, ResultError("restated", {}, exit_code=1), result)
+
+    with pytest.raises(ApiError) as exc_info:
+        await _run()
+
+    assert exc_info.value.message == "Reached max turns (3)"
+
+
+async def test_cli_failure_keeps_stderr_and_output_off_the_wire(monkeypatch):
+    from claude_agent_sdk import CLIJSONDecodeError, ProcessError
+
+    _install_failing_query(
+        monkeypatch,
+        ProcessError("Command failed", 2, "Check stderr output for details"),
+        stderr=["starting", "fatal: cannot reach the API"],
+    )
+    with pytest.raises(ApiError) as exc_info:
+        await _run()
+    assert exc_info.value.message == "claude CLI failed (ProcessError, exit code 2)"
+    assert exc_info.value.detail.endswith("stderr: starting\nfatal: cannot reach the API")
+
+    bad_line = '{"type":"assistant","text":"the user\'s private words'
+    _install_failing_query(monkeypatch, CLIJSONDecodeError(bad_line, ValueError("bad json")))
+    with pytest.raises(ApiError) as exc_info:
+        await _run()
+    assert exc_info.value.message == "claude CLI failed (CLIJSONDecodeError)"
+    assert "private words" not in exc_info.value.detail  # conversation content

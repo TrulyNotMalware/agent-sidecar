@@ -1,9 +1,10 @@
+import collections
 import contextlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from .errors import ApiError, ErrorCode
+from .errors import ApiError, ErrorCode, provider_message
 from .events import (
     DoneEvent,
     RunnerEvent,
@@ -18,12 +19,16 @@ from .mcp import (
     private_mcp_config,
     static_mcp_server_names,
 )
+from .observability.logging import get_logger
 
 # The SDK launches the CLI with the sidecar's full environment and only lets options
 # add or override keys. Blank the secrets that are the sidecar's own business so the
 # agent's tools cannot read them from its environment. Callers can add more names
 # (e.g. CODEX_ENV_PASSTHROUGH values) via `withheld_env`.
 _WITHHELD_FROM_CLI = ("BEARER_SECRET", "OPENAI_API_KEY")
+_STDERR_TAIL_LINES = 40
+
+log = get_logger("sidecar.claude")
 
 
 async def run_turn(
@@ -108,6 +113,7 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,
+        ResultError,
         ResultMessage,
         TextBlock,
         ToolResultBlock,
@@ -116,7 +122,16 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
         query,
     )
 
-    options = ClaudeAgentOptions(**options_kwargs)
+    # Setting a callback is what makes the SDK pipe the CLI's stderr at all (otherwise it
+    # goes straight to the pod log, unscrubbed). Each line is logged — scrubbed, with the
+    # turn's id — and the tail explains a failed CLI.
+    stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
+
+    def on_stderr(line: str) -> None:
+        stderr_tail.append(line)
+        log.info("claude.stderr", line=line)
+
+    options = ClaudeAgentOptions(**options_kwargs, stderr=on_stderr)
     final_text_parts: list[str] = []
     pending_tool_names: dict[str, str] = {}
     session_emitted = False
@@ -165,11 +180,8 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
                                 )
                 elif isinstance(message, ResultMessage):
                     if message.is_error:
-                        errs = getattr(message, "errors", None) or [
-                            getattr(message, "stop_reason", None) or "claude reported error"
-                        ]
-                        result_error = ApiError(
-                            ErrorCode.SDK_ERROR, "; ".join(str(e) for e in errs)
+                        result_error = _result_error(
+                            message.errors, message.result, message.subtype
                         )
                         continue
                     final_text = (
@@ -188,9 +200,40 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
     except ApiError:
         raise
     except Exception as exc:
-        raise ApiError(ErrorCode.SDK_ERROR, f"{type(exc).__name__}: {exc}") from exc
+        # After an error result the CLI exits non-zero and the SDK raises ResultError
+        # restating it — also when no message came first (e.g. a resume refused during
+        # the SDK's initialize).
+        if result_error is None and isinstance(exc, ResultError):
+            result_error = _result_error(exc.errors, exc.result, exc.subtype)
+        if result_error is None:
+            raise _cli_failure(exc, "\n".join(stderr_tail)) from exc
+        raise result_error from exc
     if result_error is not None:
         raise result_error
+
+
+def _result_error(errors: list[str] | None, result: str | None, subtype: str | None) -> ApiError:
+    """An error result the CLI reported (API error, max turns, …): the client's to see."""
+    reported = "; ".join(e for e in errors or () if isinstance(e, str) and e.strip())
+    text = reported or result or subtype or "claude reported an error"
+    return ApiError(ErrorCode.SDK_ERROR, provider_message(text))
+
+
+def _cli_failure(exc: Exception, stderr: str) -> ApiError:
+    """The CLI or the SDK itself failed: the details (stderr, …) go to the log only."""
+    exit_code = getattr(exc, "exit_code", None)
+    code = f", exit code {exit_code}" if exit_code is not None else ""
+    # CLIJSONDecodeError's text quotes the CLI's output line — conversation content.
+    cause = exc.original_error if hasattr(exc, "original_error") and hasattr(exc, "line") else exc
+    detail = f"{type(exc).__name__}: {cause}"
+    if stderr.strip():
+        detail += f"; stderr: {stderr[-_STDERR_DETAIL_CHARS:]}"
+    return ApiError(
+        ErrorCode.SDK_ERROR, f"claude CLI failed ({type(exc).__name__}{code})", detail=detail
+    )
+
+
+_STDERR_DETAIL_CHARS = 2000
 
 
 def _extract_session_id(message: Any) -> str | None:

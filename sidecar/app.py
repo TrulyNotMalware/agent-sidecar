@@ -11,6 +11,7 @@ from .codex_runner import ensure_codex_auth
 from .config import get_settings
 from .errors import ApiError, ErrorCode
 from .observability.logging import configure_logging, get_logger
+from .observability.redaction import register_secrets
 from .routes import cancel, converse, health, metrics
 
 log = get_logger("sidecar.app")
@@ -20,10 +21,32 @@ log = get_logger("sidecar.app")
 # waits another 5s before SIGKILL).
 TURN_CLEANUP_BUDGET_SEC = 12.0
 
+_CREDENTIAL_ENV_VARS = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY", "CODEX_API_KEY",
+    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK",
+)
+
+
+def _custom_header_values() -> list[str]:
+    """ANTHROPIC_CUSTOM_HEADERS is "Name: value" lines; the values may be credentials."""
+    raw = os.environ.get("ANTHROPIC_CUSTOM_HEADERS", "")
+    return [line.partition(":")[2].strip() for line in raw.splitlines() if ":" in line]
+
 
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(level=settings.log_level, redact=not settings.log_prompts)
+    # Scrubbed from error frames and log lines wherever they appear (e.g. echoed back
+    # in a provider's error message or in CLI stderr).
+    register_secrets(
+        settings.bearer_secret.get_secret_value(),
+        settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None,
+        *(os.environ.get(name) for name in _CREDENTIAL_ENV_VARS),
+        *_custom_header_values(),
+        # Passed through to codex because they are usually a custom provider's key.
+        *(os.environ.get(name) for name in settings.codex_env_passthrough_names),
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

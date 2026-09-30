@@ -131,6 +131,7 @@ def test_converse_busy_same_session_key_returns_429(client, app):
     assert r.status_code == 429
     assert r.json()["code"] == "busy"
     assert "dup-key" in r.json()["message"]
+    assert len(r.headers["x-turn-id"]) == 32  # the converse.reject log line has it too
 
 
 @pytest.mark.parametrize("mode", ["session", "stateless"])
@@ -243,17 +244,41 @@ def test_claude_runner_withholds_codex_passthrough_names():
 
 
 def test_terminal_error_mapping():
+    from sidecar.errors import ApiError, ErrorCode
     from sidecar.routes.converse import _terminal_error
     from sidecar.turn import TurnEnded, TurnStopped
 
-    assert _terminal_error(TurnStopped("timeout"), 90) == ("timeout", "turn exceeded 90s")
-    assert _terminal_error(TurnStopped("cancelled"), 90)[0] == "cancelled"
-    assert _terminal_error(TurnStopped("shutdown"), 90)[0] == "cancelled"
-    assert _terminal_error(TurnEnded(None, None), 90) == (
-        "sdk_error",
-        "runner ended without a result",
+    def mapped(item):
+        return _terminal_error(item, 90, "t1")
+
+    assert mapped(TurnStopped("timeout")) == ("timeout", "turn exceeded 90s")
+    assert mapped(TurnStopped("cancelled"))[0] == "cancelled"
+    assert mapped(TurnStopped("shutdown"))[0] == "cancelled"
+    assert mapped(TurnEnded(None, None)) == ("sdk_error", "runner ended without a result")
+    # What the provider reported goes out as is ...
+    reported = ApiError(ErrorCode.SDK_ERROR, "quota exhausted")
+    assert mapped(TurnEnded(None, reported)) == ("sdk_error", "quota exhausted")
+    # ... internals never do: the message points at the log instead.
+    see_log = " (details in the sidecar log, turn t1)"
+    withheld = ApiError(ErrorCode.SDK_ERROR, "codex exited with code 1", detail="stderr: x")
+    assert mapped(TurnEnded(None, withheld)) == ("sdk_error", "codex exited with code 1" + see_log)
+    assert mapped(TurnEnded(None, PermissionError("/var/lib/x"))) == (
+        "internal",
+        "internal error" + see_log,
     )
-    assert _terminal_error(TurnEnded(None, ValueError("x")), 90) == ("internal", "ValueError: x")
+
+
+def test_stream_carries_the_turn_id(client, monkeypatch):
+    _install_recording_runner(monkeypatch)
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "turn-id-k", "prompt": "hi"},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 200
+    assert len(r.headers["x-turn-id"]) == 32
 
 
 def test_codex_runner_gets_sandbox_and_passthrough_bound():
@@ -325,6 +350,25 @@ def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path):
 
     remember_session_id("k", sid, root=tmp_path)
     assert _preflight_resume(body, codex) is None
+
+
+def test_an_unreadable_session_record_is_a_json_500(tmp_path):
+    import hashlib
+
+    from sidecar.config import Settings
+    from sidecar.models import ConverseRequest
+    from sidecar.routes.converse import _preflight_resume
+
+    record = tmp_path / ".session-ids" / hashlib.sha256(b"k").hexdigest()
+    record.mkdir(parents=True)  # reading it raises IsADirectoryError
+    codex = Settings(_env_file=None, bearer_secret="x", provider="codex", workspace_root=tmp_path)
+    sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
+    body = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": sid})
+
+    rejected = _preflight_resume(body, codex)
+
+    assert rejected is not None
+    assert rejected.status_code == 500
 
 
 @pytest.mark.parametrize(

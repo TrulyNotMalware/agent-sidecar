@@ -33,7 +33,7 @@ contract itself lives in `openapi.yaml`.
 | `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. Leave unset: codex itself always uses `$CODEX_HOME/auth.json` (default `~/.codex`). |
 | `CODEX_SANDBOX` | `read-only` | **`PROVIDER=codex`.** Always passed as `codex exec --sandbox` so a `config.toml` cannot loosen it: `read-only`, `workspace-write`, or `danger-full-access`. |
 | `CODEX_ENV_PASSTHROUGH` | unset | **`PROVIDER=codex`.** Comma-separated extra env var names codex may inherit (e.g. a custom model provider's `env_key`). Everything outside the built-in allowlist is withheld. |
-| `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. |
+| `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. Known credentials and `sk-…` / `Bearer …` strings are scrubbed from every log line either way. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (case-insensitive; anything else fails startup). |
 | `TRACING_ENABLED` | `false` | When `true`, enable OpenTelemetry tracing (`OTLP/HTTP`). |
 | `OTEL_SERVICE_NAME` | `claude-sidecar` | Service name attached to traces. |
@@ -340,6 +340,12 @@ in-cluster scrapers and probes can hit them without secret distribution.
 - After the SSE stream opens, every error is reported as the terminal
   `event: error` frame. No HTTP status changes mid-stream.
 - SSE error codes: `timeout | sdk_error | internal | cancelled` (`busy` is always the pre-stream `429`).
+- An error frame's `message` carries what the provider reported (e.g. "Prompt is
+  too long …", "unexpected status 429 …"), with credential-shaped strings removed
+  and cut at 500 characters. CLI stderr and exception text are never sent; the
+  message then ends with `(details in the sidecar log, turn <id>)`, and the
+  `turn.closed` log line for that `turn_id` has them as `error_detail`. The same id
+  is on the stream's `X-Turn-Id` response header.
 - `cancel` via `/v1/sessions/{sessionKey}/cancel` and a shutdown past
   `SHUTDOWN_GRACE_SEC` both end the stream with `error: cancelled`. A client that
   disconnects gets no frame (it is gone); its turn is stopped and recorded with

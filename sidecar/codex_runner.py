@@ -6,7 +6,7 @@ import signal
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 
-from .errors import ApiError, ErrorCode
+from .errors import ApiError, ErrorCode, provider_message
 from .events import (
     DoneEvent,
     RunnerEvent,
@@ -137,13 +137,12 @@ async def run_turn(
     # tool-call authority the token grants.
     mcp_scoped = mcp_server_url is not None and turn_token is not None
     if mcp_scoped:
+        # The name is validated as a bare TOML key ([A-Za-z0-9_-]+); values are quoted.
+        server = f"mcp_servers.{mcp_server_name}"
         cmd += [
-            "-c",
-            f'mcp_servers.{mcp_server_name}.url="{mcp_server_url}"',
-            "-c",
-            f'mcp_servers.{mcp_server_name}.bearer_token_env_var="{_MCP_TOKEN_ENV_VAR}"',
-            "-c",
-            f'mcp_servers.{mcp_server_name}.default_tools_approval_mode="approve"',
+            "-c", f"{server}.url={_toml_string(mcp_server_url)}",
+            "-c", f"{server}.bearer_token_env_var={_toml_string(_MCP_TOKEN_ENV_VAR)}",
+            "-c", f"{server}.default_tools_approval_mode={_toml_string('approve')}",
         ]
 
     # The prompt goes through stdin ("-"): no ARG_MAX limit and never visible in `ps`.
@@ -158,17 +157,24 @@ async def run_turn(
     )
 
     async def _stream() -> AsyncIterator[RunnerEvent]:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=turn_env,
-            # Own process group: shell commands and MCP servers codex starts (and the
-            # native binary behind the npm node wrapper) are terminated with it.
-            start_new_session=True,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=turn_env,
+                # Own process group: shell commands and MCP servers codex starts (and the
+                # native binary behind the npm node wrapper) are terminated with it.
+                start_new_session=True,
+            )
+        except OSError as exc:  # not installed, not executable, …
+            raise ApiError(
+                ErrorCode.SDK_ERROR,
+                f"codex could not be started ({type(exc).__name__})",
+                detail=f"{type(exc).__name__}: {exc}",
+            ) from exc
         stderr_tail = _Tail(_STDERR_TAIL_BYTES)
         stderr_task = asyncio.create_task(_drain(proc.stderr, stderr_tail))
         # Written concurrently with reading stdout: if codex ever produced a pipe's worth
@@ -223,8 +229,7 @@ async def run_turn(
                     )
 
                 elif ev_type == "turn.failed":
-                    err = event.get("error") or {}
-                    raise ApiError(ErrorCode.SDK_ERROR, err.get("message") or "turn failed")
+                    raise ApiError(ErrorCode.SDK_ERROR, provider_message(_failure_text(event)))
 
                 elif ev_type == "error":
                     # Not terminal: codex reports transient trouble this way too
@@ -241,21 +246,29 @@ async def run_turn(
             await _terminate(proc)  # sweep leftovers now so they cannot hold stderr open
             await _finish(stderr_task)
             if proc.returncode != 0:
+                # What codex reported goes to the client; its stderr only to the log.
+                reported = f": {provider_message(last_error)}" if last_error else ""
                 tail = stderr_tail.text()
-                detail = f": {tail}" if tail.strip() else ""
                 raise ApiError(
                     ErrorCode.SDK_ERROR,
-                    f"codex exited with code {proc.returncode}{detail}",
+                    f"codex exited with code {proc.returncode}{reported}",
+                    detail=f"stderr: {tail}" if tail.strip() else None,
                 )
             if not completed:
                 raise ApiError(
-                    ErrorCode.SDK_ERROR, last_error or "codex ended without turn.completed"
+                    ErrorCode.SDK_ERROR,
+                    provider_message(last_error) if last_error
+                    else "codex ended without turn.completed",
                 )
 
         except ApiError:
             raise
         except Exception as exc:
-            raise ApiError(ErrorCode.SDK_ERROR, f"{type(exc).__name__}: {exc}") from exc
+            raise ApiError(
+                ErrorCode.SDK_ERROR,
+                f"codex runner failed ({type(exc).__name__})",
+                detail=f"{type(exc).__name__}: {exc}",
+            ) from exc
         finally:
             # Kill first so the pipes close, then reap the helpers; no step may raise,
             # or the rest of the cleanup would be skipped.
@@ -276,6 +289,22 @@ _STDERR_TAIL_BYTES = 4096
 _TERM_GRACE_SEC = 2.0
 _KILL_WAIT_SEC = 5.0
 _EXIT_WAIT_SEC = 5.0
+
+
+def _failure_text(event: dict) -> str:
+    """turn.failed carries {"error": {"message": ...}}; tolerate a bare string too."""
+    error = event.get("error")
+    message = error.get("message") if isinstance(error, dict) else error
+    return message if isinstance(message, str) and message.strip() else "turn failed"
+
+
+def _toml_string(value: str) -> str:
+    """A TOML basic string for a `-c key=value` override.
+
+    JSON string escapes are valid TOML, except that ensure_ascii would emit surrogate
+    pairs (TOML rejects them) and DEL, which TOML requires escaped, is left raw.
+    """
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 async def _send_prompt(proc, prompt: str) -> None:

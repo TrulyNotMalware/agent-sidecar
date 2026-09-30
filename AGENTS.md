@@ -267,12 +267,30 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 - When `LOG_PROMPTS=false` (default), these keys are redacted to `"<redacted>"`:
   `prompt`, `system_prompt`, `append_system_prompt`, `delta`, `final_text`, `text`, `args`, `tool_args`.
 - Empty / `None` values are **not** redacted.
+- Always (whatever `LOG_PROMPTS` says), credentials are scrubbed from structlog lines
+  and from plain `logging` records (uvicorn, the Agent SDK): the values of
+  `BEARER_SECRET`, the provider credential variables (`ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`,
+  `AWS_*` Bedrock credentials, `ANTHROPIC_CUSTOM_HEADERS` values), every
+  `CODEX_ENV_PASSTHROUGH` variable and the request's `X-Turn-Token`, plus
+  credential-shaped strings (`sk-…` keys, `Bearer`/`Basic` tokens, JWTs,
+  `api_key=`/`x-api-key:` values, `user:pass@` in URLs) —
+  `sidecar/observability/redaction.py`. With `LOG_PROMPTS=false` the SDK's
+  "Fatal error in message reader" line (it quotes CLI output) is dropped.
+- Every sidecar log line of a turn carries `turn_id` (also the `X-Turn-Id` response
+  header, on 429/400 rejections too). The claude CLI's stderr is logged line by line
+  as `claude.stderr`; a failed turn's details (exception text, the CLI's stderr tail)
+  are `error_detail` on `turn.closed`, and unexpected exceptions also log
+  `turn.internal_error` with a traceback.
 
 ### OpenTelemetry
 - Activated only when `TRACING_ENABLED=true`.
 - Exports via OTLP HTTP (`opentelemetry-exporter-otlp-proto-http`).
 - FastAPI auto-instrumented. Per-turn span `claude.turn` carries:
-  `session.key`, `session.mode`, `session.resume`, `user.id`, `tokens.input`, `tokens.output`, `outcome`.
+  `session.key`, `session.mode`, `session.resume`, `user.id`, `turn.id`, `tokens.input`,
+  `tokens.output`, `outcome`. A failed turn sets the span status to ERROR and adds an
+  `exception` event with the type and the client-facing message only — never the
+  exception text or its cause chain (CLI stderr, output lines).
 
 ---
 
@@ -290,6 +308,10 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `cancelled` | 499 | Graceful cancel acknowledged |
 
 The **HTTP** column is the canonical mapping in `errors.py` (`ApiError.status_code`).
+An `error` frame's `message` is what the provider reported (API status, quota,
+context length — credentials scrubbed, ≤ 500 chars) or a fixed text; CLI stderr and
+exception text stay in the log (`ApiError.detail`), and the message then names the
+turn id (`X-Turn-Id`) to look them up with.
 Every error body from a sidecar route is `{"code": ..., "message": ...}` (one `ApiError` handler in
 `app.py`; validation errors are mapped to `bad_request`); `401` also sends
 `WWW-Authenticate: Bearer`.

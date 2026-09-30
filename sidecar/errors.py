@@ -1,5 +1,7 @@
 from enum import StrEnum
 
+from .observability.redaction import scrub_secrets
+
 
 class ErrorCode(StrEnum):
     BAD_REQUEST = "bad_request"
@@ -25,11 +27,27 @@ _HTTP_STATUS = {
 
 
 class ApiError(Exception):
-    def __init__(self, code: ErrorCode, message: str) -> None:
+    """`message` goes on the wire; `detail` (CLI stderr, exception text) only to the log."""
+
+    def __init__(self, code: ErrorCode, message: str, *, detail: str | None = None) -> None:
         self.code = code
         self.message = message
+        self.detail = detail
         super().__init__(message)
 
     @property
     def status_code(self) -> int:
         return _HTTP_STATUS[self.code]
+
+
+_MAX_PROVIDER_MESSAGE = 500
+
+
+def provider_message(text: str) -> str:
+    """An error the provider reported (API status, quota, context length), fit for the
+    wire: credentials scrubbed, length bounded. Unlike CLI stderr or exception text,
+    it tells the client what went wrong without exposing the sidecar's internals."""
+    text = scrub_secrets(text.strip())
+    if len(text) > _MAX_PROVIDER_MESSAGE:
+        text = text[: _MAX_PROVIDER_MESSAGE - 1] + "…"
+    return text

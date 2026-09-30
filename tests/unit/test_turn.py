@@ -169,3 +169,37 @@ async def test_stop_before_the_task_runs_still_ends_the_turn():
     assert admission.inflight == 0
     await asyncio.wait({turn.task})
     assert turn.events.empty()  # _main never ran, so nothing follows TurnEnded
+
+
+async def test_span_gets_the_status_but_not_the_exception_text(monkeypatch):
+    # The default span recording would export the exception text and its cause chain
+    # (CLI stderr, output lines) unscrubbed.
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import StatusCode
+
+    from sidecar import turn as turn_module
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(turn_module, "tracer", provider.get_tracer("test"))
+
+    async def runner(_cwd):
+        yield SessionEvent(session_id="s")
+        try:
+            raise RuntimeError("stderr: private words sk-proj-abcdef123456")
+        except RuntimeError as cause:
+            raise ApiError(ErrorCode.SDK_ERROR, "claude CLI failed", detail="x") from cause
+
+    turn = _turn()
+    turn.start(runner, _workspace)
+    await _until_ended(turn)
+
+    [span] = exporter.get_finished_spans()
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.attributes["outcome"] == "sdk_error"
+    exported = repr([(e.name, dict(e.attributes)) for e in span.events])
+    assert "claude CLI failed" in exported
+    assert "private words" not in exported

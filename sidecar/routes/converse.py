@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import functools
 import time
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Annotated
 
 import anyio
+import structlog
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
@@ -29,6 +31,7 @@ from ..events import (
 from ..models import ConverseRequest
 from ..observability.logging import get_logger
 from ..observability.metrics import REQUEST_DURATION, REQUESTS
+from ..observability.redaction import register_turn_secret
 from ..session import (
     known_session_ids,
     remember_session_id,
@@ -53,6 +56,11 @@ async def converse(
 ) -> EventSourceResponse | JSONResponse:
     settings = get_settings()
     admission: Admission = request.app.state.admission
+    turn_id = uuid.uuid4().hex
+    # Every log line of this request — route, stream and the turn's task (created
+    # below, so it inherits this context) — carries the id the client gets.
+    structlog.contextvars.bind_contextvars(turn_id=turn_id)
+    register_turn_secret(x_turn_token)  # e.g. echoed in an MCP error or CLI stderr
 
     log.info(
         "converse.start",
@@ -66,12 +74,13 @@ async def converse(
 
     rejected = _preflight_resume(body, settings)
     if rejected is not None:
-        return _reject(rejected)
+        return _reject(rejected, turn_id)
 
     span_attributes: dict[str, str | bool] = {
         "session.key": body.session_key,
         "session.mode": body.mode,
         "session.resume": bool(body.session_id),
+        "turn.id": turn_id,
     }
     if x_user_id:
         span_attributes["user.id"] = x_user_id
@@ -81,6 +90,7 @@ async def converse(
         admission=admission,
         timeout_sec=settings.turn_timeout_sec,
         span_attributes=span_attributes,
+        turn_id=turn_id,
     )
     run_turn = _get_runner(settings)
 
@@ -128,6 +138,7 @@ async def converse(
         shutdown_event=shutdown,
         shutdown_grace_period=settings.shutdown_grace_sec,
         client_close_handler_callable=on_client_close,
+        headers={"X-Turn-Id": turn_id},
     )
     # Last step before returning: reserving before the stream opens makes every limit a
     # real HTTP 429, and nothing can fail between the reservation and the response
@@ -135,7 +146,7 @@ async def converse(
     try:
         turn.start(open_runner, workspace)
     except ApiError as exc:
-        return _reject(exc)
+        return _reject(exc, turn_id)
     return response
 
 
@@ -145,7 +156,11 @@ def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | N
     workspace cwd, which is already per-sessionKey.)"""
     if settings.provider != "codex" or body.session_id is None:
         return None
-    known = known_session_ids(body.session_key, root=settings.workspace_root)
+    try:
+        known = known_session_ids(body.session_key, root=settings.workspace_root)
+    except (OSError, UnicodeDecodeError) as exc:
+        log.error("session_id.record_unreadable", error_type=type(exc).__name__, exc_info=exc)
+        return ApiError(ErrorCode.INTERNAL, "could not read this sessionKey's session record")
     if body.session_id not in known:
         return ApiError(ErrorCode.BAD_REQUEST, "sessionId was not issued for this sessionKey")
     return None
@@ -165,13 +180,14 @@ async def _remembering_session_ids(
             yield ev
 
 
-def _reject(error: ApiError) -> JSONResponse:
+def _reject(error: ApiError, turn_id: str) -> JSONResponse:
     """A pre-stream error: its real HTTP status and the {code, message} body."""
     log.warning("converse.reject", code=error.code.value, message=error.message)
     REQUESTS.labels(outcome=error.code.value).inc()
     return JSONResponse(
         status_code=error.status_code,
         content={"code": error.code.value, "message": error.message},
+        headers={"X-Turn-Id": turn_id},
     )
 
 
@@ -224,7 +240,7 @@ async def _event_stream(
                     return
                 continue  # never a second terminal: the turn logs what happens after done
             if isinstance(item, TurnStopped | TurnEnded):
-                code, message = _terminal_error(item, settings.turn_timeout_sec)
+                code, message = _terminal_error(item, settings.turn_timeout_sec, turn.turn_id)
                 outcome = code
                 log.warning("converse.error", code=code, message=message)
                 yield sse_event("error", {"code": code, "message": message})
@@ -264,19 +280,23 @@ _STOP_ERRORS: dict[StopReason, tuple[ErrorCode, str]] = {
 }
 
 
-def _terminal_error(item: TurnStopped | TurnEnded, timeout_sec: float) -> tuple[str, str]:
+def _terminal_error(
+    item: TurnStopped | TurnEnded, timeout_sec: float, turn_id: str
+) -> tuple[str, str]:
     reason = item.reason if isinstance(item, TurnStopped) else item.stop_reason
     if reason is not None:
         code, template = _STOP_ERRORS[reason]
         return code.value, template.format(timeout=timeout_sec)
     error = item.error  # TurnEnded without a stop: the runner finished or failed
+    # Details withheld from the wire (CLI stderr, exception text) are in the log.
+    see_log = f" (details in the sidecar log, turn {turn_id})"
     if isinstance(error, ApiError):
-        return error.code.value, error.message
+        return error.code.value, error.message + (see_log if error.detail else "")
     if error is None:
         return ErrorCode.SDK_ERROR.value, "runner ended without a result"
     if isinstance(error, asyncio.CancelledError):
         return ErrorCode.CANCELLED.value, "turn cancelled"
-    return ErrorCode.INTERNAL.value, f"{type(error).__name__}: {error}"
+    return ErrorCode.INTERNAL.value, "internal error" + see_log
 
 
 def _merge_system_prompt(

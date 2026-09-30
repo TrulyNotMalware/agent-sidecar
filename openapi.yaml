@@ -68,6 +68,15 @@ paths:
       responses:
         '200':
           description: Server-Sent Events stream of turn progress.
+          headers:
+            X-Turn-Id:
+              description: |
+                Identifies this turn in the sidecar's log (every log line of the
+                turn carries it as `turn_id`); error messages that withhold
+                details refer to it. Also sent with this operation's pre-stream
+                JSON rejections (400 after validation, 429, 500).
+              schema:
+                type: string
           content:
             text/event-stream:
               schema:
@@ -348,6 +357,12 @@ components:
             likewise arrives at the deadline without waiting for the CLI.
         message:
           type: string
+          description: |
+            Human-readable cause. An error the provider reported (API status,
+            quota, context length, max turns) is passed through, with anything
+            credential-shaped removed and at most 500 characters. CLI internals
+            (stderr, exception text) are never sent: the message then ends with
+            `(details in the sidecar log, turn <X-Turn-Id>)`.
 
     Usage:
       type: object

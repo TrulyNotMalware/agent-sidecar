@@ -348,9 +348,53 @@ async def test_nonzero_exit_surfaces_the_end_of_stderr(monkeypatch):
     with pytest.raises(ApiError) as exc_info:
         await _collect()
 
+    error = exc_info.value
+    assert error.code is ErrorCode.SDK_ERROR
+    assert error.message == "codex exited with code 3"  # stderr never goes on the wire
+    assert error.detail.endswith("fatal: no auth\n")  # the log gets the end, not the start
+
+
+async def test_turn_failed_with_a_bare_string_error_keeps_the_cause(monkeypatch):
+    _install(monkeypatch, FakeProc([_line({"type": "turn.failed", "error": "rate limited"})]))
+
+    with pytest.raises(ApiError) as exc_info:
+        await _collect()
+
+    assert exc_info.value.message == "rate limited"
+
+
+async def test_codex_that_cannot_be_started_is_an_sdk_error(monkeypatch):
+    async def missing(*_cmd, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "codex")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
+
+    with pytest.raises(ApiError) as exc_info:
+        await _collect()
+
     assert exc_info.value.code is ErrorCode.SDK_ERROR
-    assert "code 3" in exc_info.value.message
-    assert "fatal: no auth" in exc_info.value.message  # the last line, not the first
+    assert exc_info.value.message == "codex could not be started (FileNotFoundError)"
+
+
+async def test_nonzero_exit_carries_what_codex_reported(monkeypatch):
+    lines = [_line({"type": "error", "message": "stream disconnected: 503"})]
+    _install(monkeypatch, FakeProc(lines, returncode=1, stderr_lines=[b"internal trace\n"]))
+
+    with pytest.raises(ApiError) as exc_info:
+        await _collect()
+
+    assert exc_info.value.message == "codex exited with code 1: stream disconnected: 503"
+
+
+async def test_provider_messages_are_scrubbed_of_credentials(monkeypatch):
+    failed = {"type": "turn.failed", "error": {"message": "401: bad key sk-proj-abcdef123456"}}
+    _install(monkeypatch, FakeProc([_line(failed)]))
+
+    with pytest.raises(ApiError) as exc_info:
+        await _collect()
+
+    assert "abcdef123456" not in exc_info.value.message
+    assert exc_info.value.message == "401: bad key sk-<redacted>"
 
 
 async def test_stderr_reader_failure_does_not_skip_the_kill(monkeypatch):
@@ -382,6 +426,18 @@ async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
     )
     assert 'mcp_servers.domain-tools.default_tools_approval_mode="approve"' in calls["cmd"]
     assert calls["kwargs"]["env"]["SIDECAR_MCP_TURN_TOKEN"] == "tok-xyz"
+
+
+async def test_mcp_url_is_quoted_as_a_toml_string(monkeypatch):
+    import tomllib
+
+    url = 'https://app.example/mcp?q="x"\\y'
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+
+    await _collect(mcp_server_url=url, mcp_server_name="domain-tools", turn_token="t")
+
+    [override] = [a for a in calls["cmd"] if a.startswith("mcp_servers.domain-tools.url=")]
+    assert tomllib.loads(override)["mcp_servers"]["domain-tools"]["url"] == url
 
 
 async def test_without_mcp_override_no_config_flags_and_no_token_env(monkeypatch):
