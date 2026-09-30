@@ -26,6 +26,8 @@ dev = [
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
     "ruff>=0.7",
+    # tests/integration/fake_mcp_server.py (the SDK allows mcp>=1.23,<3)
+    "mcp>=2",
 ]
 
 [build-system]

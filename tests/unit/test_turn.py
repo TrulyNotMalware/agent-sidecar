@@ -203,3 +203,27 @@ async def test_span_gets_the_status_but_not_the_exception_text(monkeypatch):
     exported = repr([(e.name, dict(e.attributes)) for e in span.events])
     assert "claude CLI failed" in exported
     assert "private words" not in exported
+
+
+async def test_cache_tokens_are_counted_too():
+    from sidecar.observability.metrics import TOKENS
+
+    def count(kind: str) -> float:
+        return TOKENS.labels(kind=kind)._value.get()
+
+    before = {k: count(k) for k in ("input", "cache_read", "cache_creation")}
+    done = DoneEvent(
+        final_text="ok", input_tokens=5, output_tokens=1,
+        cache_read_input_tokens=7, cache_creation_input_tokens=None,
+    )
+
+    async def runner(_cwd):
+        yield done
+
+    turn = _turn()
+    turn.start(runner, _workspace)
+    await _until_ended(turn)
+
+    assert count("input") - before["input"] == 5
+    assert count("cache_read") - before["cache_read"] == 7
+    assert count("cache_creation") == before["cache_creation"]  # None counts as 0

@@ -10,6 +10,7 @@ from .admission import Admission
 from .codex_runner import ensure_codex_auth
 from .config import get_settings
 from .errors import ApiError, ErrorCode
+from .mcp import static_mcp_server_names
 from .observability.logging import configure_logging, get_logger
 from .observability.redaction import register_secrets
 from .routes import cancel, converse, health, metrics
@@ -59,6 +60,13 @@ def create_app() -> FastAPI:
                 Path(os.environ[var]).mkdir(parents=True, exist_ok=True)
         if settings.mcp_config_path is not None and not settings.mcp_config_path.is_file():
             log.warning("mcp.config_missing", path=str(settings.mcp_config_path))
+        elif settings.provider == "codex" and static_mcp_server_names(settings.mcp_config_path):
+            # Static MCP servers are claude-only; codex reads its own config.toml.
+            log.warning(
+                "mcp.static_config_ignored",
+                provider="codex",
+                servers=static_mcp_server_names(settings.mcp_config_path),
+            )
         if settings.provider == "codex":
             authed = await ensure_codex_auth(settings.codex_auth_path)
             log.info("codex.auth", materialized=authed)

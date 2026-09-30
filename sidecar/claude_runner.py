@@ -16,6 +16,7 @@ from .events import (
 from .mcp import (
     build_mcp_servers,
     mcp_tool_prefix,
+    private_file,
     private_mcp_config,
     static_mcp_server_names,
 )
@@ -27,6 +28,8 @@ from .observability.logging import get_logger
 # (e.g. CODEX_ENV_PASSTHROUGH values) via `withheld_env`.
 _WITHHELD_FROM_CLI = ("BEARER_SECRET", "OPENAI_API_KEY")
 _STDERR_TAIL_LINES = 40
+_STDERR_LINE_CHARS = 2000  # the SDK hands over lines of up to ~1 MB
+_STDERR_LOG_LINES = 200  # per turn; the tail still reaches error_detail
 
 log = get_logger("sidecar.claude")
 
@@ -48,6 +51,8 @@ async def run_turn(
     permission_mode: str = "dontAsk",
     setting_sources: tuple[str, ...] = (),
     restricted: bool = False,
+    # Settings' key (which may come from .env, not the environment the CLI inherits).
+    anthropic_api_key: str | None = None,
     # Interface parity with codex. claude's transcript is keyed by the (deleted) temp
     # cwd, so a stateless turn cannot be resumed; the file itself stays under
     # $CLAUDE_CONFIG_DIR/projects (default ~/.claude/projects; --no-session-persistence
@@ -69,7 +74,10 @@ async def run_turn(
     """
     options_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
-        "env": dict.fromkeys((*_WITHHELD_FROM_CLI, *withheld_env), ""),
+        "env": {
+            **dict.fromkeys((*_WITHHELD_FROM_CLI, *withheld_env), ""),
+            **({"ANTHROPIC_API_KEY": anthropic_api_key} if anthropic_api_key else {}),
+        },
         "permission_mode": permission_mode,
         "setting_sources": list(setting_sources),
         "extra_args": {"strict-mcp-config": None, **({"restricted": None} if restricted else {})},
@@ -78,8 +86,6 @@ async def run_turn(
         options_kwargs["tools"] = list(tools)
     if disallowed_tools:
         options_kwargs["disallowed_tools"] = list(disallowed_tools)  # deny beats allow
-    if system_prompt is not None:
-        options_kwargs["system_prompt"] = system_prompt
     if resume_session_id:
         options_kwargs["resume"] = resume_session_id
     mcp_servers = build_mcp_servers(
@@ -98,6 +104,11 @@ async def run_turn(
         options_kwargs["allowed_tools"] = list(dict.fromkeys(approved))
 
     with contextlib.ExitStack() as cleanup:
+        if system_prompt is not None:
+            # A file, not `--system-prompt <text>` on argv (visible via `ps`, capped at
+            # 128 KiB per argument on Linux).
+            path = cleanup.enter_context(private_file("system-prompt.md", system_prompt))
+            options_kwargs["system_prompt"] = {"type": "file", "path": str(path)}
         if isinstance(mcp_servers, dict):
             # Carries the turn token: pass a private file, never inline JSON on argv.
             mcp_servers = str(cleanup.enter_context(private_mcp_config(mcp_servers)))
@@ -126,10 +137,17 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
     # goes straight to the pod log, unscrubbed). Each line is logged — scrubbed, with the
     # turn's id — and the tail explains a failed CLI.
     stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
+    stderr_lines = 0
 
     def on_stderr(line: str) -> None:
+        nonlocal stderr_lines
+        line = line[:_STDERR_LINE_CHARS]
         stderr_tail.append(line)
-        log.info("claude.stderr", line=line)
+        stderr_lines += 1
+        if stderr_lines <= _STDERR_LOG_LINES:
+            log.info("claude.stderr", line=line)
+        elif stderr_lines == _STDERR_LOG_LINES + 1:
+            log.warning("claude.stderr_not_logged", after_lines=_STDERR_LOG_LINES)
 
     options = ClaudeAgentOptions(**options_kwargs, stderr=on_stderr)
     final_text_parts: list[str] = []
@@ -155,6 +173,11 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
                         yield SessionEvent(session_id=sid)
 
                 if isinstance(message, AssistantMessage):
+                    if getattr(message, "error", None) is not None:
+                        # An API failure the CLI reports as a synthetic assistant message.
+                        # It is not the model's answer: the error result that follows
+                        # becomes the terminal frame (scrubbed).
+                        continue
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             final_text_parts.append(block.text)

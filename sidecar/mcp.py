@@ -24,6 +24,11 @@ def mcp_tool_prefix(server_name: str) -> str:
     return f"mcp__{_NOT_IN_TOOL_NAME.sub('_', server_name)}"
 
 
+def mcp_tool_name(server_name: str, tool_name: str) -> str:
+    """A tool's full name as claude reports it; codex events are named the same way."""
+    return f"{mcp_tool_prefix(server_name)}__{_NOT_IN_TOOL_NAME.sub('_', tool_name)}"
+
+
 def static_mcp_server_names(static_config_path: Path | None) -> list[str]:
     """Server names in the operator's mcp.json (empty if unset or unreadable)."""
     if static_config_path is None:
@@ -83,12 +88,25 @@ def private_mcp_config(servers: dict[str, Any]) -> Iterator[Path]:
     SDK a file path keeps it off argv. The file lives in a fresh 0700 directory
     outside the turn workspace, so the agent's cwd-scoped tools do not list it.
     """
-    directory = Path(tempfile.mkdtemp(prefix="claude-sidecar-mcp-"))
-    path = directory / "mcp.json"
+    with private_file("mcp.json", json.dumps({"mcpServers": servers})) as path:
+        yield path
+
+
+@contextmanager
+def private_file(name: str, content: str) -> Iterator[Path]:
+    """Write `content` to a file only this user can read; delete it on exit.
+
+    For what must not go on a CLI's argv, where every process can read it via `ps`
+    (and Linux caps a single argument at 128 KiB). The file lives in a fresh 0700
+    directory outside the turn workspace, so the agent's cwd-scoped tools do not
+    list it.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="claude-sidecar-"))
+    path = directory / name
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"mcpServers": servers}, f)
+            f.write(content)
         yield path
     finally:
         shutil.rmtree(directory, ignore_errors=True)

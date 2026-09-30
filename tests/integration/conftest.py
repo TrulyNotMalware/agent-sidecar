@@ -37,12 +37,18 @@ def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
     """Factory: start_sidecar(mode=..., provider=..., **ENV) -> a running SidecarServer.
 
     provider="claude" points the real SDK at fake_claude.py; provider="codex" puts a
-    fake `codex` first on PATH (the runner spawns `codex` by name).
+    fake `codex` first on PATH (the runner spawns `codex` by name). real_cli=True
+    does neither: the SDK's bundled claude / the `codex` on PATH run for real, and
+    the test points them at a fake model API.
     """
     servers: list[SidecarServer] = []
 
     def _start(
-        *, mode: str = "normal", provider: str = "claude", **env_overrides: str
+        *,
+        mode: str = "normal",
+        provider: str = "claude",
+        real_cli: bool = False,
+        **env_overrides: str,
     ) -> SidecarServer:
         port = _free_port()
         run_dir = tmp_path / f"server-{port}"
@@ -56,8 +62,9 @@ def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
 
         env = {k: os.environ[k] for k in _INHERITED_ENV if k in os.environ}
         bin_dir = run_dir / "bin"
-        _fake_cli_wrapper(bin_dir, "codex", "fake_codex.py")
-        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        if not real_cli:
+            _fake_cli_wrapper(bin_dir, "codex", "fake_codex.py")
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env.update(
             HOME=str(home),
             CLAUDE_CONFIG_DIR=str(home / ".claude"),
@@ -68,7 +75,9 @@ def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
             PORT=str(port),
             WORKSPACE_ROOT=str(workspace),
             PROVIDER=provider,
-            FAKE_CLI=str(_fake_cli_wrapper(bin_dir, "claude", "fake_claude.py")),
+            FAKE_CLI="" if real_cli else str(
+                _fake_cli_wrapper(bin_dir, "claude", "fake_claude.py")
+            ),
             FAKE_LOG=str(fake_log),
             FAKE_CLAUDE_MODE=mode,
             FAKE_CODEX_MODE=mode,
@@ -76,7 +85,7 @@ def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
             TURN_TIMEOUT_SEC="30",
             SHUTDOWN_GRACE_SEC="5",
         )
-        if provider == "codex":
+        if provider == "codex" and not real_cli:
             # codex only inherits an allowlisted env: let the fake's own knobs through.
             # (Not for claude: passthrough names are blanked in the claude CLI's env.)
             env["CODEX_ENV_PASSTHROUGH"] = (

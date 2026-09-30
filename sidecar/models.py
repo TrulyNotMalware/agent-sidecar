@@ -30,6 +30,18 @@ class ConverseRequest(BaseModel):
             return None
         return v.lower() if isinstance(v, str) else v
 
+    @field_validator("system_prompt", "append_system_prompt")  # constrained ones: pydantic
+    @classmethod
+    def _encodable(cls, v: str | None) -> str | None:
+        # JSON can carry a lone surrogate ("\ud800"); it cannot be written to the CLI's
+        # stdin, argv or a file, so it would fail the turn as an internal error.
+        if v is not None:
+            try:
+                v.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("must be valid Unicode text (no lone surrogates)") from None
+        return v
+
     @model_validator(mode="after")
     def _stateless_cannot_resume(self) -> "ConverseRequest":
         if self.mode == "stateless" and self.session_id is not None:

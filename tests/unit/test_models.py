@@ -90,3 +90,12 @@ def test_stateless_turns_cannot_resume():
                 "sessionId": "01a0ec1c-14d2-7d12-aaa7-47100d58f161",
             }
         )
+
+
+@pytest.mark.parametrize("field", ["prompt", "systemPrompt", "appendSystemPrompt", "sessionKey"])
+def test_text_that_cannot_be_encoded_is_a_validation_error(field):
+    body = {"sessionKey": "k", "prompt": "hi", field: "bad \ud800 text"}
+
+    # (pydantic itself refuses them in the length-constrained fields)
+    with pytest.raises(ValidationError):
+        ConverseRequest.model_validate(body)

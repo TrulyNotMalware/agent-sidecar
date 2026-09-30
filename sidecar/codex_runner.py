@@ -15,6 +15,7 @@ from .events import (
     ToolResultEvent,
     ToolUseEvent,
 )
+from .mcp import mcp_tool_name
 from .observability.logging import get_logger
 
 log = get_logger("sidecar.codex")
@@ -80,7 +81,8 @@ _ENV_ALLOWLIST = frozenset({
     "CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT", "NODE_EXTRA_CA_CERTS",
     "NODE_OPTIONS",  # the npm `codex` entry point is a node wrapper (e.g. --use-openssl-ca)
-    # Provider routing (not secrets): gateway URL and org/project attribution headers.
+    # Org/project attribution headers. OPENAI_BASE_URL only reaches tools the model runs:
+    # codex ignores it (0.153/0.159) — a gateway goes in config.toml (openai_base_url).
     "OPENAI_BASE_URL", "OPENAI_ORGANIZATION", "OPENAI_PROJECT",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
     "http_proxy", "https_proxy", "no_proxy", "all_proxy",
@@ -118,8 +120,6 @@ async def run_turn(
     No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
     task iterating this generator once; the process group is then terminated.
     """
-    effective_prompt = f"{system_prompt}\n\n{prompt}".strip() if system_prompt else prompt
-
     # Session workspaces are plain scratch dirs; without the flag `codex exec`
     # refuses to run outside a trusted git repository. --sandbox is always explicit
     # so a config.toml cannot change the sandbox mode.
@@ -144,6 +144,25 @@ async def run_turn(
             "-c", f"{server}.bearer_token_env_var={_toml_string(_MCP_TOKEN_ENV_VAR)}",
             "-c", f"{server}.default_tools_approval_mode={_toml_string('approve')}",
         ]
+
+    # The system prompt becomes codex's developer instructions: a developer message at
+    # the head of the thread, not part of every turn's prompt. It is passed on every
+    # turn: on resume codex keeps the thread's message (a different value is ignored,
+    # so nothing is duplicated), but when it auto-compacts it rebuilds the history
+    # from the value passed in — without it the system prompt would be gone from then
+    # on (checked with codex 0.153 and 0.159). A changed CLAUDE.md or systemPrompt
+    # therefore reaches new sessions, and resumed ones once codex compacts.
+    stdin_prompt = prompt
+    if system_prompt:
+        instructions = f"developer_instructions={_toml_string(system_prompt)}"
+        if len(instructions.encode()) <= _MAX_ARG_BYTES:
+            cmd += ["-c", instructions]
+        elif not resume_session_id:
+            # Too long for one argv string (Linux: 128 KiB): send it with the first
+            # prompt. (It then survives compaction only as far as codex keeps that
+            # user message.)
+            log.warning("codex.system_prompt_in_prompt", bytes=len(instructions.encode()))
+            stdin_prompt = f"{system_prompt}\n\n{prompt}"
 
     # The prompt goes through stdin ("-"): no ARG_MAX limit and never visible in `ps`.
     # "--" ends option parsing, so a resume id can never be read as a flag either.
@@ -179,8 +198,10 @@ async def run_turn(
         stderr_task = asyncio.create_task(_drain(proc.stderr, stderr_tail))
         # Written concurrently with reading stdout: if codex ever produced a pipe's worth
         # of output before reading stdin, a sequential write would deadlock both sides.
-        stdin_task = asyncio.create_task(_send_prompt(proc, effective_prompt))
-        final_text_parts: list[str] = []
+        stdin_task = asyncio.create_task(_send_prompt(proc, stdin_prompt))
+        # finalText is the last agent message, as claude's result is its last message;
+        # earlier ones (e.g. before a tool call) were streamed as `text`.
+        last_message = ""
         completed = False
         last_error: str | None = None
 
@@ -210,7 +231,7 @@ async def run_turn(
                     if item_type == "agent_message":
                         text = item.get("text") or ""
                         if text:
-                            final_text_parts.append(text)
+                            last_message = text
                             yield TextEvent(delta=text)
                     else:
                         result = _tool_result_from_item(item)
@@ -221,11 +242,12 @@ async def run_turn(
                     completed = True
                     usage = event.get("usage") or {}
                     yield DoneEvent(
-                        final_text="".join(final_text_parts),
+                        final_text=last_message,
+                        # OpenAI semantics: input_tokens includes the cached ones.
                         input_tokens=int(usage.get("input_tokens") or 0),
                         output_tokens=int(usage.get("output_tokens") or 0),
                         cache_read_input_tokens=usage.get("cached_input_tokens"),
-                        cache_creation_input_tokens=None,
+                        cache_creation_input_tokens=usage.get("cache_write_input_tokens"),
                     )
 
                 elif ev_type == "turn.failed":
@@ -286,6 +308,8 @@ async def run_turn(
 # aggregated output). Lines past this size are skipped, not fatal.
 _MAX_EVENT_LINE_BYTES = 8 * 1024 * 1024
 _STDERR_TAIL_BYTES = 4096
+# Below Linux's MAX_ARG_STRLEN (128 KiB) for a single argv string.
+_MAX_ARG_BYTES = 100_000
 _TERM_GRACE_SEC = 2.0
 _KILL_WAIT_SEC = 5.0
 _EXIT_WAIT_SEC = 5.0
@@ -408,7 +432,7 @@ def _tool_use_from_item(item: dict) -> list[RunnerEvent]:
 
     if item_type == "mcp_tool_call":
         return [ToolUseEvent(
-            name=item.get("tool") or "unknown",
+            name=_mcp_name(item),
             args=item.get("arguments") or {},
             tool_use_id=tool_id,
         )]
@@ -427,9 +451,16 @@ def _tool_result_from_item(item: dict) -> RunnerEvent | None:
 
     if item_type == "mcp_tool_call":
         ok = item.get("status") == "completed" and item.get("error") is None
-        return ToolResultEvent(name=item.get("tool") or "unknown", ok=ok, tool_use_id=tool_id)
+        return ToolResultEvent(name=_mcp_name(item), ok=ok, tool_use_id=tool_id)
     if item_type == "command_execution":
         exit_code = item.get("exit_code")
         ok = isinstance(exit_code, int) and exit_code == 0
         return ToolResultEvent(name="shell", ok=ok, tool_use_id=tool_id)
     return None
+
+
+def _mcp_name(item: dict) -> str:
+    """`mcp__<server>__<tool>`, the name claude reports for the same tool."""
+    tool = item.get("tool") or "unknown"
+    server = item.get("server")
+    return mcp_tool_name(server, tool) if server else tool

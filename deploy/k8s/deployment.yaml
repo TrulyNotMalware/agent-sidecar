@@ -92,7 +92,7 @@ spec:
             # (CLAUDE_CONFIG_DIR) and codex auth/rollouts (CODEX_HOME). Use a
             # persistent volume instead to keep conversations across Pod restarts.
             - { name: state,       mountPath: /var/lib/claude-sidecar }
-            - { name: tmp,         mountPath: /tmp }           # per-turn MCP config files
+            - { name: tmp,         mountPath: /tmp }           # per-turn MCP config / system-prompt files
             - { name: home,        mountPath: /home/sidecar }  # CLI caches
           # exec probes, not httpGet: kubelet sends httpGet to the Pod IP, which a
           # BIND=127.0.0.1 server never answers. The app container still reaches the

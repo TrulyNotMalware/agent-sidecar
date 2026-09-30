@@ -201,5 +201,7 @@ def _instrument(ev: RunnerEvent, span) -> None:
     elif isinstance(ev, DoneEvent):
         TOKENS.labels(kind="input").inc(ev.input_tokens)
         TOKENS.labels(kind="output").inc(ev.output_tokens)
+        TOKENS.labels(kind="cache_read").inc(ev.cache_read_input_tokens or 0)
+        TOKENS.labels(kind="cache_creation").inc(ev.cache_creation_input_tokens or 0)
         span.set_attribute("tokens.input", ev.input_tokens)
         span.set_attribute("tokens.output", ev.output_tokens)

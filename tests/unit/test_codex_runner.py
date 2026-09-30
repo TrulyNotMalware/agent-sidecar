@@ -148,31 +148,22 @@ async def _collect(
 
 
 async def test_maps_full_event_sequence(monkeypatch):
+    # The shapes codex 0.159 emits (recorded against a fake model API).
+    tool_call = {
+        "id": "item_1", "type": "mcp_tool_call", "server": "domain-tools", "tool": "echo",
+        "arguments": {"text": "hi"}, "result": None, "error": None, "status": "in_progress",
+    }
     lines = [
         _line({"type": "thread.started", "thread_id": "t-1"}),
-        _line({
-            "type": "item.started",
-            "item": {
-                "type": "mcp_tool_call",
-                "id": "call-1",
-                "tool": "lookup",
-                "arguments": {"q": 1},
-            },
-        }),
-        _line({
-            "type": "item.completed",
-            "item": {
-                "type": "mcp_tool_call",
-                "id": "call-1",
-                "tool": "lookup",
-                "status": "completed",
-                "error": None,
-            },
-        }),
-        _line({"type": "item.completed", "item": {"type": "agent_message", "text": "Hello"}}),
+        _line({"type": "turn.started"}),
+        _line({"type": "item.completed", "item": {"type": "agent_message", "text": "preamble"}}),
+        _line({"type": "item.started", "item": tool_call}),
+        _line({"type": "item.completed", "item": {**tool_call, "status": "completed"}}),
+        _line({"type": "item.completed", "item": {"type": "agent_message", "text": "final"}}),
         _line({
             "type": "turn.completed",
-            "usage": {"input_tokens": 10, "output_tokens": 5, "cached_input_tokens": 2},
+            "usage": {"input_tokens": 20, "cached_input_tokens": 4, "cache_write_input_tokens": 3,
+                      "output_tokens": 6, "reasoning_output_tokens": 0},
         }),
     ]
     calls = _install(monkeypatch, FakeProc(lines))
@@ -184,17 +175,26 @@ async def test_maps_full_event_sequence(monkeypatch):
     assert calls["kwargs"]["start_new_session"] is True
     assert events == [
         SessionEvent(session_id="t-1"),
-        ToolUseEvent(name="lookup", args={"q": 1}, tool_use_id="call-1"),
-        ToolResultEvent(name="lookup", ok=True, tool_use_id="call-1"),
-        TextEvent(delta="Hello"),
+        TextEvent(delta="preamble"),
+        # Named like claude names the same tool.
+        ToolUseEvent(name="mcp__domain-tools__echo", args={"text": "hi"}, tool_use_id="item_1"),
+        ToolResultEvent(name="mcp__domain-tools__echo", ok=True, tool_use_id="item_1"),
+        TextEvent(delta="final"),
         DoneEvent(
-            final_text="Hello",
-            input_tokens=10,
-            output_tokens=5,
-            cache_read_input_tokens=2,
-            cache_creation_input_tokens=None,
+            final_text="final",  # the last message, like claude's result
+            input_tokens=20,
+            output_tokens=6,
+            cache_read_input_tokens=4,
+            cache_creation_input_tokens=3,
         ),
     ]
+
+
+def test_mcp_tool_names_are_normalized_like_the_claude_cli():
+    from sidecar.codex_runner import _mcp_name
+
+    assert _mcp_name({"server": "v1.2 tools", "tool": "do.it"}) == "mcp__v1_2_tools__do_it"
+    assert _mcp_name({"tool": "bare"}) == "bare"  # no server reported
 
 
 async def test_prompt_goes_through_stdin_never_argv(monkeypatch):
@@ -209,13 +209,55 @@ async def test_prompt_goes_through_stdin_never_argv(monkeypatch):
     assert proc.stdin.closed  # EOF, or codex waits for "additional input"
 
 
-async def test_system_prompt_prepended_to_prompt(monkeypatch):
+async def test_system_prompt_is_the_new_sessions_developer_instructions(monkeypatch):
+    import tomllib
+
     proc = FakeProc([COMPLETED])
-    _install(monkeypatch, proc)
+    calls = _install(monkeypatch, proc)
 
-    await _collect(system_prompt="SYS")
+    await _collect(system_prompt='Be "brief".\nNo tables.')
 
-    assert proc.stdin.data == b"SYS\n\nhi"
+    cmd = calls["cmd"]
+    override = cmd[cmd.index("-c") + 1]
+    assert tomllib.loads(override) == {"developer_instructions": 'Be "brief".\nNo tables.'}
+    assert cmd.index("-c") < cmd.index("--")
+    assert proc.stdin.data == b"hi"  # the prompt alone
+
+
+async def test_resume_passes_the_system_prompt_again(monkeypatch):
+    # codex keeps the thread's developer message on resume (no duplicate), but rebuilds
+    # the history from the value passed in when it auto-compacts.
+    proc = FakeProc([COMPLETED])
+    calls = _install(monkeypatch, proc)
+
+    await _collect(system_prompt="SYS", resume_session_id="sess-1")
+
+    cmd = calls["cmd"]
+    assert cmd[cmd.index("-c") + 1] == 'developer_instructions="SYS"'
+    assert cmd.index("-c") < cmd.index("resume")
+    assert proc.stdin.data == b"hi"
+
+
+async def test_a_too_long_system_prompt_is_not_repeated_on_resume(monkeypatch):
+    monkeypatch.setattr(codex_runner, "_MAX_ARG_BYTES", 64)
+    proc = FakeProc([COMPLETED])
+    calls = _install(monkeypatch, proc)
+
+    await _collect(system_prompt="S" * 100, resume_session_id="sess-1")
+
+    assert "-c" not in calls["cmd"]
+    assert proc.stdin.data == b"hi"  # the first turn's copy is in the thread already
+
+
+async def test_a_system_prompt_too_long_for_argv_goes_with_the_prompt(monkeypatch):
+    monkeypatch.setattr(codex_runner, "_MAX_ARG_BYTES", 64)
+    proc = FakeProc([COMPLETED])
+    calls = _install(monkeypatch, proc)
+
+    await _collect(system_prompt="S" * 100)
+
+    assert "-c" not in calls["cmd"]
+    assert proc.stdin.data == b"S" * 100 + b"\n\nhi"
 
 
 async def test_resume_session_id_extends_argv(monkeypatch):

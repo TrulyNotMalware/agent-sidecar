@@ -33,7 +33,7 @@ contract itself lives in `openapi.yaml`.
 | `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. Leave unset: codex itself always uses `$CODEX_HOME/auth.json` (default `~/.codex`). |
 | `CODEX_SANDBOX` | `read-only` | **`PROVIDER=codex`.** Always passed as `codex exec --sandbox` so a `config.toml` cannot loosen it: `read-only`, `workspace-write`, or `danger-full-access`. |
 | `CODEX_ENV_PASSTHROUGH` | unset | **`PROVIDER=codex`.** Comma-separated extra env var names codex may inherit (e.g. a custom model provider's `env_key`). Everything outside the built-in allowlist is withheld. |
-| `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. Known credentials and `sk-…` / `Bearer …` strings are scrubbed from every log line either way. |
+| `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. Known credentials and credential-shaped strings are scrubbed from every log line either way. CLI diagnostics (`claude.stderr`, `error_detail`) are not redacted by it. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (case-insensitive; anything else fails startup). |
 | `TRACING_ENABLED` | `false` | When `true`, enable OpenTelemetry tracing (`OTLP/HTTP`). |
 | `OTEL_SERVICE_NAME` | `claude-sidecar` | Service name attached to traces. |
@@ -179,8 +179,28 @@ tokens there, and a read-only mount breaks both.
 **How the runner invokes codex:** each turn runs
 `codex exec --json --skip-git-repo-check --sandbox <CODEX_SANDBOX> -- -`
 (or `… resume -- <sessionId> -`) in its own process group, writes the prompt
-(system prompt + user prompt, since the CLI has no separate system-prompt flag)
 to stdin and closes it.
+
+- System prompt — passed on every turn as `-c developer_instructions=…`: a developer
+  message at the head of the thread. On resume codex keeps the thread's message and
+  ignores a different value, but rebuilds the thread from the value passed in when
+  it auto-compacts (without it, the system prompt would be lost at the first
+  compaction). So **a change to CLAUDE.md or `systemPrompt` reaches new codex
+  sessions, and resumed ones once codex compacts** (claude applies it every turn).
+  A system prompt over 100 kB (too long for one argv string on Linux) is prepended
+  to the first prompt instead.
+- Events — MCP tool calls are named `mcp__<server>__<tool>` as with claude, shell
+  commands `shell`; `finalText` is the last agent message.
+- Gateway — codex ignores `OPENAI_BASE_URL`; set `openai_base_url` (or a
+  `[model_providers.<id>]` entry) in `$CODEX_HOME/config.toml`.
+- Egress — besides the model API, every `codex exec` contacts `chatgpt.com`,
+  `ab.chatgpt.com` and `github.com` (update check, analytics, plugins/apps/skills,
+  the remote model list). Where egress allows only the model API those connections
+  hang and each turn gets ~10 s slower. `config.toml` switches them off:
+  `check_for_update_on_startup = false`, `[analytics] enabled = false`,
+  `[feedback] enabled = false`, `[features] plugins = false`, `apps = false`,
+  `remote_models = false`, `skills = false` (as `tests/integration/test_real_cli.py`
+  does; checked with codex 0.153 and 0.159).
 
 - `--skip-git-repo-check` — session workspaces are plain scratch directories, not
   git repos, and `codex exec` refuses to run outside a trusted git repo without
@@ -225,7 +245,7 @@ to stdin and closes it.
   allowlist: `PATH`, `HOME`, `USER`, `SHELL`, `TERM`, locale (`LANG`, `LC_*`),
   `TMPDIR`, `CODEX_HOME`, `RUST_LOG`, `XDG_*`, CA bundles (incl.
   `CODEX_CA_CERTIFICATE`), `NODE_OPTIONS`, proxy variables and
-  `OPENAI_BASE_URL`/`OPENAI_ORGANIZATION`/`OPENAI_PROJECT`, plus anything named in
+  `OPENAI_ORGANIZATION`/`OPENAI_PROJECT`/`OPENAI_BASE_URL`, plus anything named in
   `CODEX_ENV_PASSTHROUGH` (those names are also blanked for the `claude` provider's
   CLI). `BEARER_SECRET` and provider API keys are withheld; auth comes from
   `CODEX_HOME/auth.json` (env credentials such as `CODEX_API_KEY` only if passed
@@ -328,7 +348,7 @@ Metrics:
 | `sidecar_request_duration_seconds` | histogram | `outcome` (streamed turns only; pre-stream rejections are counted, not timed) |
 | `sidecar_inflight` | gauge | — (turns holding a slot, including the time spent closing their CLI) |
 | `sidecar_tool_calls_total` | counter | `tool_name`, `outcome` ∈ `{started, ok, error}` |
-| `sidecar_tokens_total` | counter | `kind` ∈ `{input, output}` |
+| `sidecar_tokens_total` | counter | `kind` ∈ `{input, output, cache_read, cache_creation}` (codex's `input` includes its cache reads, claude's does not) |
 
 `/metrics` and `/healthz` intentionally do not require the Bearer secret so
 in-cluster scrapers and probes can hit them without secret distribution.

@@ -189,8 +189,13 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   (`mcp__<name>`, normalized like the CLI's tool names: `v1.2` → `mcp__v1_2`). The
   built-in toolset stays the CLI default unless `CLAUDE_TOOLS` is set. See
   `CLAUDE_*` in the configuration table.
-- Auth: `ANTHROPIC_API_KEY` for production / general use. `CLAUDE_CODE_OAUTH_TOKEN`
+- Auth: `ANTHROPIC_API_KEY` for production / general use (also when it comes from
+  `.env`: the settings value is handed to the CLI). `CLAUDE_CODE_OAUTH_TOKEN`
   (subscription) and `~/.claude.json` are for local testing only.
+- The merged system prompt goes to the CLI as a `0600` file (`--system-prompt-file`),
+  not on argv (visible via `ps`, 128 KiB per argument on Linux).
+- An API failure the CLI reports as a synthetic assistant message is not streamed as
+  `text`; the error result that follows is the terminal `error` frame.
 
 - A per-turn MCP entry carrying `X-Turn-Token` is written to a `0600` file in a
   fresh `0700` temp dir (outside the workspace) and passed to the SDK as a path —
@@ -204,7 +209,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 - Spawns `codex exec --json --skip-git-repo-check --sandbox <CODEX_SANDBOX> -- -`
   (from `@openai/codex`) in its **own process group**, writes the prompt to stdin
   and closes it, then parses the NDJSON event stream. The prompt never appears in
-  argv (no ARG_MAX limit, not visible in `ps`); closing stdin keeps codex from
+  argv (no ARG_MAX limit, not visible in `ps`) — the system prompt does, as
+  `-c developer_instructions=…` (codex has no file form for it); closing stdin keeps codex from
   waiting for "additional input". `--skip-git-repo-check` is required because
   session workspaces are plain scratch dirs (not git repos). `--sandbox` is always
   explicit, so a `config.toml` cannot change the sandbox *mode* (its other sandbox
@@ -228,9 +234,12 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   a non-zero exit, or an exit without `turn.completed`. Oversized event lines are
   skipped; the stderr tail in error messages is the *end* of stderr.
 - codex gets an **allowlisted** environment (`PATH`, `HOME`, `CODEX_HOME`, locale,
-  proxy and CA variables, `OPENAI_BASE_URL`/`OPENAI_ORGANIZATION`/`OPENAI_PROJECT`,
-  plus `CODEX_ENV_PASSTHROUGH`); `BEARER_SECRET` and provider API keys are withheld
-  from its environment and from the shell commands it runs. Env-based codex
+  proxy and CA variables, `OPENAI_ORGANIZATION`/`OPENAI_PROJECT`, `OPENAI_BASE_URL`,
+  plus `CODEX_ENV_PASSTHROUGH`). codex itself ignores `OPENAI_BASE_URL` (checked with
+  0.153/0.159; it only reaches tools the model runs): route codex to a gateway with
+  `openai_base_url` or a `[model_providers.*]` entry in `$CODEX_HOME/config.toml`.
+  `BEARER_SECRET` and provider API keys are withheld from its environment and from
+  the shell commands it runs. Env-based codex
   credentials (`CODEX_API_KEY`, …) only work if listed in `CODEX_ENV_PASSTHROUGH`.
 - This is **environment-only** isolation: the CLIs run as the sidecar's uid, so a
   tool that can run commands can still read `/proc/<sidecar pid>/environ`, other
@@ -243,7 +252,20 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   materialize `~/.codex/auth.json` from the key — a no-op when `auth.json`
   already exists (subscription mode).
 - Resume uses `codex exec resume -- <sessionId> -`.
-- System prompt is prepended to the user prompt (no separate flag in the CLI).
+- The system prompt is codex's `developer_instructions` (`-c`): a developer message
+  at the head of the thread, passed on every turn. On resume codex keeps the
+  thread's message and ignores a different value (no duplicate), but when it
+  auto-compacts it rebuilds the thread from the value passed in — so a change to
+  CLAUDE.md or `systemPrompt` reaches new sessions, and resumed ones once codex
+  compacts. One too long for a single argv string (> 100 kB) is prepended to the
+  first prompt instead (and then survives compaction only as far as codex keeps
+  that message).
+- Events match claude's: MCP tools are named `mcp__<server>__<tool>` (normalized the
+  same way), shell commands `shell`; `finalText` is the last agent message (earlier
+  ones, e.g. before a tool call, arrive only as `text`). `usage.inputTokens` follows
+  OpenAI semantics (it includes `cacheReadInputTokens`); claude's excludes them.
+- `MCP_CONFIG_PATH` servers are claude-only; with `PROVIDER=codex` startup logs
+  `mcp.static_config_ignored` if the file lists any.
 
 ---
 
@@ -257,7 +279,7 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `sidecar_request_duration_seconds` | Histogram | `outcome` |
 | `sidecar_inflight` | Gauge | — |
 | `sidecar_tool_calls_total` | Counter | `tool_name`, `outcome` |
-| `sidecar_tokens_total` | Counter | `kind` (input\|output) |
+| `sidecar_tokens_total` | Counter | `kind` (input\|output\|cache_read\|cache_creation) |
 
 > `sidecar_tool_calls_total` is labeled by `tool_name`. If you expose many distinct MCP tool
 > names, apply Prometheus relabeling rules to cap cardinality.
@@ -279,9 +301,12 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   "Fatal error in message reader" line (it quotes CLI output) is dropped.
 - Every sidecar log line of a turn carries `turn_id` (also the `X-Turn-Id` response
   header, on 429/400 rejections too). The claude CLI's stderr is logged line by line
-  as `claude.stderr`; a failed turn's details (exception text, the CLI's stderr tail)
-  are `error_detail` on `turn.closed`, and unexpected exceptions also log
-  `turn.internal_error` with a traceback.
+  as `claude.stderr` (first 200 lines of a turn, 2000 chars each); a failed turn's
+  details (exception text, the CLI's stderr tail) are `error_detail` on
+  `turn.closed`, and unexpected exceptions also log `turn.internal_error` with a
+  traceback. These are diagnostics: `LOG_PROMPTS=false` does not redact them (only
+  credentials are scrubbed), and an MCP server that shares the CLI's stderr could
+  write tool arguments there.
 
 ### OpenTelemetry
 - Activated only when `TRACING_ENABLED=true`.
@@ -364,6 +389,12 @@ behaviour is exercised end to end without credentials (the child gets a temp
 as strict xfails (finding ID first in the reason) — the fix for a bug must remove
 its marker. Setup steps use `precondition()` so a broken harness fails the run
 instead of passing as the known bug.
+
+`tests/integration/test_real_cli.py` runs the **real** CLIs — the SDK's bundled claude
+and the `codex` on PATH (skipped if absent) — against fake model APIs and a fake MCP
+server (`fake_model_apis.py`, `fake_mcp_server.py`): flags the CLIs must accept,
+their real event shapes, the per-turn MCP server reached with the turn token, the
+system prompt's placement. No credentials, no quota, a few seconds.
 
 Or via the helper script:
 ```bash

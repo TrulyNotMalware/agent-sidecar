@@ -18,6 +18,10 @@ def _install_fake_query(monkeypatch) -> dict:
         if isinstance(mcp, str) and Path(mcp).is_file():
             seen["mcp_file_content"] = Path(mcp).read_text()
             seen["mcp_file_mode"] = Path(mcp).stat().st_mode & 0o777
+        system = options.system_prompt
+        if isinstance(system, dict) and Path(system["path"]).is_file():
+            seen["system_file_content"] = Path(system["path"]).read_text()
+            seen["system_file_mode"] = Path(system["path"]).stat().st_mode & 0o777
         return
         yield  # unreachable; makes this an async generator like the real query()
 
@@ -217,3 +221,74 @@ async def test_cli_failure_keeps_stderr_and_output_off_the_wire(monkeypatch):
         await _run()
     assert exc_info.value.message == "claude CLI failed (CLIJSONDecodeError)"
     assert "private words" not in exc_info.value.detail  # conversation content
+
+
+async def test_system_prompt_goes_to_a_private_file_not_argv(monkeypatch):
+    seen = _install_fake_query(monkeypatch)
+
+    await _run(system_prompt="Answer tersely.")
+
+    system = seen["options"].system_prompt
+    assert system["type"] == "file"  # --system-prompt-file, not --system-prompt <text>
+    assert seen["system_file_content"] == "Answer tersely."
+    assert seen["system_file_mode"] == 0o600
+    assert not Path(system["path"]).exists()  # removed once the turn ends
+
+
+async def test_settings_api_key_reaches_the_cli(monkeypatch):
+    # Settings may read it from .env, which the CLI's inherited environment lacks.
+    seen = _install_fake_query(monkeypatch)
+
+    await _run(anthropic_api_key="sk-ant-from-dotenv")
+
+    assert seen["options"].env["ANTHROPIC_API_KEY"] == "sk-ant-from-dotenv"
+
+
+async def test_api_error_prose_is_not_streamed_as_text(monkeypatch):
+    # The CLI reports an API failure as a synthetic assistant message, then an error
+    # result: only the (scrubbed) terminal frame should carry it.
+    from claude_agent_sdk import AssistantMessage, ResultError, TextBlock
+
+    synthetic = AssistantMessage(
+        content=[TextBlock(text="API Error: 401 invalid x-api-key")], model="x",
+        error="authentication_failed",
+    )
+    data = {"subtype": "success", "result": "API Error: 401 invalid x-api-key"}
+    _install_failing_query(monkeypatch, ResultError("…", data, exit_code=1), synthetic)
+
+    events = []
+    with pytest.raises(ApiError) as exc_info:
+        async for ev in claude_runner.run_turn(
+            prompt="hi", cwd=Path("/tmp"), system_prompt=None, resume_session_id=None,
+            mcp_config_path=None,
+        ):
+            events.append(ev)
+
+    assert events == []
+    assert exc_info.value.message == "API Error: 401 invalid x-api-key"
+
+
+async def test_stderr_lines_are_capped_in_length_and_number(monkeypatch):
+    from claude_agent_sdk import ProcessError
+
+    logged: list[tuple[str, dict]] = []
+
+    class Recorder:
+        def info(self, event, **kw):
+            logged.append((event, kw))
+
+        warning = info
+
+    monkeypatch.setattr(claude_runner, "log", Recorder())
+    cap, count = claude_runner._STDERR_LINE_CHARS, claude_runner._STDERR_LOG_LINES
+    _install_failing_query(
+        monkeypatch, ProcessError("Command failed", 1, None), stderr=["x" * 50_000] * (count + 5)
+    )
+
+    with pytest.raises(ApiError):
+        await _run()
+
+    lines = [kw["line"] for event, kw in logged if event == "claude.stderr"]
+    assert len(lines) == count
+    assert {len(line) for line in lines} == {cap}
+    assert [event for event, _ in logged].count("claude.stderr_not_logged") == 1

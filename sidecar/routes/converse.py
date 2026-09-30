@@ -336,6 +336,9 @@ def _get_runner(settings: Settings) -> Runner:
         permission_mode=settings.claude_permission_mode,
         setting_sources=settings.claude_setting_sources_names,
         restricted=settings.claude_restricted,
+        anthropic_api_key=(
+            settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None
+        ),
     )
 
 

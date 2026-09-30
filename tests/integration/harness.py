@@ -118,6 +118,7 @@ def converse(
     *,
     prompt: str = "hi",
     mode: str = "session",
+    body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
     read_timeout: float = 30.0,
     total_timeout: float = 90.0,
@@ -128,19 +129,21 @@ def converse(
 
     read_timeout bounds each read; total_timeout bounds the whole exchange (keep-alive
     pings would otherwise keep a stuck stream open forever). disconnect_after=N closes
-    the socket after N SSE events (the client walks away).
+    the socket after N SSE events (the client walks away). `body` adds request fields
+    (systemPrompt, sessionId, ...).
     """
-    body = json.dumps({"sessionKey": session_key, "prompt": prompt, "mode": mode}).encode()
+    payload = {"sessionKey": session_key, "prompt": prompt, "mode": mode, **(body or {})}
+    body_bytes = json.dumps(payload).encode()
     extra = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
     request = (
         "POST /v1/converse HTTP/1.1\r\n"
         "Host: localhost\r\n"
         f"Authorization: Bearer {BEARER}\r\n"
         "Content-Type: application/json\r\n"
-        f"Content-Length: {len(body)}\r\n"
+        f"Content-Length: {len(body_bytes)}\r\n"
         f"{extra}"
         "\r\n"
-    ).encode() + body
+    ).encode() + body_bytes
 
     started = time.monotonic()
     deadline = started + total_timeout

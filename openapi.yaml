@@ -137,9 +137,12 @@ paths:
     get:
       summary: Readiness probe.
       description: |
-        Verifies that the `claude` binary is present and the configured Anthropic
-        identity is usable. Returns 503 when not ready (e.g., during startup or
-        when credentials are missing).
+        Verifies that the provider's CLI is present and its identity is usable:
+        `PROVIDER=claude` checks the Agent SDK's bundled `claude` binary (else
+        `claude` on PATH) and an Anthropic credential; `PROVIDER=codex` checks
+        `codex` on PATH and `$CODEX_HOME/auth.json` (written by `codex login`, or
+        at startup from `OPENAI_API_KEY`). Returns 503 when not ready (e.g.
+        during startup or when credentials are missing).
       operationId: readyz
       security: []
       responses:
@@ -200,7 +203,9 @@ components:
           description: |
             Per-request system prompt. **Replaces** the static CLAUDE.md base
             entirely. Takes precedence over `appendSystemPrompt` when both are
-            present.
+            present. claude applies the merged system prompt to every turn.
+            codex keeps the one its session started with: a different value on
+            a resumed turn takes effect only once codex compacts the thread.
         appendSystemPrompt:
           type:
             - string
@@ -229,7 +234,8 @@ components:
       #   1. systemPrompt set         → final = systemPrompt
       #   2. appendSystemPrompt set   → final = CLAUDE.md + "\n\n" + append
       #   3. neither set              → final = CLAUDE.md (or empty if absent)
-      # The merged value is passed to the Claude Agent SDK as `system_prompt`.
+      # claude: the merged value goes to the CLI as a file (--system-prompt-file).
+      # codex: it is the session's developer instructions (-c developer_instructions).
 
     HealthStatus:
       type: object
@@ -297,7 +303,10 @@ components:
 
     SseToolUse:
       type: object
-      description: Claude has invoked an MCP tool.
+      description: |
+        The agent invoked a tool. MCP tools are named `mcp__<server>__<tool>` with
+        both providers (characters outside `[A-Za-z0-9_-]` become `_`); codex
+        shell commands are `shell`, claude's built-in tools keep their names.
       required: [name, args]
       additionalProperties: false
       properties:
@@ -337,6 +346,9 @@ components:
       properties:
         finalText:
           type: string
+          description: |
+            The agent's last message. Earlier messages of the turn (e.g. before a
+            tool call) arrive only as `text` deltas.
         usage:
           $ref: '#/components/schemas/Usage'
 
@@ -366,6 +378,10 @@ components:
 
     Usage:
       type: object
+      description: |
+        As the provider reports it. claude (Anthropic): `inputTokens` excludes
+        cache reads and writes. codex (OpenAI): `inputTokens` includes
+        `cacheReadInputTokens`.
       required: [inputTokens, outputTokens]
       additionalProperties: false
       properties:
