@@ -10,7 +10,9 @@ def main() -> None:
         host=s.bind,
         port=s.port,
         log_level=s.log_level.lower(),
-        timeout_graceful_shutdown=s.shutdown_grace_sec,
+        # Streams get SHUTDOWN_GRACE_SEC (sse-starlette) to finish or end with
+        # `error: cancelled`; uvicorn must not cut connections before that.
+        timeout_graceful_shutdown=s.shutdown_grace_sec + 2,
     )
 
 

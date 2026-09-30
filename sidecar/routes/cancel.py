@@ -1,54 +1,32 @@
-import asyncio
-import contextlib
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Path, Request, status
 
+from ..admission import Admission
 from ..auth import require_bearer
-from ..config import get_settings
-from ..errors import ErrorCode
-from ..inflight import InflightHandle, InflightRegistry
+from ..errors import ApiError, ErrorCode
 from ..observability.logging import get_logger
 
 router = APIRouter()
 log = get_logger("sidecar.cancel")
 
-_BACKGROUND: set[asyncio.Task] = set()
-
 
 @router.post(
-    "/v1/sessions/{session_key}/cancel",
+    # `:path` so a sessionKey containing "/" (e.g. "team/task") can be cancelled too.
+    "/v1/sessions/{session_key:path}/cancel",
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_bearer)],
 )
-async def cancel(session_key: str, request: Request) -> dict[str, str]:
-    settings = get_settings()
-    registry: InflightRegistry = request.app.state.inflight
-    handle = await registry.get(session_key)
-    if handle is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            {"code": ErrorCode.NOT_FOUND.value, "message": "no active turn for sessionKey"},
-        )
+async def cancel(
+    session_key: Annotated[str, Path(min_length=1, max_length=256)], request: Request
+) -> dict[str, str]:
+    admission: Admission = request.app.state.admission
+    turn = admission.get(session_key)
+    if turn is None:
+        raise ApiError(ErrorCode.NOT_FOUND, "no active turn for sessionKey")
 
-    task = asyncio.create_task(_escalate_cancel(handle, settings.cancel_grace_sec))
-    _BACKGROUND.add(task)
-    task.add_done_callback(_BACKGROUND.discard)
-
-    log.info("cancel.requested", session_key=session_key, grace_sec=settings.cancel_grace_sec)
+    # The stream gets `error: cancelled` right away; the sessionKey stays busy until
+    # the turn's task has closed the CLI.
+    turn.stop("cancelled")
+    log.info("cancel.requested", session_key=session_key, target_turn_id=turn.turn_id)
     return {"status": "accepted", "sessionKey": session_key}
-
-
-async def _escalate_cancel(handle: InflightHandle, grace_sec: float) -> None:
-    handle.cancel_event.set()
-    try:
-        await asyncio.wait_for(asyncio.shield(_swallow(handle.task)), timeout=grace_sec)
-        return
-    except TimeoutError:
-        pass
-    if not handle.task.done():
-        handle.task.cancel()
-
-
-async def _swallow(task: asyncio.Task) -> None:
-    with contextlib.suppress(Exception, asyncio.CancelledError):
-        await task

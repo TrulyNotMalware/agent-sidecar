@@ -10,24 +10,31 @@ contract itself lives in `openapi.yaml`.
 | `PROVIDER` | `claude` | Backend selected per deployment: `claude` (Agent SDK) or `codex` (`codex exec`). Drives `/readyz` checks, the runner, and startup auth. |
 | `BIND` | `127.0.0.1` | Listen address. Use `127.0.0.1` for Pod-local sidecar; `0.0.0.0` only for standalone testing. |
 | `PORT` | `7300` | Listen port. |
-| `BEARER_SECRET` | **required** | Shared secret expected in `Authorization: Bearer …`. Provision via Kubernetes Secret. |
+| `BEARER_SECRET` | **required** | Shared secret expected in `Authorization: Bearer …`. Provision via Kubernetes Secret. Startup fails if unset or empty. |
 | `MAX_CONCURRENT` | `8` | Global in-flight `/v1/converse` cap; further requests get HTTP 429 (`busy`). |
-| `TURN_TIMEOUT_SEC` | `90` | Hard ceiling per turn. Past this, the SDK subprocess is SIGKILL'd and the SSE stream emits `error: timeout`. |
-| `CANCEL_GRACE_SEC` | `5` | Grace window between `/cancel` and force-cancel of the underlying task. |
-| `SHUTDOWN_GRACE_SEC` | `10` | Window during process shutdown for in-flight turns to drain before force-cancel. Also sets `uvicorn --timeout-graceful-shutdown`. |
-| `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Per-`sessionKey` workspace root (session mode). Stateless mode uses an OS temp dir. Non-root / local runs (e.g. macOS dev) must override this to a writable directory — otherwise startup fails with `PermissionError` creating the default path. |
+| `TURN_TIMEOUT_SEC` | `90` | Hard ceiling per turn. At the deadline the stream emits `error: timeout` and the CLI is closed in the background (see [Turn lifecycle](#turn-lifecycle-timeout-cancel-disconnect-shutdown)). |
+| `SHUTDOWN_GRACE_SEC` | `10` | On SIGTERM, how long in-flight turns may keep streaming before they end with `error: cancelled` (see [Shutdown](#shutdown)). Minimum `1`. |
+| `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Per-`sessionKey` workspace root (session mode); stateless turns get a temporary directory under `WORKSPACE_ROOT/.stateless/`, and issued session ids are recorded in `WORKSPACE_ROOT/.session-ids/`. Created at startup. Non-root / local runs (e.g. macOS dev) must override this to a writable directory — otherwise startup fails with `PermissionError` creating the default path. |
 | `CLAUDE_MD_PATH` | unset | Path to the static base system prompt (typically a ConfigMap mount, e.g. `/workspace/CLAUDE.md`). |
 | `MCP_CONFIG_PATH` | unset | Path to `mcp.json` for **extra** static MCP servers (typically `/etc/sidecar/mcp.json`). For `PROVIDER=claude` these are merged with the per-turn scoped entry; the per-turn entry wins on a name collision. |
 | `MCP_SERVER_URL` | unset | Streamable-HTTP URL of the consumer's domain-tools MCP server. When set together with a per-turn `X-Turn-Token`, the sidecar injects a scoped MCP entry for both providers and forwards the token as its `Authorization` bearer. |
-| `MCP_SERVER_NAME` | `codecompanion` | Name of the injected per-turn MCP server entry (the key under `mcpServers` / `-c mcp_servers.<name>`). |
+| `MCP_SERVER_NAME` | `domain-tools` | Name of the injected per-turn MCP server entry (the key under `mcpServers` / `-c mcp_servers.<name>`). | Letters, digits, `_` and `-` only.
 | `ANTHROPIC_API_KEY` | unset | **Production / general use.** Pay-as-you-go API key from the Anthropic Console. |
 | `ANTHROPIC_MODE` | `subscription` | Set to `api` in production so `/readyz` requires `ANTHROPIC_API_KEY` specifically. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | unset | **Local testing only.** Long-lived subscription token from `claude setup-token`. Never deploy it. |
 | `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth file location (local dev alternative). Used by `/readyz` validation. |
 | `OPENAI_API_KEY` | unset | **`PROVIDER=codex`.** Codex API key. Materialized into `~/.codex/auth.json` at startup (see [Codex provider](#codex-provider)). |
-| `CODEX_AUTH_PATH` | `~/.codex/auth.json` | Codex OAuth auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. |
-| `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. |
-| `LOG_LEVEL` | `INFO` | structlog level. |
+| `CLAUDE_TOOLS` | unset | **`PROVIDER=claude`.** Built-in toolset. Unset keeps the CLI's default set; `""` disables every built-in tool (MCP only); otherwise a comma-separated list such as `Read,Glob,Grep`. |
+| `CLAUDE_ALLOWED_TOOLS` | unset | **`PROVIDER=claude`.** Comma-separated tools pre-approved on top of the configured MCP servers, e.g. `WebFetch,Bash(git status:*)`. |
+| `CLAUDE_DISALLOWED_TOOLS` | unset | **`PROVIDER=claude`.** Comma-separated tools denied even if allowed elsewhere (deny beats allow), e.g. one destructive tool of a pre-approved MCP server: `mcp__domain-tools__delete_all`. |
+| `CLAUDE_PERMISSION_MODE` | `dontAsk` | **`PROVIDER=claude`.** `dontAsk` denies anything that would prompt (nobody can answer in a headless sidecar) unless pre-approved. Also accepted: `default`, `acceptEdits`, and — not recommended for a service that runs untrusted prompts — `bypassPermissions` (no checks at all), `plan` (the agent cannot act) and `auto` (needs the CLI's classifier). |
+| `CLAUDE_SETTING_SOURCES` | unset | **`PROVIDER=claude`.** Comma-separated setting sources to load (`user`, `project`, `local`). Unset loads none, so settings, hooks and plugins under the sidecar's `$HOME` or the workspace never apply. |
+| `CLAUDE_RESTRICTED` | `false` | **`PROVIDER=claude`.** Opt-in CLI `--restricted` mode: removes code-running tools and WebFetch unless `CLAUDE_TOOLS` names them, confines file tools to the workspace, refuses `bypassPermissions`. |
+| `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Codex auth-file location, written by `codex login`. Used by `/readyz` and startup materialization. Leave unset: codex itself always uses `$CODEX_HOME/auth.json` (default `~/.codex`). |
+| `CODEX_SANDBOX` | `read-only` | **`PROVIDER=codex`.** Always passed as `codex exec --sandbox` so a `config.toml` cannot loosen it: `read-only`, `workspace-write`, or `danger-full-access`. |
+| `CODEX_ENV_PASSTHROUGH` | unset | **`PROVIDER=codex`.** Comma-separated extra env var names codex may inherit (e.g. a custom model provider's `env_key`). Everything outside the built-in allowlist is withheld. |
+| `LOG_PROMPTS` | `false` | When `true`, do not redact prompt/response bodies in structured logs. Default redacts. Known credentials and credential-shaped strings are scrubbed from every log line either way. CLI diagnostics (`claude.stderr`, `error_detail`) are not redacted by it. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (case-insensitive; anything else fails startup). |
 | `TRACING_ENABLED` | `false` | When `true`, enable OpenTelemetry tracing (`OTLP/HTTP`). |
 | `OTEL_SERVICE_NAME` | `claude-sidecar` | Service name attached to traces. |
 
@@ -114,11 +121,12 @@ subscription quota.
 ### Alternative (local dev): mount `~/.claude.json`
 
 If you prefer the interactive-login flow, run `claude` once on a host with
-the subscription, copy the resulting `~/.claude.json` into a Secret, and
-mount it at `$HOME` of the sidecar container (`/root` for the default
-Dockerfile user). The OAuth state inside that file rotates more often than
-the `setup-token` output, so plan to refresh the Secret on the same cadence
-as the upstream host. `CLAUDE_AUTH_PATH` overrides the location.
+the subscription and make the resulting `~/.claude.json` available to the
+sidecar. The default image sets `CLAUDE_CONFIG_DIR=/var/lib/claude-sidecar/claude`,
+and the CLI then reads `$CLAUDE_CONFIG_DIR/.claude.json` (not `~/.claude.json`) — put
+it there; `/readyz` checks that path too (`CLAUDE_AUTH_PATH` overrides). The OAuth
+state inside that file rotates more often than the `setup-token` output, so plan
+to refresh it on the same cadence as the upstream host.
 
 ### Why no API-key multi-tenancy in 1.x
 
@@ -154,24 +162,134 @@ lifespan, when `PROVIDER=codex`) `ensure_codex_auth()` materializes the auth
 file: if `~/.codex/auth.json` is absent and `OPENAI_API_KEY` is set, it runs
 `codex login --with-api-key` once to write it. This is a no-op when the file
 already exists (subscription mode) or no key is present. `/readyz` reports not
-ready when neither the key nor the auth file is available.
+ready until `auth.json` exists (a bare `OPENAI_API_KEY` counts only once it has been
+materialized — check the `codex.auth` startup log if the pod stays unready). The
+file lives at `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`), which is also
+where the sidecar looks unless `CODEX_AUTH_PATH` points elsewhere.
 
 In k8s the container filesystem is ephemeral, so a `codex login`-created
-`auth.json` is lost on restart. Either set `OPENAI_API_KEY` (re-materialized on
-every start) or mount `auth.json` as a Secret at `/root/.codex/auth.json`.
+`auth.json` is lost when the Pod is recreated. Either set `OPENAI_API_KEY`
+(materialized at startup when `auth.json` is absent — with an emptyDir
+`CODEX_HOME` the file survives in-place container restarts, so after rotating the
+key recreate the Pod or delete `auth.json`) or copy `auth.json` from a Secret into
+a writable `CODEX_HOME` with an init container (see `deploy/k8s/deployment.yaml`, Option B). Do not mount the
+Secret over `~/.codex` itself: codex writes session files and refreshed OAuth
+tokens there, and a read-only mount breaks both.
 
 **How the runner invokes codex:** each turn runs
-`codex exec --json --skip-git-repo-check` with `stdin` set to `DEVNULL`.
+`codex exec --json --skip-git-repo-check --sandbox <CODEX_SANDBOX> -- -`
+(or `… resume -- <sessionId> -`) in its own process group, writes the prompt
+to stdin and closes it.
+
+- System prompt — passed on every turn as `-c developer_instructions=…`: a developer
+  message at the head of the thread. On resume codex keeps the thread's message and
+  ignores a different value, but rebuilds the thread from the value passed in when
+  it auto-compacts (without it, the system prompt would be lost at the first
+  compaction). So **a change to CLAUDE.md or `systemPrompt` reaches new codex
+  sessions, and resumed ones once codex compacts** (claude applies it every turn).
+  A system prompt over 100 kB (too long for one argv string on Linux) is prepended
+  to the first prompt instead.
+- Events — MCP tool calls are named `mcp__<server>__<tool>` as with claude, shell
+  commands `shell`; `finalText` is the last agent message.
+- Gateway — codex ignores `OPENAI_BASE_URL`; set `openai_base_url` (or a
+  `[model_providers.<id>]` entry) in `$CODEX_HOME/config.toml`.
+- Egress — besides the model API, every `codex exec` contacts `chatgpt.com`,
+  `ab.chatgpt.com` and `github.com` (update check, analytics, plugins/apps/skills,
+  the remote model list). Where egress allows only the model API those connections
+  hang and each turn gets ~10 s slower. `config.toml` switches them off:
+  `check_for_update_on_startup = false`, `[analytics] enabled = false`,
+  `[feedback] enabled = false`, `[features] plugins = false`, `apps = false`,
+  `remote_models = false`, `skills = false` (as `tests/integration/test_real_cli.py`
+  does; checked with codex 0.153 and 0.159).
 
 - `--skip-git-repo-check` — session workspaces are plain scratch directories, not
   git repos, and `codex exec` refuses to run outside a trusted git repo without
   this flag.
-- `stdin=DEVNULL` — an inherited stdin pipe makes codex block on "Reading
-  additional input from stdin", hanging the turn until `TURN_TIMEOUT_SEC`.
+- Prompt on stdin (`-`) — no `ARG_MAX` limit and never visible in `ps`. stdin is
+  closed right after the prompt; an open pipe makes codex wait for "additional
+  input from stdin" until `TURN_TIMEOUT_SEC`.
+- Own process group — stopping a turn SIGTERMs codex's group (the npm `codex` node
+  wrapper and the native binary behind it, which a plain kill used to orphan, plus
+  anything left in the group), then always SIGKILLs the group after 2 s; a natural
+  exit sweeps it too. codex runs model shell commands in their own session
+  (setsid), so a group kill does not reach those — codex terminates them itself
+  (on Linux via PDEATHSIG for the direct child). Every wait is bounded.
+- Events — `type:"error"` is not terminal (e.g. "Reconnecting… 2/5" while falling
+  back from WebSocket to HTTPS, common behind proxies). The turn fails on
+  `turn.failed`, a non-zero exit, or an exit without `turn.completed` (then the
+  last `error` message is reported). Event lines over 8 MiB are skipped.
+- Sessions — `mode=stateless` adds `--ephemeral`. A resume must use a thread id the
+  same `sessionKey` was issued (recorded under `WORKSPACE_ROOT/.session-ids/`,
+  outside the workspaces the agent can write to); others get `400` before the
+  stream opens, because codex resolves ids across all of `CODEX_HOME`. Threads
+  created before this rule was introduced cannot be resumed. On resume codex may
+  report the same or a new (forked) thread id; both are recorded — continue with
+  the latest `session` id. Do not delete `WORKSPACE_ROOT/.session-ids/` in a
+  workspace cleanup job, or every resume returns `400`. With
+  `CODEX_SANDBOX=workspace-write`, keep `WORKSPACE_ROOT` outside the sandbox's
+  writable roots (e.g. not under `/tmp`), or the agent could forge that record.
+- Transcripts — codex keeps every session's rollout in `CODEX_HOME/sessions/`, and
+  its sandbox modes allow reading the whole filesystem. A model-run shell command
+  can therefore read other sessions' transcripts (and `auth.json`); the resume
+  binding prevents *continuing* a foreign thread, not reading it. Run one sidecar
+  per trust domain (or a CLI uid per tenant) if that matters.
+- `--sandbox` — always explicit, so the sandbox *mode* for model-run shell commands
+  is decided by `CODEX_SANDBOX`, not by whatever `config.toml` is present (other
+  `config.toml` sandbox settings, e.g. `writable_roots`, still apply). Deployments
+  that set `sandbox_mode` in `config.toml` must move it to `CODEX_SANDBOX`.
+- `--` — ends option parsing, so a `sessionId` starting with `-` (`--last`,
+  `-c sandbox_mode=…`) is never read as a flag. `sessionId` must be a
+  UUID (checked up front, `400` otherwise): codex also resolves free-form thread
+  names across all sessions in `CODEX_HOME`.
+- Environment — codex (and every shell command it runs) inherits only an
+  allowlist: `PATH`, `HOME`, `USER`, `SHELL`, `TERM`, locale (`LANG`, `LC_*`),
+  `TMPDIR`, `CODEX_HOME`, `RUST_LOG`, `XDG_*`, CA bundles (incl.
+  `CODEX_CA_CERTIFICATE`), `NODE_OPTIONS`, proxy variables and
+  `OPENAI_ORGANIZATION`/`OPENAI_PROJECT`/`OPENAI_BASE_URL`, plus anything named in
+  `CODEX_ENV_PASSTHROUGH` (those names are also blanked for the `claude` provider's
+  CLI). `BEARER_SECRET` and provider API keys are withheld; auth comes from
+  `CODEX_HOME/auth.json` (env credentials such as `CODEX_API_KEY` only if passed
+  through). `/readyz` therefore requires `auth.json` (or a passed-through env
+  credential): a bare `OPENAI_API_KEY` counts once startup has materialized it.
+- **Scope of the isolation:** this hides secrets from the CLI's *environment*
+  only. The CLIs and their tools run as the sidecar's uid, so a tool that can run
+  commands can still read `/proc/<sidecar pid>/environ`, other turns' MCP config
+  files and `CODEX_HOME/auth.json`. Run the CLIs under a separate uid to close it.
+  Static stdio MCP servers that need a key should get it from their `env` block in
+  `mcp.json`, not from the sidecar's environment (keys the sidecar withholds are
+  blanked for the claude CLI and its children).
 
-The codex runner enforces a 100 KB combined-prompt limit (system prompt + user
-prompt are concatenated, since the CLI has no separate system-prompt flag) to
-guard against `ARG_MAX` exhaustion.
+
+## Claude agent policy
+
+The `claude` provider does not inherit tool permissions or settings from the
+environment it happens to run in:
+
+- **Permissions:** `CLAUDE_PERMISSION_MODE=dontAsk` (default). A tool call that
+  would need approval is denied — a headless sidecar has nobody to ask. MCP
+  servers from `MCP_CONFIG_PATH` and the per-turn server are pre-approved as
+  `mcp__<name>`; add more with `CLAUDE_ALLOWED_TOOLS`.
+- **Built-in tools:** the CLI's default set unless `CLAUDE_TOOLS` is set
+  (`""` = MCP only). Tools the CLI runs without asking still run under `dontAsk`;
+  those that would ask (typically Bash, Write, Edit, WebFetch) are denied unless
+  pre-approved. Which calls need approval is the CLI's decision — set
+  `CLAUDE_TOOLS` explicitly if the agent must not read files at all.
+- **Hermetic:** no setting sources are loaded (`CLAUDE_SETTING_SOURCES`) and the
+  CLI runs with `--strict-mcp-config`, so `~/.claude` settings, hooks, plugins,
+  `~/.claude.json` MCP servers, claude.ai account connectors and a workspace
+  `.claude/` or `.mcp.json` have no effect. Managed (enterprise) policy settings
+  still apply.
+- **MCP names:** a server named `v1.2` is pre-approved as `mcp__v1_2` — the CLI
+  replaces every character outside `[A-Za-z0-9_-]` with `_` in tool names, and
+  permission rules must match that form (so do rules you write yourself).
+- **Changed defaults (migration):** before this policy, a sidecar running where
+  `~/.claude` existed inherited its `permissions.allow`, `env`, `model`,
+  `apiKeyHelper`, MCP servers and memory files. None of that applies any more;
+  move what you need into `CLAUDE_ALLOWED_TOOLS` / `MCP_CONFIG_PATH` / the
+  sidecar's own environment, or opt back in with `CLAUDE_SETTING_SOURCES`.
+
+This is policy, not isolation: the CLI still runs as the sidecar's uid (see the
+scope note under [Codex provider](#codex-provider)).
 
 ## Consumer contract: writing the MCP server
 
@@ -186,14 +304,18 @@ that the consumer (the app that talks to the sidecar) implements. Examples:
 shared by every turn, the consumer mints a **short-lived signed token per
 `/v1/converse` call** and sends it as `X-Turn-Token`. Point the sidecar at the
 MCP server with `MCP_SERVER_URL` (and optionally `MCP_SERVER_NAME`, default
-`codecompanion`); for each turn the sidecar injects a streamable-HTTP MCP entry
+`domain-tools`; `codecompanion` in earlier releases — set it explicitly if your prompts or
+tool allow-lists name `mcp__codecompanion__*`); for each turn the sidecar injects a streamable-HTTP MCP entry
 for **both** providers:
 
-- **`claude`** — a per-turn `mcp_servers` dict entry
-  `{"type": "http", "url": MCP_SERVER_URL, "headers": {"Authorization": "Bearer <X-Turn-Token>"}}`
-  handed to the Agent SDK.
+- **`claude`** — a per-turn `mcp_servers` entry
+  `{"type": "http", "url": MCP_SERVER_URL, "headers": {"Authorization": "Bearer <X-Turn-Token>"}}`,
+  merged with any static servers and written to a `0600` file in a fresh `0700`
+  temp directory outside the workspace. The SDK gets the file **path** (never on
+  argv — a dict would be inlined as `--mcp-config '<json>'`); the file is deleted
+  when the runner finishes.
 - **`codex`** — `-c mcp_servers.<name>.url="…"` and
-  `-c mcp_servers.<name>.bearer_token_env_var="CODECOMPANION_MCP_TOKEN"` config
+  `-c mcp_servers.<name>.bearer_token_env_var="SIDECAR_MCP_TURN_TOKEN"` config
   overrides, with the token passed only through that env var (never on argv).
 
 The MCP server validates the token and resolves identity from its claims. The
@@ -215,18 +337,18 @@ that opens a prompt-injection vector where the model invents IDs.
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `/healthz` | none | Liveness — process responding. |
-| `/readyz` | none | Readiness — the provider's CLI on PATH (`claude`, or `codex` when `PROVIDER=codex`) **and** a matching identity present. 503 with `detail` when not ready. |
+| `/readyz` | none | Readiness — the provider's CLI (the SDK's bundled `claude`, else `claude` on PATH; `codex` on PATH when `PROVIDER=codex`) **and** a matching identity present. 503 with `detail` when not ready. |
 | `/metrics` | none | Prometheus text format with five collectors. |
 
 Metrics:
 
 | Name | Type | Labels |
 |---|---|---|
-| `sidecar_requests_total` | counter | `outcome` ∈ `{ok, busy, timeout, sdk_error, internal, cancelled}` |
-| `sidecar_request_duration_seconds` | histogram | `outcome` |
-| `sidecar_inflight` | gauge | — |
+| `sidecar_requests_total` | counter | `outcome` ∈ `{ok, busy, timeout, sdk_error, internal, cancelled, bad_request}` |
+| `sidecar_request_duration_seconds` | histogram | `outcome` (streamed turns only; pre-stream rejections are counted, not timed) |
+| `sidecar_inflight` | gauge | — (turns holding a slot, including the time spent closing their CLI) |
 | `sidecar_tool_calls_total` | counter | `tool_name`, `outcome` ∈ `{started, ok, error}` |
-| `sidecar_tokens_total` | counter | `kind` ∈ `{input, output}` |
+| `sidecar_tokens_total` | counter | `kind` ∈ `{input, output, cache_read, cache_creation}` (codex's `input` includes its cache reads, claude's does not) |
 
 `/metrics` and `/healthz` intentionally do not require the Bearer secret so
 in-cluster scrapers and probes can hit them without secret distribution.
@@ -237,11 +359,17 @@ in-cluster scrapers and probes can hit them without secret distribution.
   `401 unauthorized`, `404 not_found` (cancel target absent), `429 busy`.
 - After the SSE stream opens, every error is reported as the terminal
   `event: error` frame. No HTTP status changes mid-stream.
-- Error codes: `timeout | sdk_error | busy | internal | cancelled`.
-- **Benign `cancelled`:** a client that closes the SSE connection right after the
-  `done` frame causes the ASGI server to cancel the turn task, and the completed
-  turn is logged with `outcome=cancelled` even though the client already received
-  its answer. This is expected and not an error condition.
+- SSE error codes: `timeout | sdk_error | internal | cancelled` (`busy` is always the pre-stream `429`).
+- An error frame's `message` carries what the provider reported (e.g. "Prompt is
+  too long …", "unexpected status 429 …"), with credential-shaped strings removed
+  and cut at 500 characters. CLI stderr and exception text are never sent; the
+  message then ends with `(details in the sidecar log, turn <id>)`, and the
+  `turn.closed` log line for that `turn_id` has them as `error_detail`. The same id
+  is on the stream's `X-Turn-Id` response header.
+- `cancel` via `/v1/sessions/{sessionKey}/cancel` and a shutdown past
+  `SHUTDOWN_GRACE_SEC` both end the stream with `error: cancelled`. A client that
+  disconnects gets no frame (it is gone); its turn is stopped and recorded with
+  `outcome=cancelled`.
 
 ## Client integration notes
 
@@ -252,19 +380,68 @@ in-cluster scrapers and probes can hit them without secret distribution.
   `body: Field required`. Set the client to `Version.HTTP_1_1` explicitly. Other
   clients that default to HTTP/1.1 (curl, most HTTP libraries) are unaffected.
 
+## Turn lifecycle: timeout, cancel, disconnect, shutdown
+
+Each turn runs in its own asyncio task (`sidecar/turn.py`), outside the SSE
+response's task group. The route reserves the turn's admission slots (`Turn.start`)
+before the stream opens; the task owns the workspace and the runner, is cancelled
+at most once, and releases the reservation only after the runner has finished
+closing the CLI. Consequences:
+
+- **The terminal frame never waits for the CLI.** On timeout, cancel or shutdown
+  the stream gets its `error` frame at once and ends cleanly; the CLI is closed in
+  the background (claude: the SDK waits up to 5 s for it to exit, then SIGTERM, then
+  SIGKILL after another 5 s).
+- **The sessionKey stays busy until the CLI has exited.** A retry during that
+  window gets `429 busy` instead of starting a second CLI in the same workspace.
+- **Client disconnect** stops the turn the same way: the CLI is closed, never left
+  running.
+- **Exactly one terminal frame.** Anything the runner reports after `done` (e.g. a
+  non-zero exit while the CLI shuts down) is logged, not sent; a runner that ends
+  without a result gets `error: sdk_error`.
+- **End of stream means the sessionKey is free.** After `done` the stream stays open,
+  sending nothing, until the CLI has exited (usually milliseconds). A client that
+  waits for end-of-stream and then sends the next turn on the same `sessionKey` or
+  `X-User-Id` is accepted, not rejected with `429`. Clients that act on `done`
+  immediately may still see `429` for that short window.
+
 ## Shutdown
 
 - `SIGTERM` (k8s rolling restart, scale down):
   1. uvicorn stops accepting new connections.
-  2. Lifespan shutdown calls `InflightRegistry.drain()` → every in-flight turn
-     receives a cancel event → SSE generators emit `error: cancelled` and
-     close.
-  3. After `SHUTDOWN_GRACE_SEC` any survivors are force-cancelled.
-- For long turns, set `SHUTDOWN_GRACE_SEC` higher than `terminationGracePeriodSeconds` is **not** advised — k8s will SIGKILL the pod
-  first. Keep `SHUTDOWN_GRACE_SEC` ≤ pod grace period minus 5 s.
+  2. Every open stream is told the server is shutting down. In-flight turns get
+     `SHUTDOWN_GRACE_SEC` − 1 s to finish normally (`done`); the rest end with
+     `error: cancelled` and a clean end of stream.
+  3. uvicorn waits up to `SHUTDOWN_GRACE_SEC` + 2 s for connections to close.
+  4. Lifespan shutdown (`Admission.drain()`) waits up to 12 s for turns
+     still closing their CLI, then force-cancels any survivors (logged as
+     `shutdown.forced_cancel`; a forced turn may leave its CLI behind, which the
+     container runtime reaps when PID 1 exits).
+- Worst case the process needs about `SHUTDOWN_GRACE_SEC` + 15 s. As a native
+  sidecar (k8s ≥ 1.29) it receives SIGTERM only after the app container has
+  exited, out of the same `terminationGracePeriodSeconds`, so size that as app
+  shutdown time + `SHUTDOWN_GRACE_SEC` + 15 s (the default 30 s fits an app that
+  stops quickly and the default `SHUTDOWN_GRACE_SEC=10`); otherwise k8s SIGKILLs
+  the pod while CLIs are being closed.
 
 ## Operational gotchas
 
+- **Stateless leftovers.** A turn killed hard (SIGKILL, OOM) can leave a directory
+  under `WORKSPACE_ROOT/.stateless/`; it is safe to delete whenever no turn runs.
+- **Where state lives.** The image keeps all mutable state under
+  `/var/lib/claude-sidecar`: `sessions/` (`WORKSPACE_ROOT`), `claude/`
+  (`CLAUDE_CONFIG_DIR`: claude transcripts, needed to resume) and `codex/`
+  (`CODEX_HOME`: auth and rollouts). Mount one volume there; an `emptyDir` loses
+  conversations when the Pod goes away, a persistent volume keeps them. Size it
+  for transcripts too, and clean all three together (keep `.session-ids/`).
+- **Image.** Runs as uid/gid 10001 on `python:3.12-slim-bookworm` with Node.js 24
+  LTS and a pinned `@openai/codex`; the claude CLI is the one bundled with
+  `claude-agent-sdk`. Python dependencies are installed from `constraints.txt`.
+  The example manifest adds `runAsNonRoot`, `readOnlyRootFilesystem` (with
+  `emptyDir`s for `/tmp` and `$HOME`), no capabilities and `RuntimeDefault` seccomp
+  (not yet verified on a cluster; codex's own shell sandbox needs Landlock /
+  user-namespace support from the node). Upgrading from an image that ran as root:
+  `chown -R 10001:10001` an existing state volume first.
 - **Workspace cardinality.** `WORKSPACE_ROOT` accumulates one sub-directory per
   unique `sessionKey` in session mode. Mount it on a volume that has retention
   policy / cleanup — the sidecar does not GC.

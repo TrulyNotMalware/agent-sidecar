@@ -15,13 +15,18 @@ Domain decoupling is intentional. The sidecar knows nothing about Slack, meeting
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-BEARER_SECRET=$(openssl rand -hex 32) .venv/bin/python -m sidecar
+export BEARER_SECRET=$(openssl rand -hex 32)
+echo "$BEARER_SECRET"   # the client needs the same value
+export WORKSPACE_ROOT=$PWD/.workspaces   # the default /var/lib/... needs root
+.venv/bin/python -m sidecar
 ```
 
-Default bind is `127.0.0.1:7300`. From another terminal:
+Default bind is `127.0.0.1:7300`. From another terminal (with the same secret):
 
 ```bash
+export BEARER_SECRET=<value printed above>
 curl -N -H "Authorization: Bearer $BEARER_SECRET" \
+     -H "Content-Type: application/json" \
      -H "Accept: text/event-stream" \
      -d '{"sessionKey":"demo","prompt":"hello"}' \
      http://127.0.0.1:7300/v1/converse
@@ -42,12 +47,12 @@ for `ANTHROPIC_API_KEY`, `mcp.json`, and `CLAUDE.md`.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/v1/converse` | Bearer | Run one turn; streams SSE events |
-| `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | Cancel an in-flight turn (graceful → SIGKILL after grace) |
+| `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | Cancel an in-flight turn (`error: cancelled` at once; CLI closed in the background) |
 | `GET` | `/healthz` | none | Liveness |
 | `GET` | `/readyz` | none | Readiness — provider CLI (`claude`/`codex`) + auth present |
 | `GET` | `/metrics` | none | Prometheus text format |
 
-SSE event sequence: `session` → 0..N of `text` / `tool_use` / `tool_result` → terminal `done` *or* `error`. Full schema in [`openapi.yaml`](openapi.yaml).
+SSE event sequence: `session` → 0..N of `text` / `tool_use` / `tool_result` → terminal `done` *or* `error` (a lone `error` if the turn fails before it starts). Full schema in [`openapi.yaml`](openapi.yaml).
 
 ## Architecture
 
@@ -92,13 +97,9 @@ Full reference: [`docs/operations.md`](docs/operations.md).
 
 ## Consumer examples
 
-Minimal clients in three languages under [`examples/`](examples/):
-
-- [`examples/python/client.py`](examples/python/client.py) — httpx + manual SSE
-- [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/Client.kt`](examples/kotlin/Client.kt) — Ktor client + SSE plugin (coroutines)
-
-Each is ~50 lines; the contract is meant to be trivial to adopt.
+A minimal client: [`examples/python/client.py`](examples/python/client.py) (httpx +
+manual SSE parsing, ~50 lines). Any language with an HTTP client and a line reader
+can do the same — the contract is plain HTTP + SSE (see [`openapi.yaml`](openapi.yaml)).
 
 ## Project layout
 
@@ -108,13 +109,14 @@ sidecar/                  # the application
 ├── routes/               # converse, cancel, health, metrics
 ├── claude_runner.py      # Agent SDK adapter (event mapping)
 ├── codex_runner.py       # OpenAI Codex CLI adapter (PROVIDER=codex)
-├── concurrency.py        # global / user / session gates
-├── inflight.py           # cancel registry + drain
+├── admission.py          # limits (global / user / sessionKey) + registry + drain
+├── events.py             # runner events + Runner protocol
+├── turn.py               # one turn in its own task (reservation, runner, stop/timeout)
 ├── observability/        # metrics, structured logging, OTel tracing
 └── …
 tests/                    # unit tests
 docs/operations.md        # operations reference
-examples/                 # consumer clients (Python / Go / Kotlin)
+examples/                 # consumer client (Python)
 deploy/k8s/               # Pod manifests
 openapi.yaml              # the contract — source of truth
 ```
@@ -157,13 +159,18 @@ Anthropic의 **Claude Agent SDK**는 TypeScript와 Python 라이브러리만 제
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-BEARER_SECRET=$(openssl rand -hex 32) .venv/bin/python -m sidecar
+export BEARER_SECRET=$(openssl rand -hex 32)
+echo "$BEARER_SECRET"   # 클라이언트도 같은 값을 써야 합니다
+export WORKSPACE_ROOT=$PWD/.workspaces   # 기본 경로 /var/lib/... 는 root 권한 필요
+.venv/bin/python -m sidecar
 ```
 
-기본 `127.0.0.1:7300`에 바인딩됩니다. 다른 터미널에서:
+기본 `127.0.0.1:7300`에 바인딩됩니다. 다른 터미널에서 (같은 시크릿으로):
 
 ```bash
+export BEARER_SECRET=<위에서 출력된 값>
 curl -N -H "Authorization: Bearer $BEARER_SECRET" \
+     -H "Content-Type: application/json" \
      -H "Accept: text/event-stream" \
      -d '{"sessionKey":"demo","prompt":"안녕"}' \
      http://127.0.0.1:7300/v1/converse
@@ -182,12 +189,12 @@ docker build -t claude-sidecar:1.0.0 .
 | 메서드 | 경로 | 인증 | 용도 |
 |---|---|---|---|
 | `POST` | `/v1/converse` | Bearer | 1턴 실행, SSE 이벤트 스트림 |
-| `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | 진행 중 turn 취소 (graceful → grace 후 SIGKILL) |
+| `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | 진행 중 turn 취소 (즉시 `error: cancelled`, CLI는 백그라운드에서 종료) |
 | `GET` | `/healthz` | 없음 | Liveness |
 | `GET` | `/readyz` | 없음 | Readiness — provider CLI (`claude`/`codex`) 바이너리 + 인증 검증 |
 | `GET` | `/metrics` | 없음 | Prometheus text 포맷 |
 
-SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` → 종단 `done` 또는 `error`. 전체 스키마는 [`openapi.yaml`](openapi.yaml).
+SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` → 종단 `done` 또는 `error` (턴 시작 전에 실패하면 `error` 하나만). 전체 스키마는 [`openapi.yaml`](openapi.yaml).
 
 ## 아키텍처
 
@@ -232,13 +239,9 @@ SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` 
 
 ## 컨슈머 예제
 
-세 언어로 된 최소 클라이언트가 [`examples/`](examples/) 아래에 있습니다:
-
-- [`examples/python/client.py`](examples/python/client.py) — httpx + 수동 SSE
-- [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/Client.kt`](examples/kotlin/Client.kt) — Ktor 클라이언트 + SSE 플러그인 (코루틴)
-
-각 50줄 내외. 계약 자체가 단순해서 도입 비용이 낮습니다.
+최소 클라이언트: [`examples/python/client.py`](examples/python/client.py) (httpx + 수동 SSE
+파싱, 50줄 내외). 계약이 평범한 HTTP + SSE라서([`openapi.yaml`](openapi.yaml)) HTTP
+클라이언트와 줄 단위 읽기만 있으면 어떤 언어로도 같은 방식으로 붙일 수 있습니다.
 
 ## 프로젝트 구조
 
@@ -248,13 +251,14 @@ sidecar/                  # 애플리케이션
 ├── routes/               # converse, cancel, health, metrics
 ├── claude_runner.py      # Agent SDK 어댑터 (이벤트 매핑)
 ├── codex_runner.py       # OpenAI Codex CLI 어댑터 (PROVIDER=codex)
-├── concurrency.py        # 글로벌 / user / session 게이트
-├── inflight.py           # 취소 레지스트리 + drain
+├── admission.py          # 동시 실행 제한(글로벌 / user / sessionKey) + 레지스트리 + drain
+├── events.py             # 러너 이벤트 + Runner 프로토콜
+├── turn.py               # turn 하나를 독립 태스크로 실행 (예약, 러너, 중단/타임아웃)
 ├── observability/        # 메트릭, 구조화 로깅, OTel 트레이싱
 └── …
 tests/                    # unit 테스트
 docs/operations.md        # 운영 가이드
-examples/                 # 컨슈머 클라이언트 (Python / Go / Kotlin)
+examples/                 # 컨슈머 클라이언트 (Python)
 deploy/k8s/               # Pod manifests
 openapi.yaml              # 계약 — source of truth
 ```

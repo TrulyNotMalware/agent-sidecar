@@ -26,7 +26,7 @@ TOOL_CALLS = Counter(
 
 TOKENS = Counter(
     "sidecar_tokens_total",
-    "Token usage reported by Claude.",
+    "Token usage reported by the provider CLI (input, output, cache_read, cache_creation).",
     labelnames=("kind",),
 )
 

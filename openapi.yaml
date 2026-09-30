@@ -30,8 +30,11 @@ paths:
 
         Event order: exactly one `session` event first, then zero or more of
         `text` / `tool_use` / `tool_result`, then exactly one terminal event of
-        either `done` or `error`. `:keep-alive` SSE comments may appear at any
-        time and should be ignored by clients.
+        either `done` or `error`. If the turn fails before the CLI reports its
+        session (e.g. the CLI failing to start), the stream is a single `error`
+        with no `session`. Concurrency limits are always rejected before the
+        stream opens (`429`). `:keep-alive` SSE comments may appear at any time and
+        should be ignored by clients.
       operationId: converse
       parameters:
         - name: X-User-Id
@@ -65,6 +68,15 @@ paths:
       responses:
         '200':
           description: Server-Sent Events stream of turn progress.
+          headers:
+            X-Turn-Id:
+              description: |
+                Identifies this turn in the sidecar's log (every log line of the
+                turn carries it as `turn_id`); error messages that withhold
+                details refer to it. Also sent with this operation's pre-stream
+                JSON rejections (400 after validation, 429, 500).
+              schema:
+                type: string
           content:
             text/event-stream:
               schema:
@@ -80,11 +92,12 @@ paths:
 
   /v1/sessions/{sessionKey}/cancel:
     post:
-      summary: Cancel an in-flight turn for a sessionKey.
+      summary: Cancel an in-flight turn for a sessionKey (may contain "/").
       description: |
-        Issues a graceful cancel to the in-flight turn (if any) for the given
-        `sessionKey`. After a short grace period the underlying claude
-        subprocess is sent SIGKILL.
+        Cancels the in-flight turn (if any) for the given `sessionKey`. Its
+        stream ends right away with `event: error` (`code: cancelled`); the
+        underlying CLI is closed in the background, and the `sessionKey` stays
+        busy (`429`) until it has exited.
       operationId: cancelSession
       parameters:
         - name: sessionKey
@@ -124,9 +137,12 @@ paths:
     get:
       summary: Readiness probe.
       description: |
-        Verifies that the `claude` binary is present and the configured Anthropic
-        identity is usable. Returns 503 when not ready (e.g., during startup or
-        when credentials are missing).
+        Verifies that the provider's CLI is present and its identity is usable:
+        `PROVIDER=claude` checks the Agent SDK's bundled `claude` binary (else
+        `claude` on PATH) and an Anthropic credential; `PROVIDER=codex` checks
+        `codex` on PATH and `$CODEX_HOME/auth.json` (written by `codex login`, or
+        at startup from `OPENAI_API_KEY`). Returns 503 when not ready (e.g.
+        during startup or when credentials are missing).
       operationId: readyz
       security: []
       responses:
@@ -167,14 +183,19 @@ components:
         prompt:
           type: string
           minLength: 1
+          maxLength: 1000000
           description: The user's prompt for this turn.
         sessionId:
           type:
             - string
             - 'null'
+          pattern: '^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           description: |
-            Claude session id from a prior `session` event. When provided,
-            resumes that conversation; when null, starts fresh under sessionKey.
+            Session id (a UUID) from a prior `session` event. When provided,
+            resumes that conversation; when null or `""`, starts fresh under
+            sessionKey. Rejected with `400` when it is not a UUID, when
+            `mode=stateless`, or (codex provider) when it was not issued for this
+            sessionKey.
         systemPrompt:
           type:
             - string
@@ -182,14 +203,17 @@ components:
           description: |
             Per-request system prompt. **Replaces** the static CLAUDE.md base
             entirely. Takes precedence over `appendSystemPrompt` when both are
-            present.
+            present. claude applies the merged system prompt to every turn.
+            codex keeps the one its session started with: a different value on
+            a resumed turn takes effect only once codex compacts the thread.
         appendSystemPrompt:
           type:
             - string
             - 'null'
           description: |
             Per-request system prompt fragment **appended** to the static
-            CLAUDE.md base, joined by a blank line. Ignored when
+            CLAUDE.md base, joined by a blank line (used alone when there is no
+            CLAUDE.md; an empty string counts as unset). Ignored when
             `systemPrompt` is provided.
         mode:
           type: string
@@ -197,17 +221,21 @@ components:
           default: session
           description: |
             `session` (default): persist workspace under a sessionKey hash for
-            resume. Concurrent requests for the same sessionKey are rejected
-            with `busy`.
+            resume.
             `stateless`: a fresh ephemeral workspace is created per request and
-            removed when the turn ends; any returned `sessionId` is not
-            resumable since the workspace is gone.
+            removed when the turn ends; the returned `sessionId` is not
+            resumable (codex runs with `--ephemeral`), and sending a
+            `sessionId` with `mode=stateless` is rejected with `400`.
+            In both modes a sessionKey has at most one in-flight turn (the
+            cancel endpoint addresses turns by sessionKey): a concurrent
+            request for it is rejected with `429 busy`.
 
       # System prompt merge rules (Phase 3 contract):
       #   1. systemPrompt set         → final = systemPrompt
       #   2. appendSystemPrompt set   → final = CLAUDE.md + "\n\n" + append
       #   3. neither set              → final = CLAUDE.md (or empty if absent)
-      # The merged value is passed to the Claude Agent SDK as `system_prompt`.
+      # claude: the merged value goes to the CLI as a file (--system-prompt-file).
+      # codex: it is the session's developer instructions (-c developer_instructions).
 
     HealthStatus:
       type: object
@@ -275,7 +303,10 @@ components:
 
     SseToolUse:
       type: object
-      description: Claude has invoked an MCP tool.
+      description: |
+        The agent invoked a tool. MCP tools are named `mcp__<server>__<tool>` with
+        both providers (characters outside `[A-Za-z0-9_-]` become `_`); codex
+        shell commands are `shell`, claude's built-in tools keep their names.
       required: [name, args]
       additionalProperties: false
       properties:
@@ -306,12 +337,18 @@ components:
 
     SseDone:
       type: object
-      description: Turn completed successfully. Terminal event; no further events follow.
+      description: |
+        Turn completed successfully. Terminal event; no further events follow. The
+        stream may stay open briefly after `done` while the CLI exits: end of stream
+        means the sessionKey is free for the next turn (no `429`).
       required: [finalText, usage]
       additionalProperties: false
       properties:
         finalText:
           type: string
+          description: |
+            The agent's last message. Earlier messages of the turn (e.g. before a
+            tool call) arrive only as `text` deltas.
         usage:
           $ref: '#/components/schemas/Usage'
 
@@ -323,17 +360,28 @@ components:
       properties:
         code:
           type: string
-          enum: [timeout, sdk_error, busy, internal, cancelled]
+          enum: [timeout, sdk_error, internal, cancelled]
           description: |
             `cancelled` is emitted when /v1/sessions/{sessionKey}/cancel is invoked
-            for an in-flight turn. After the configured grace period (default 5s)
-            without a graceful exit the underlying claude subprocess is force-killed
-            and the SSE connection closes without a final event.
+            for an in-flight turn, and when the sidecar shuts down before the turn
+            finishes within its grace period. The frame is sent at once and the
+            stream ends normally; the CLI is closed in the background. `timeout`
+            likewise arrives at the deadline without waiting for the CLI.
         message:
           type: string
+          description: |
+            Human-readable cause. An error the provider reported (API status,
+            quota, context length, max turns) is passed through, with anything
+            credential-shaped removed and at most 500 characters. CLI internals
+            (stderr, exception text) are never sent: the message then ends with
+            `(details in the sidecar log, turn <X-Turn-Id>)`.
 
     Usage:
       type: object
+      description: |
+        As the provider reports it. claude (Anthropic): `inputTokens` excludes
+        cache reads and writes. codex (OpenAI): `inputTokens` includes
+        `cacheReadInputTokens`.
       required: [inputTokens, outputTokens]
       additionalProperties: false
       properties:
@@ -367,12 +415,19 @@ components:
             $ref: '#/components/schemas/Error'
     Unauthorized:
       description: Bearer token missing or invalid.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     Busy:
-      description: Sidecar concurrency cap exceeded or per-user lock held.
+      description: |
+        The sessionKey or the `X-User-Id` already has an in-flight turn (in either
+        `mode`), or the sidecar-wide `MAX_CONCURRENT` cap is reached.
       content:
         application/json:
           schema:

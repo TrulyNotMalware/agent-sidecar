@@ -1,44 +1,60 @@
 import asyncio
 import json
+import signal
 from pathlib import Path
 
 import pytest
 
-from sidecar.claude_runner import (
+from sidecar import codex_runner
+from sidecar.codex_runner import ensure_codex_auth, run_turn
+from sidecar.errors import ApiError, ErrorCode
+from sidecar.events import (
     DoneEvent,
     SessionEvent,
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
 )
-from sidecar.codex_runner import ensure_codex_auth, run_turn
-from sidecar.errors import ApiError, ErrorCode
+
+BASE_CMD = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]
 
 
-class _Lines:
-    """Async line iterator mimicking asyncio StreamReader iteration."""
+class _Pipe:
+    """A readable pipe: returns the given chunks, then EOF — or blocks, like a quiet
+    process, when `hang` is set (until the process is signalled)."""
 
-    def __init__(self, lines: list[bytes]) -> None:
-        self._it = iter(lines)
+    def __init__(self, chunks: list[bytes], *, hang: bool = False, proc=None) -> None:
+        self._chunks = list(chunks)
+        self._hang = hang
+        self._proc = proc
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> bytes:
+    async def read(self, _n: int = -1) -> bytes:
         await asyncio.sleep(0)  # yield to the loop like real pipe I/O does
-        try:
-            return next(self._it)
-        except StopIteration:
-            raise StopAsyncIteration from None
+        if self._chunks:
+            return self._chunks.pop(0)
+        if self._hang and self._proc is not None:
+            await self._proc.signalled.wait()
+        return b""
 
 
-class _HangingLines:
-    def __aiter__(self):
-        return self
+class _BrokenPipe:
+    async def read(self, _n: int = -1) -> bytes:
+        raise ValueError("Separator is found, but chunk is longer than limit")
 
-    async def __anext__(self) -> bytes:
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
+
+class _Stdin:
+    def __init__(self) -> None:
+        self.data = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.data += data
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeProc:
@@ -49,23 +65,45 @@ class FakeProc:
         returncode: int = 0,
         stderr_lines: list[bytes] | None = None,
         hang: bool = False,
+        ignore_sigterm: bool = False,
+        wait_stuck: bool = False,
     ) -> None:
-        self.stdout = _HangingLines() if hang else _Lines(stdout_lines)
-        self.stderr = _Lines(stderr_lines or [])
+        self.pid = 424242
+        self.stdin = _Stdin()
+        self.stdout = _Pipe(stdout_lines, hang=hang, proc=self)
+        self.stderr = _Pipe(stderr_lines or [])
         self.returncode: int | None = None
+        self.signals: list[int] = []
+        self.signalled = asyncio.Event()
         self._exit_code = returncode
-        self.killed = False
+        self._hang = hang
+        self._ignore_sigterm = ignore_sigterm
+        # Python 3.12: returncode is set at exit, but wait() blocks until every pipe
+        # is closed — a leftover process can keep stderr open.
+        self._wait_stuck = wait_stuck
+        if wait_stuck:
+            self.returncode = returncode
+
+    @property
+    def killed(self) -> bool:
+        return bool(self.signals)
+
+    def signal_group(self, sig: int) -> None:
+        self.signals.append(sig)
+        if sig == signal.SIGTERM and self._ignore_sigterm:
+            return
+        self._exit_code = -sig
+        self.signalled.set()
 
     async def wait(self) -> int:
-        # Yield a few times so the stderr drain task can finish deterministically.
-        for _ in range(5):
+        if self._wait_stuck:
+            await asyncio.Event().wait()
+        if self._hang and not self.signalled.is_set():
+            await self.signalled.wait()
+        for _ in range(5):  # let the stderr reader finish deterministically
             await asyncio.sleep(0)
         self.returncode = self._exit_code
         return self.returncode
-
-    def kill(self) -> None:
-        self.killed = True
-        self._exit_code = -9
 
 
 def _install(monkeypatch, proc: FakeProc) -> dict:
@@ -77,6 +115,8 @@ def _install(monkeypatch, proc: FakeProc) -> dict:
         return proc
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    # Never signal a real process group from a unit test.
+    monkeypatch.setattr(codex_runner, "_signal_group", lambda _pid, sig: proc.signal_group(sig))
     return calls
 
 
@@ -84,12 +124,15 @@ def _line(obj: dict) -> bytes:
     return (json.dumps(obj) + "\n").encode()
 
 
+COMPLETED = _line({"type": "turn.completed", "usage": {}})
+
+
 async def _collect(
     *,
     prompt: str = "hi",
     system_prompt: str | None = None,
     resume_session_id: str | None = None,
-    timeout_sec: float = 5,
+    **kwargs,
 ) -> list:
     return [
         ev
@@ -99,58 +142,149 @@ async def _collect(
             system_prompt=system_prompt,
             resume_session_id=resume_session_id,
             mcp_config_path=None,
-            timeout_sec=timeout_sec,
+            **kwargs,
         )
     ]
 
 
 async def test_maps_full_event_sequence(monkeypatch):
+    # The shapes codex 0.159 emits (recorded against a fake model API).
+    tool_call = {
+        "id": "item_1", "type": "mcp_tool_call", "server": "domain-tools", "tool": "echo",
+        "arguments": {"text": "hi"}, "result": None, "error": None, "status": "in_progress",
+    }
     lines = [
         _line({"type": "thread.started", "thread_id": "t-1"}),
-        _line({
-            "type": "item.started",
-            "item": {
-                "type": "mcp_tool_call",
-                "id": "call-1",
-                "tool": "lookup",
-                "arguments": {"q": 1},
-            },
-        }),
-        _line({
-            "type": "item.completed",
-            "item": {
-                "type": "mcp_tool_call",
-                "id": "call-1",
-                "tool": "lookup",
-                "status": "completed",
-                "error": None,
-            },
-        }),
-        _line({"type": "item.completed", "item": {"type": "agent_message", "text": "Hello"}}),
+        _line({"type": "turn.started"}),
+        _line({"type": "item.completed", "item": {"type": "agent_message", "text": "preamble"}}),
+        _line({"type": "item.started", "item": tool_call}),
+        _line({"type": "item.completed", "item": {**tool_call, "status": "completed"}}),
+        _line({"type": "item.completed", "item": {"type": "agent_message", "text": "final"}}),
         _line({
             "type": "turn.completed",
-            "usage": {"input_tokens": 10, "output_tokens": 5, "cached_input_tokens": 2},
+            "usage": {"input_tokens": 20, "cached_input_tokens": 4, "cache_write_input_tokens": 3,
+                      "output_tokens": 6, "reasoning_output_tokens": 0},
         }),
     ]
     calls = _install(monkeypatch, FakeProc(lines))
 
     events = await _collect()
 
-    assert calls["cmd"] == ["codex", "exec", "--json", "--skip-git-repo-check", "hi"]
-    assert calls["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
+    assert calls["cmd"] == [*BASE_CMD, "--", "-"]
+    assert calls["kwargs"]["stdin"] == asyncio.subprocess.PIPE
+    assert calls["kwargs"]["start_new_session"] is True
     assert events == [
         SessionEvent(session_id="t-1"),
-        ToolUseEvent(name="lookup", args={"q": 1}, tool_use_id="call-1"),
-        ToolResultEvent(name="lookup", ok=True, tool_use_id="call-1"),
-        TextEvent(delta="Hello"),
+        TextEvent(delta="preamble"),
+        # Named like claude names the same tool.
+        ToolUseEvent(name="mcp__domain-tools__echo", args={"text": "hi"}, tool_use_id="item_1"),
+        ToolResultEvent(name="mcp__domain-tools__echo", ok=True, tool_use_id="item_1"),
+        TextEvent(delta="final"),
         DoneEvent(
-            final_text="Hello",
-            input_tokens=10,
-            output_tokens=5,
-            cache_read_input_tokens=2,
-            cache_creation_input_tokens=None,
+            final_text="final",  # the last message, like claude's result
+            input_tokens=20,
+            output_tokens=6,
+            cache_read_input_tokens=4,
+            cache_creation_input_tokens=3,
         ),
     ]
+
+
+def test_mcp_tool_names_are_normalized_like_the_claude_cli():
+    from sidecar.codex_runner import _mcp_name
+
+    assert _mcp_name({"server": "v1.2 tools", "tool": "do.it"}) == "mcp__v1_2_tools__do_it"
+    assert _mcp_name({"tool": "bare"}) == "bare"  # no server reported
+
+
+async def test_prompt_goes_through_stdin_never_argv(monkeypatch):
+    proc = FakeProc([COMPLETED])
+    calls = _install(monkeypatch, proc)
+    big = "x" * 200_000  # past the old 100 KB argv guard
+
+    await _collect(prompt=big)
+
+    assert big not in calls["cmd"]
+    assert proc.stdin.data == big.encode()
+    assert proc.stdin.closed  # EOF, or codex waits for "additional input"
+
+
+async def test_system_prompt_is_the_new_sessions_developer_instructions(monkeypatch):
+    import tomllib
+
+    proc = FakeProc([COMPLETED])
+    calls = _install(monkeypatch, proc)
+
+    await _collect(system_prompt='Be "brief".\nNo tables.')
+
+    cmd = calls["cmd"]
+    override = cmd[cmd.index("-c") + 1]
+    assert tomllib.loads(override) == {"developer_instructions": 'Be "brief".\nNo tables.'}
+    assert cmd.index("-c") < cmd.index("--")
+    assert proc.stdin.data == b"hi"  # the prompt alone
+
+
+async def test_resume_passes_the_system_prompt_again(monkeypatch):
+    # codex keeps the thread's developer message on resume (no duplicate), but rebuilds
+    # the history from the value passed in when it auto-compacts.
+    proc = FakeProc([COMPLETED])
+    calls = _install(monkeypatch, proc)
+
+    await _collect(system_prompt="SYS", resume_session_id="sess-1")
+
+    cmd = calls["cmd"]
+    assert cmd[cmd.index("-c") + 1] == 'developer_instructions="SYS"'
+    assert cmd.index("-c") < cmd.index("resume")
+    assert proc.stdin.data == b"hi"
+
+
+async def test_a_too_long_system_prompt_is_not_repeated_on_resume(monkeypatch):
+    monkeypatch.setattr(codex_runner, "_MAX_ARG_BYTES", 64)
+    proc = FakeProc([COMPLETED])
+    calls = _install(monkeypatch, proc)
+
+    await _collect(system_prompt="S" * 100, resume_session_id="sess-1")
+
+    assert "-c" not in calls["cmd"]
+    assert proc.stdin.data == b"hi"  # the first turn's copy is in the thread already
+
+
+async def test_a_system_prompt_too_long_for_argv_goes_with_the_prompt(monkeypatch):
+    monkeypatch.setattr(codex_runner, "_MAX_ARG_BYTES", 64)
+    proc = FakeProc([COMPLETED])
+    calls = _install(monkeypatch, proc)
+
+    await _collect(system_prompt="S" * 100)
+
+    assert "-c" not in calls["cmd"]
+    assert proc.stdin.data == b"S" * 100 + b"\n\nhi"
+
+
+async def test_resume_session_id_extends_argv(monkeypatch):
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+
+    await _collect(resume_session_id="sess-9")
+
+    assert calls["cmd"] == [*BASE_CMD, "resume", "--", "sess-9", "-"]
+
+
+async def test_flag_like_prompts_and_ids_are_not_parsed_as_flags(monkeypatch):
+    proc = FakeProc([COMPLETED])
+    calls = _install(monkeypatch, proc)
+
+    await _collect(prompt="--last", resume_session_id="-csandbox_mode=danger-full-access")
+
+    assert calls["cmd"][-4:] == ["resume", "--", "-csandbox_mode=danger-full-access", "-"]
+    assert proc.stdin.data == b"--last"
+
+
+async def test_ephemeral_for_stateless_turns(monkeypatch):
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+
+    await _collect(ephemeral=True)
+
+    assert "--ephemeral" in calls["cmd"]
+    assert calls["cmd"].index("--ephemeral") < calls["cmd"].index("--")
 
 
 async def test_command_execution_maps_to_shell_events(monkeypatch):
@@ -163,7 +297,7 @@ async def test_command_execution_maps_to_shell_events(monkeypatch):
             "type": "item.completed",
             "item": {"type": "command_execution", "id": "c-1", "exit_code": 1},
         }),
-        _line({"type": "turn.completed", "usage": {}}),
+        COMPLETED,
     ]
     _install(monkeypatch, FakeProc(lines))
 
@@ -174,8 +308,7 @@ async def test_command_execution_maps_to_shell_events(monkeypatch):
 
 
 async def test_malformed_json_lines_are_skipped(monkeypatch):
-    lines = [b"not json\n", b"\n", _line({"type": "turn.completed", "usage": {}})]
-    _install(monkeypatch, FakeProc(lines))
+    _install(monkeypatch, FakeProc([b"not json\n", b"\n", COMPLETED]))
 
     events = await _collect()
 
@@ -190,6 +323,25 @@ async def test_malformed_json_lines_are_skipped(monkeypatch):
     ]
 
 
+async def test_event_lines_split_across_reads_are_reassembled(monkeypatch):
+    whole = _line({"type": "item.completed", "item": {"type": "agent_message", "text": "Hi"}})
+    _install(monkeypatch, FakeProc([whole[:10], whole[10:], COMPLETED]))
+
+    events = await _collect()
+
+    assert events[0] == TextEvent(delta="Hi")
+
+
+async def test_oversized_event_line_is_skipped_not_fatal(monkeypatch):
+    monkeypatch.setattr(codex_runner, "_MAX_EVENT_LINE_BYTES", 64)
+    huge = _line({"type": "item.completed", "item": {"type": "x", "output": "y" * 500}})
+    _install(monkeypatch, FakeProc([huge[:100], huge[100:], COMPLETED]))
+
+    events = await _collect()
+
+    assert isinstance(events[-1], DoneEvent)
+
+
 async def test_turn_failed_raises_sdk_error_and_reaps_process(monkeypatch):
     proc = FakeProc([_line({"type": "turn.failed", "error": {"message": "quota exhausted"}})])
     _install(monkeypatch, proc)
@@ -202,7 +354,17 @@ async def test_turn_failed_raises_sdk_error_and_reaps_process(monkeypatch):
     assert proc.killed
 
 
-async def test_error_event_raises_sdk_error(monkeypatch):
+async def test_transient_error_events_do_not_end_the_turn(monkeypatch):
+    # codex reports "Reconnecting... n/5" as type=error while falling back to HTTPS.
+    reconnect = _line({"type": "error", "message": "Reconnecting... 2/5"})
+    _install(monkeypatch, FakeProc([reconnect, COMPLETED]))
+
+    events = await _collect()
+
+    assert isinstance(events[-1], DoneEvent)
+
+
+async def test_error_event_is_reported_when_the_turn_never_completes(monkeypatch):
     _install(monkeypatch, FakeProc([_line({"type": "error", "message": "boom"})]))
 
     with pytest.raises(ApiError) as exc_info:
@@ -212,105 +374,202 @@ async def test_error_event_raises_sdk_error(monkeypatch):
     assert "boom" in exc_info.value.message
 
 
-async def test_nonzero_exit_surfaces_stderr_tail(monkeypatch):
-    proc = FakeProc([], returncode=3, stderr_lines=[b"fatal: no auth\n"])
+async def test_exit_zero_without_turn_completed_is_an_error(monkeypatch):
+    # e.g. codex printed help text instead of running a turn
+    _install(monkeypatch, FakeProc([b"Usage: codex exec ...\n"]))
+
+    with pytest.raises(ApiError, match="without turn.completed"):
+        await _collect()
+
+
+async def test_nonzero_exit_surfaces_the_end_of_stderr(monkeypatch):
+    noise = [f"log line {i}\n".encode() for i in range(300)]
+    proc = FakeProc([], returncode=3, stderr_lines=[*noise, b"fatal: no auth\n"])
     _install(monkeypatch, proc)
 
     with pytest.raises(ApiError) as exc_info:
         await _collect()
 
-    assert exc_info.value.code is ErrorCode.SDK_ERROR
-    assert "code 3" in exc_info.value.message
-    assert "fatal: no auth" in exc_info.value.message
+    error = exc_info.value
+    assert error.code is ErrorCode.SDK_ERROR
+    assert error.message == "codex exited with code 3"  # stderr never goes on the wire
+    assert error.detail.endswith("fatal: no auth\n")  # the log gets the end, not the start
 
 
-async def test_prompt_over_limit_rejected_before_spawn(monkeypatch):
-    calls = _install(monkeypatch, FakeProc([]))
+async def test_turn_failed_with_a_bare_string_error_keeps_the_cause(monkeypatch):
+    _install(monkeypatch, FakeProc([_line({"type": "turn.failed", "error": "rate limited"})]))
 
     with pytest.raises(ApiError) as exc_info:
-        await _collect(prompt="x" * 100_001)
+        await _collect()
 
-    assert exc_info.value.code is ErrorCode.BAD_REQUEST
-    assert "cmd" not in calls
-
-
-async def test_resume_session_id_extends_argv(monkeypatch):
-    lines = [_line({"type": "turn.completed", "usage": {}})]
-    calls = _install(monkeypatch, FakeProc(lines))
-
-    await _collect(resume_session_id="sess-9")
-
-    assert calls["cmd"] == [
-        "codex",
-        "exec",
-        "--json",
-        "--skip-git-repo-check",
-        "resume",
-        "sess-9",
-        "hi",
-    ]
+    assert exc_info.value.message == "rate limited"
 
 
-async def test_system_prompt_prepended_to_prompt(monkeypatch):
-    lines = [_line({"type": "turn.completed", "usage": {}})]
-    calls = _install(monkeypatch, FakeProc(lines))
+async def test_codex_that_cannot_be_started_is_an_sdk_error(monkeypatch):
+    async def missing(*_cmd, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "codex")
 
-    await _collect(system_prompt="SYS")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
 
-    assert calls["cmd"][-1] == "SYS\n\nhi"
+    with pytest.raises(ApiError) as exc_info:
+        await _collect()
+
+    assert exc_info.value.code is ErrorCode.SDK_ERROR
+    assert exc_info.value.message == "codex could not be started (FileNotFoundError)"
+
+
+async def test_nonzero_exit_carries_what_codex_reported(monkeypatch):
+    lines = [_line({"type": "error", "message": "stream disconnected: 503"})]
+    _install(monkeypatch, FakeProc(lines, returncode=1, stderr_lines=[b"internal trace\n"]))
+
+    with pytest.raises(ApiError) as exc_info:
+        await _collect()
+
+    assert exc_info.value.message == "codex exited with code 1: stream disconnected: 503"
+
+
+async def test_provider_messages_are_scrubbed_of_credentials(monkeypatch):
+    failed = {"type": "turn.failed", "error": {"message": "401: bad key sk-proj-abcdef123456"}}
+    _install(monkeypatch, FakeProc([_line(failed)]))
+
+    with pytest.raises(ApiError) as exc_info:
+        await _collect()
+
+    assert "abcdef123456" not in exc_info.value.message
+    assert exc_info.value.message == "401: bad key sk-<redacted>"
+
+
+async def test_stderr_reader_failure_does_not_skip_the_kill(monkeypatch):
+    proc = FakeProc([], hang=True)
+    proc.stderr = _BrokenPipe()
+    _install(monkeypatch, proc)
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await _collect()
+
+    assert proc.killed
 
 
 async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
-    lines = [_line({"type": "turn.completed", "usage": {}})]
-    calls = _install(monkeypatch, FakeProc(lines))
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
-    events = [
-        ev
-        async for ev in run_turn(
-            prompt="hi",
-            cwd=Path("/tmp"),
-            system_prompt=None,
-            resume_session_id=None,
-            mcp_config_path=None,
-            mcp_server_url="https://app.example/mcp",
-            mcp_server_name="codecompanion",
-            turn_token="tok-xyz",
-            timeout_sec=5,
-        )
-    ]
+    events = await _collect(
+        mcp_server_url="https://app.example/mcp",
+        mcp_server_name="domain-tools",
+        turn_token="tok-xyz",
+    )
 
     assert events[-1].__class__ is DoneEvent
-    assert "-c" in calls["cmd"]
-    assert 'mcp_servers.codecompanion.url="https://app.example/mcp"' in calls["cmd"]
+    assert 'mcp_servers.domain-tools.url="https://app.example/mcp"' in calls["cmd"]
     assert (
-        'mcp_servers.codecompanion.bearer_token_env_var="CODECOMPANION_MCP_TOKEN"'
+        'mcp_servers.domain-tools.bearer_token_env_var="SIDECAR_MCP_TURN_TOKEN"'
         in calls["cmd"]
     )
-    assert (
-        'mcp_servers.codecompanion.default_tools_approval_mode="approve"'
-        in calls["cmd"]
-    )
-    assert calls["kwargs"]["env"]["CODECOMPANION_MCP_TOKEN"] == "tok-xyz"
+    assert 'mcp_servers.domain-tools.default_tools_approval_mode="approve"' in calls["cmd"]
+    assert calls["kwargs"]["env"]["SIDECAR_MCP_TURN_TOKEN"] == "tok-xyz"
 
 
-async def test_without_mcp_override_cmd_unchanged_and_no_env_kwarg(monkeypatch):
-    lines = [_line({"type": "turn.completed", "usage": {}})]
-    calls = _install(monkeypatch, FakeProc(lines))
+async def test_mcp_url_is_quoted_as_a_toml_string(monkeypatch):
+    import tomllib
+
+    url = 'https://app.example/mcp?q="x"\\y'
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+
+    await _collect(mcp_server_url=url, mcp_server_name="domain-tools", turn_token="t")
+
+    [override] = [a for a in calls["cmd"] if a.startswith("mcp_servers.domain-tools.url=")]
+    assert tomllib.loads(override)["mcp_servers"]["domain-tools"]["url"] == url
+
+
+async def test_without_mcp_override_no_config_flags_and_no_token_env(monkeypatch):
+    monkeypatch.setenv("SIDECAR_MCP_TURN_TOKEN", "stale-from-parent")
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
     await _collect()
 
-    assert calls["cmd"] == ["codex", "exec", "--json", "--skip-git-repo-check", "hi"]
-    assert "env" not in calls["kwargs"]
+    assert "-c" not in calls["cmd"]
+    assert "SIDECAR_MCP_TURN_TOKEN" not in calls["kwargs"]["env"]
 
 
-async def test_timeout_raises_and_kills_process(monkeypatch):
+async def test_sandbox_is_always_explicit(monkeypatch):
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+
+    await _collect(resume_session_id="sess-1", sandbox="workspace-write")
+
+    cmd = calls["cmd"]
+    # exec-level option: must come before the `resume` subcommand
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert cmd.index("--sandbox") < cmd.index("resume")
+
+
+async def test_child_env_withholds_sidecar_secrets(monkeypatch):
+    for name, value in {
+        "BEARER_SECRET": "sidecar-secret",
+        "OPENAI_API_KEY": "sk-openai",
+        "ANTHROPIC_API_KEY": "sk-ant",
+        "PATH": "/usr/bin",
+        "HTTPS_PROXY": "http://proxy:3128",
+        "LC_ALL": "C.UTF-8",
+        "CODEX_CA_CERTIFICATE": "/etc/ssl/corp.pem",
+        "OPENAI_BASE_URL": "https://gateway.internal/v1",
+        "CUSTOM_PROVIDER_KEY": "k",
+        "UNRELATED": "x",
+    }.items():
+        monkeypatch.setenv(name, value)
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+
+    await _collect(env_passthrough=("CUSTOM_PROVIDER_KEY",))
+
+    env = calls["kwargs"]["env"]
+    for withheld in ("BEARER_SECRET", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "UNRELATED"):
+        assert withheld not in env
+    assert env["PATH"] == "/usr/bin"
+    assert env["HTTPS_PROXY"] == "http://proxy:3128"
+    assert env["LC_ALL"] == "C.UTF-8"
+    assert env["CODEX_CA_CERTIFICATE"] == "/etc/ssl/corp.pem"
+    assert env["OPENAI_BASE_URL"] == "https://gateway.internal/v1"
+    assert env["CUSTOM_PROVIDER_KEY"] == "k"
+
+
+async def test_cancelling_the_turn_terminates_the_process_group(monkeypatch):
+    # The caller (sidecar.turn.Turn) bounds a turn by cancelling the task that
+    # iterates the runner; the runner must then stop codex and its children.
     proc = FakeProc([], hang=True)
     _install(monkeypatch, proc)
 
-    with pytest.raises(ApiError) as exc_info:
-        await _collect(timeout_sec=0.05)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await _collect()
 
-    assert exc_info.value.code is ErrorCode.TIMEOUT
+    # SIGTERM first; then the group is always swept, in case a member ignored it.
+    assert proc.signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+async def test_group_is_killed_when_sigterm_is_ignored(monkeypatch):
+    monkeypatch.setattr(codex_runner, "_TERM_GRACE_SEC", 0.05)
+    proc = FakeProc([], hang=True, ignore_sigterm=True)
+    _install(monkeypatch, proc)
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await _collect()
+
+    assert proc.signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+async def test_closing_the_runner_early_terminates_the_process(monkeypatch):
+    proc = FakeProc([_line({"type": "thread.started", "thread_id": "t-1"})], hang=True)
+    _install(monkeypatch, proc)
+
+    agen = run_turn(
+        prompt="hi", cwd=Path("/tmp"), system_prompt=None, resume_session_id=None,
+        mcp_config_path=None,
+    )
+    assert await anext(agen) == SessionEvent(session_id="t-1")
+    await agen.aclose()
+
+    assert proc.killed
 
 
 class _FakeLoginProc:
@@ -371,3 +630,35 @@ async def test_ensure_codex_auth_false_when_login_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
     assert await ensure_codex_auth(tmp_path / "auth.json") is False
+
+
+async def test_ensure_codex_auth_false_when_codex_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    async def missing(*cmd, **kwargs):
+        raise FileNotFoundError("codex")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
+
+    assert await ensure_codex_auth(tmp_path / "auth.json") is False
+
+
+async def test_group_is_swept_after_codex_exits_on_its_own(monkeypatch):
+    # A shell command or MCP server codex started may outlive it.
+    proc = FakeProc([COMPLETED])
+    _install(monkeypatch, proc)
+
+    await _collect()
+
+    assert proc.signals and set(proc.signals) == {signal.SIGKILL}
+
+
+async def test_finished_turn_does_not_hang_when_wait_is_stuck(monkeypatch):
+    # Python 3.12: a leftover holding a pipe keeps wait() from returning after exit.
+    monkeypatch.setattr(codex_runner, "_EXIT_WAIT_SEC", 0.05)
+    _install(monkeypatch, FakeProc([COMPLETED], wait_stuck=True))
+
+    async with asyncio.timeout(3):
+        events = await _collect()
+
+    assert isinstance(events[-1], DoneEvent)

@@ -1,0 +1,15 @@
+.venv
+.git
+.env
+.env.*
+review.md
+**/__pycache__
+.pytest_cache
+.ruff_cache
+.omc
+.claude
+.idea
+.workspaces
+tests
+examples
+deploy
