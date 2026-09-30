@@ -66,7 +66,8 @@ tests/
 └── integration/         # real uvicorn + claude-agent-sdk + fake stream-json CLI (no quota)
 
 deploy/k8s/              # Kubernetes manifests
-examples/                # Client examples: Python, Go, Kotlin
+.github/                 # CI workflow + Dependabot
+examples/                # Client example (Python)
 scripts/                 # test.sh (lint + pytest), smoke.py (e2e)
 docs/operations.md       # Full operational reference
 openapi.yaml             # Source-of-truth API contract
@@ -210,8 +211,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   (from `@openai/codex`) in its **own process group**, writes the prompt to stdin
   and closes it, then parses the NDJSON event stream. The prompt never appears in
   argv (no ARG_MAX limit, not visible in `ps`) — the system prompt does, as
-  `-c developer_instructions=…` (codex has no file form for it); closing stdin keeps codex from
-  waiting for "additional input". `--skip-git-repo-check` is required because
+  `-c developer_instructions=…` (codex has no file form for it); closing stdin
+  keeps codex from waiting for "additional input". `--skip-git-repo-check` is required because
   session workspaces are plain scratch dirs (not git repos). `--sandbox` is always
   explicit, so a `config.toml` cannot change the sandbox *mode* (its other sandbox
   settings, e.g. `writable_roots`, still apply). A `config.toml` that relied on
@@ -258,8 +259,9 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   auto-compacts it rebuilds the thread from the value passed in — so a change to
   CLAUDE.md or `systemPrompt` reaches new sessions, and resumed ones once codex
   compacts. One too long for a single argv string (> 100 kB) is prepended to the
-  first prompt instead (and then survives compaction only as far as codex keeps
-  that message).
+  first prompt instead and not re-sent on resume, so it survives compaction only as
+  far as codex keeps that message (a prompt that grows past 100 kB mid-session is
+  lost at the next compaction).
 - Events match claude's: MCP tools are named `mcp__<server>__<tool>` (normalized the
   same way), shell commands `shell`; `finalText` is the last agent message (earlier
   ones, e.g. before a tool call, arrive only as `text`). `usage.inputTokens` follows
@@ -400,6 +402,12 @@ Or via the helper script:
 ```bash
 bash scripts/test.sh
 ```
+
+CI (`.github/workflows/ci.yml`) runs ruff, the unit and the integration tests on the
+Python, Node and codex versions it reads from the Dockerfile, and builds + smoke-tests
+the image. Dependabot (`.github/dependabot.yml`) opens weekly PRs for `constraints.txt`
+(claude-agent-sdk separately), the base image and the workflow's actions; the
+Dockerfile's `NODE_MAJOR` / `CODEX_VERSION` ARGs are bumped by hand.
 
 ### Smoke test (real CLI, consumes quota)
 ```bash

@@ -97,13 +97,9 @@ Full reference: [`docs/operations.md`](docs/operations.md).
 
 ## Consumer examples
 
-Minimal clients in three languages under [`examples/`](examples/):
-
-- [`examples/python/client.py`](examples/python/client.py) — httpx + manual SSE
-- [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/src/main/kotlin/Client.kt`](examples/kotlin/src/main/kotlin/Client.kt) — Ktor client + SSE plugin (coroutines); `cd examples/kotlin && gradle run --args='hello'`
-
-Each is ~50 lines; the contract is meant to be trivial to adopt.
+A minimal client: [`examples/python/client.py`](examples/python/client.py) (httpx +
+manual SSE parsing, ~50 lines). Any language with an HTTP client and a line reader
+can do the same — the contract is plain HTTP + SSE (see [`openapi.yaml`](openapi.yaml)).
 
 ## Project layout
 
@@ -120,7 +116,7 @@ sidecar/                  # the application
 └── …
 tests/                    # unit tests
 docs/operations.md        # operations reference
-examples/                 # consumer clients (Python / Go / Kotlin)
+examples/                 # consumer client (Python)
 deploy/k8s/               # Pod manifests
 openapi.yaml              # the contract — source of truth
 ```
@@ -243,13 +239,9 @@ SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` 
 
 ## 컨슈머 예제
 
-세 언어로 된 최소 클라이언트가 [`examples/`](examples/) 아래에 있습니다:
-
-- [`examples/python/client.py`](examples/python/client.py) — httpx + 수동 SSE
-- [`examples/go/client.go`](examples/go/client.go) — net/http + bufio
-- [`examples/kotlin/src/main/kotlin/Client.kt`](examples/kotlin/src/main/kotlin/Client.kt) — Ktor 클라이언트 + SSE 플러그인 (코루틴); `cd examples/kotlin && gradle run --args='안녕'`
-
-각 50줄 내외. 계약 자체가 단순해서 도입 비용이 낮습니다.
+최소 클라이언트: [`examples/python/client.py`](examples/python/client.py) (httpx + 수동 SSE
+파싱, 50줄 내외). 계약이 평범한 HTTP + SSE라서([`openapi.yaml`](openapi.yaml)) HTTP
+클라이언트와 줄 단위 읽기만 있으면 어떤 언어로도 같은 방식으로 붙일 수 있습니다.
 
 ## 프로젝트 구조
 
@@ -266,7 +258,7 @@ sidecar/                  # 애플리케이션
 └── …
 tests/                    # unit 테스트
 docs/operations.md        # 운영 가이드
-examples/                 # 컨슈머 클라이언트 (Python / Go / Kotlin)
+examples/                 # 컨슈머 클라이언트 (Python)
 deploy/k8s/               # Pod manifests
 openapi.yaml              # 계약 — source of truth
 ```

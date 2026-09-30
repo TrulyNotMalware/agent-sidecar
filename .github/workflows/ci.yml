@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # Python, Node and codex come from the Dockerfile, so CI tests what the image ships
+      # (and a Dependabot base-image bump is tested on the new Python).
+      - name: Versions from the Dockerfile
+        id: versions
+        run: |
+          echo "python=$(sed -n 's/^FROM python:\([0-9.]*\)-.*/\1/p' Dockerfile)" >> "$GITHUB_OUTPUT"
+          echo "node=$(sed -n 's/^ARG NODE_MAJOR=//p' Dockerfile)" >> "$GITHUB_OUTPUT"
+          echo "codex=$(sed -n 's/^ARG CODEX_VERSION=//p' Dockerfile)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.versions.outputs.python }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints.txt
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ steps.versions.outputs.node }}
+
+      # tests/integration/test_real_cli.py runs the real codex (skipped when absent)
+      # against a fake model API; the claude CLI comes bundled with claude-agent-sdk.
+      - name: Install codex
+        run: npm install -g "@openai/codex@${{ steps.versions.outputs.codex }}"
+
+      - name: Install
+        run: pip install -c constraints.txt -e '.[dev]'
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest tests/ -m "not integration" -q
+
+      # Real uvicorn + real SDK with fake CLIs, and the real CLIs against fake model
+      # APIs. No credentials, no network beyond 127.0.0.1.
+      - name: Integration tests
+        run: pytest tests/ -m integration -q
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: docker build -t claude-sidecar:ci .
+
+      - name: Smoke test
+        run: |
+          docker run --rm claude-sidecar:ci codex --version
+          docker run -d --name sidecar -e BEARER_SECRET=ci -p 127.0.0.1:7300:7300 claude-sidecar:ci
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:7300/healthz && exit 0
+            sleep 1
+          done
+          docker logs sidecar
+          exit 1

@@ -17,8 +17,6 @@ env/
 # Build artifacts
 dist/
 build/
-.gradle/
-.kotlin/
 .workspaces/
 *.egg-info/
 .eggs/
