@@ -33,6 +33,10 @@ def test_registered_values_are_replaced_longest_first(monkeypatch):
         ("legacy sk-" + "a" * 48, f"legacy sk-{R}"),
         ("auth: Bearer eyJhbGciOi.x.y", f"auth: Bearer {R}"),
         ("Authorization: Basic dXNlcjpwYXNzd29yZA==", f"Authorization: Basic {R}"),
+        ("Authorization: Basic dXNlcjpwYXNz", f"Authorization: Basic {R}"),  # user:pass
+        ("Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef", f"Bearer {R}"),  # letters only, long
+        ('"x\\nsk-ant-api03-AbCdEf123"', f'"x\\nsk-{R}"'),
+        ("q=a%3Dsk-proj-abcdef123", f"q=a%3Dsk-{R}"),
         ("x-api-key: gw-token-0123456789", f"x-api-key: {R}"),
         ("GET /v1?api_key=abcdef123456&x=1", f"GET /v1?api_key={R}&x=1"),
         ("hdr eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.sig", f"hdr {R}"),
@@ -50,6 +54,10 @@ def test_credential_shaped_strings_are_replaced(text, scrubbed):
         "sessionKey 'tenant:sk-dashboard' has an in-flight turn",
         "task-management-dashboard uses sk-learn",
         "The token count exceeded max_tokens=4096",
+        "desk-admin-panel and mcp__domain-tools__task-admin-list",
+        "the basic pay-as-you-go plan, basic rate-limit",
+        "token: expired-or-invalid; secret: my-app-secret-name",
+        "Basic Authentication required",
     ],
 )
 def test_ordinary_text_is_left_alone(text):
@@ -90,6 +98,23 @@ def test_every_logged_value_is_scrubbed_nested_too(monkeypatch):
     assert out["count"] == 3
 
 
+def test_plain_logging_is_scrubbed_after_formatting(caplog):
+    with caplog.at_level(logging.INFO):
+        log = logging.getLogger("some.lib")
+        log.info("Authorization: Bearer %s", "abc123def456ghi789")  # split across format/arg
+        log.info("connecting to https://%s:%s@%s", "user", "pw123456", "host")
+        log.error(RuntimeError("boom sk-ant-api03-AbCdEf123"))  # not a str message
+        logging.getLogger("uvicorn.access").info(
+            '%s - "%s %s HTTP/%s" %d', "1.2.3.4", "GET", "/x?api_key=abc123456789", "1.1", 200
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages[0] == f"Authorization: Bearer {R}"
+    assert messages[1] == f"connecting to https://{R}@host"
+    assert messages[2] == f"boom sk-{R}"
+    assert caplog.records[3].args[2] == f"/x?api_key={R}"  # its formatter unpacks args
+
+
 def test_plain_logging_is_scrubbed_too(caplog):
     # uvicorn and the Agent SDK log through `logging`, not structlog. (The app's
     # logging is configured when tests/conftest.py imports sidecar.app.)
@@ -106,9 +131,12 @@ def test_plain_logging_is_scrubbed_too(caplog):
 
 
 def test_sdk_reader_errors_quoting_cli_output_are_dropped(caplog):
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         logging.getLogger("claude_agent_sdk._internal.query").error(
             'Fatal error in message reader: Failed to decode JSON: {"text":"private words'
+        )
+        logging.getLogger("claude_agent_sdk._internal.query").debug(
+            "Skipping non-JSON line from CLI stdout: private words"
         )
         logging.getLogger("claude_agent_sdk._internal.query").warning("other SDK warning")
 

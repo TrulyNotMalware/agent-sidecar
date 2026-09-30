@@ -22,17 +22,32 @@ _PATTERNS = (
     # Credentials in a URL: https://user:pass@gateway
     (re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]+@"), REDACTED + "@"),
     # Anthropic / OpenAI keys (sk-ant-…, sk-proj-…, and the masked "sk-proj-****abcd"
-    # providers echo back). A bare "sk-" only when key-length, so "sk-learn" or a
-    # sessionKey like "tenant:sk-dashboard" survive.
-    (
-        re.compile(r"sk-(?:ant|proj|svcacct|admin)-[\w\-*]{4,}|(?<![A-Za-z0-9])sk-[\w\-]{20,}"),
-        "sk-" + REDACTED,
-    ),
-    # Authorization schemes. The token must contain a digit or punctuation, so prose
-    # like "missing bearer authentication" is left alone.
+    # providers echo back), not inside a word ("desk-admin-panel") but after a JSON
+    # escape ("\\nsk-…") or a URL-encoded "=". A bare "sk-" only when key-length, so
+    # "sk-learn" or a sessionKey like "tenant:sk-dashboard" survive.
     (
         re.compile(
-            r"(?i)\b(bearer|basic)([\s:]+[\"']?)(?=[\w.~+/=\-]*[0-9.~+/=\-])[\w.~+/=\-]{8,}"
+            r"(?:(?<![A-Za-z0-9])|(?<=\\[nrtbf])|(?<=%3[Dd]))sk-(?:ant|proj|svcacct|admin)-[\w\-*]{4,}"
+            r"|(?<![A-Za-z0-9])sk-[\w\-]{20,}"
+        ),
+        "sk-" + REDACTED,
+    ),
+    # Bearer tokens contain a digit or punctuation, or are long ("missing bearer
+    # authentication" is prose); Basic credentials are base64.
+    (
+        re.compile(
+            r"(?i)\b(bearer)([\s:]+[\"']?)"
+            r"(?:(?=[\w.~+/=\-]*[0-9.~+/=\-])[\w.~+/=\-]{8,}|[A-Za-z]{20,})"
+        ),
+        r"\1\2" + REDACTED,
+    ),
+    (
+        re.compile(
+            r"(?i)\b(basic)(\s+[\"']?)"
+            r"(?:(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2}"
+            # letters-only base64: an upper-case letter after a lower-case one
+            # ("dXNlcjpwYXNz"), unlike a capitalized word ("Authentication")
+            r"|(?-i:(?=[A-Za-z]*[a-z][A-Za-z]*[A-Z])[A-Za-z]{12,}))"
         ),
         r"\1\2" + REDACTED,
     ),
@@ -42,7 +57,7 @@ _PATTERNS = (
     (
         re.compile(
             r"(?i)\b(x-api-key|api[_-]?key|access[_-]?token|turn[_-]?token|token|secret|password)"
-            r"(\"?\s*[:=]\s*\"?)[^\s\"'&,;]{8,}"
+            r"(\"?\s*[:=]\s*\"?)(?=[^\s\"'&,;]*\d)[^\s\"'&,;]{8,}"  # values have a digit
         ),
         r"\1\2" + REDACTED,
     ),

@@ -54,19 +54,30 @@ def _install_stdlib_scrubbing() -> None:
     """Scrub records from plain `logging` too: uvicorn, the Agent SDK, anything else.
 
     Done where records are created, so it holds whatever handlers uvicorn installs
-    later. Arguments are scrubbed one by one (uvicorn's access formatter unpacks
-    them), and a traceback is formatted and scrubbed up front.
+    later. The message is formatted first and then scrubbed, so a secret split
+    between the format string and an argument is caught too; uvicorn's access log
+    keeps its arguments (its formatter unpacks them), scrubbed one by one. A
+    traceback is formatted and scrubbed up front.
     """
     make_record = logging.getLogRecordFactory()
 
-    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
-        record = make_record(*args, **kwargs)
-        if isinstance(record.msg, str):
-            record.msg = scrub_secrets(record.msg)
+    def scrub_args(record: logging.LogRecord) -> None:
         if isinstance(record.args, tuple):
             record.args = tuple(_scrub_arg(a) for a in record.args)
         elif isinstance(record.args, dict):
             record.args = {k: _scrub_arg(v) for k, v in record.args.items()}
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = make_record(*args, **kwargs)
+        if record.name == "uvicorn.access":
+            scrub_args(record)
+        else:
+            try:
+                message = record.getMessage()
+            except Exception:  # noqa: BLE001 — a bad format string; logging reports it
+                scrub_args(record)
+            else:
+                record.msg, record.args = scrub_secrets(message), ()
         if record.exc_info and not record.exc_text:
             record.exc_text = scrub_secrets(logging.Formatter().formatException(record.exc_info))
         return record
@@ -74,12 +85,19 @@ def _install_stdlib_scrubbing() -> None:
     logging.setLogRecordFactory(factory)
 
 
-class _DropSdkReaderErrors(logging.Filter):
-    """The Agent SDK logs a failed CLI read quoting the CLI's output line — conversation
-    text, past LOG_PROMPTS. The turn reports that failure itself (turn.closed)."""
+class _DropSdkLinesQuotingCliOutput(logging.Filter):
+    """The Agent SDK quotes the CLI's output — conversation text, past LOG_PROMPTS —
+    when a read fails (the turn reports that failure itself, on turn.closed) and, at
+    DEBUG, for lines it skips."""
+
+    _PREFIXES = (
+        "Fatal error in message reader",
+        "Skipping non-JSON line from CLI stdout",
+        "Dropping truncated JSON",
+    )
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return not record.getMessage().startswith("Fatal error in message reader")
+        return not record.getMessage().startswith(self._PREFIXES)
 
 
 _configured = False
@@ -93,7 +111,9 @@ def configure_logging(*, level: str = "INFO", redact: bool = True) -> None:
     logging.basicConfig(format="%(message)s", level=level)
     _install_stdlib_scrubbing()
     if redact:
-        logging.getLogger("claude_agent_sdk._internal.query").addFilter(_DropSdkReaderErrors())
+        for name in ("claude_agent_sdk._internal.query",
+                     "claude_agent_sdk._internal.transport.subprocess_cli"):
+            logging.getLogger(name).addFilter(_DropSdkLinesQuotingCliOutput())
 
     processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
