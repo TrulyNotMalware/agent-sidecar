@@ -1,10 +1,17 @@
 import contextlib
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .errors import ApiError, ErrorCode
+from .events import (
+    DoneEvent,
+    RunnerEvent,
+    SessionEvent,
+    TextEvent,
+    ToolResultEvent,
+    ToolUseEvent,
+)
 from .mcp import (
     build_mcp_servers,
     mcp_tool_prefix,
@@ -17,42 +24,6 @@ from .mcp import (
 # agent's tools cannot read them from its environment. Callers can add more names
 # (e.g. CODEX_ENV_PASSTHROUGH values) via `withheld_env`.
 _WITHHELD_FROM_CLI = ("BEARER_SECRET", "OPENAI_API_KEY")
-
-
-@dataclass(frozen=True)
-class SessionEvent:
-    session_id: str
-
-
-@dataclass(frozen=True)
-class TextEvent:
-    delta: str
-
-
-@dataclass(frozen=True)
-class ToolUseEvent:
-    name: str
-    args: dict[str, Any]
-    tool_use_id: str | None
-
-
-@dataclass(frozen=True)
-class ToolResultEvent:
-    name: str
-    ok: bool
-    tool_use_id: str | None
-
-
-@dataclass(frozen=True)
-class DoneEvent:
-    final_text: str
-    input_tokens: int
-    output_tokens: int
-    cache_read_input_tokens: int | None
-    cache_creation_input_tokens: int | None
-
-
-RunnerEvent = SessionEvent | TextEvent | ToolUseEvent | ToolResultEvent | DoneEvent
 
 
 async def run_turn(

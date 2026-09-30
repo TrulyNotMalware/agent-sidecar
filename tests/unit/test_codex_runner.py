@@ -6,15 +6,15 @@ from pathlib import Path
 import pytest
 
 from sidecar import codex_runner
-from sidecar.claude_runner import (
+from sidecar.codex_runner import ensure_codex_auth, run_turn
+from sidecar.errors import ApiError, ErrorCode
+from sidecar.events import (
     DoneEvent,
     SessionEvent,
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
 )
-from sidecar.codex_runner import ensure_codex_auth, run_turn
-from sidecar.errors import ApiError, ErrorCode
 
 BASE_CMD = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]
 

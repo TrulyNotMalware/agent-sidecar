@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import functools
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,18 +13,19 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
+from ..admission import Admission
 from ..auth import require_bearer
-from ..claude_runner import (
+from ..config import Settings, get_settings
+from ..errors import ApiError, ErrorCode
+from ..events import (
     DoneEvent,
+    Runner,
     RunnerEvent,
     SessionEvent,
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
 )
-from ..config import Settings, get_settings
-from ..errors import ApiError, ErrorCode
-from ..inflight import InflightRegistry
 from ..models import ConverseRequest
 from ..observability.logging import get_logger
 from ..observability.metrics import REQUEST_DURATION, REQUESTS
@@ -51,8 +52,7 @@ async def converse(
     x_turn_token: Annotated[str | None, Header(alias="X-Turn-Token", max_length=4096)] = None,
 ) -> EventSourceResponse | JSONResponse:
     settings = get_settings()
-    gate = request.app.state.gate
-    registry: InflightRegistry = request.app.state.inflight
+    admission: Admission = request.app.state.admission
 
     log.info(
         "converse.start",
@@ -64,21 +64,9 @@ async def converse(
         prompt=body.prompt,
     )
 
-    # Preflight: reject over-limit requests with a real HTTP 429 while the
-    # status line can still carry it. The turn re-checks atomically when it
-    # reserves; a limit hit only in that race window still arrives as a
-    # terminal SSE `error` frame with code=busy.
-    rejected = _preflight_resume(body, settings) or await _preflight_busy(
-        body, x_user_id, gate, registry
-    )
+    rejected = _preflight_resume(body, settings)
     if rejected is not None:
-        log.warning("converse.reject", code=rejected.code.value, message=rejected.message)
-        REQUESTS.labels(outcome=rejected.code.value).inc()
-        REQUEST_DURATION.labels(outcome=rejected.code.value).observe(0.0)
-        return JSONResponse(
-            status_code=rejected.status_code,
-            content={"code": rejected.code.value, "message": rejected.message},
-        )
+        return _reject(rejected)
 
     span_attributes: dict[str, str | bool] = {
         "session.key": body.session_key,
@@ -90,15 +78,13 @@ async def converse(
     turn = Turn(
         session_key=body.session_key,
         user_id=x_user_id,
-        gate_session_key=body.session_key if body.mode == "session" else None,
-        gate=gate,
-        registry=registry,
+        admission=admission,
         timeout_sec=settings.turn_timeout_sec,
         span_attributes=span_attributes,
     )
     run_turn = _get_runner(settings)
 
-    def open_runner(cwd: Path) -> AsyncIterator[RunnerEvent]:
+    def open_runner(cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
         events = run_turn(
             prompt=body.prompt,
             cwd=cwd,
@@ -134,8 +120,8 @@ async def converse(
     # On SIGTERM sse-starlette sets `shutdown` and keeps the stream alive for the
     # grace period; the stream uses it to let the turn finish or end it cleanly.
     shutdown = anyio.Event()
-    return EventSourceResponse(
-        _event_stream(turn, open_runner, workspace, shutdown, settings, body.session_key, state),
+    response = EventSourceResponse(
+        _event_stream(turn, shutdown, settings, body.session_key, state),
         ping=15,
         # A client that stops reading must not hold the connection forever.
         send_timeout=_SEND_TIMEOUT_SEC,
@@ -143,6 +129,14 @@ async def converse(
         shutdown_grace_period=settings.shutdown_grace_sec,
         client_close_handler_callable=on_client_close,
     )
+    # Last step before returning: reserving before the stream opens makes every limit a
+    # real HTTP 429, and nothing can fail between the reservation and the response
+    # (whose stream or close handler then always stops the turn).
+    try:
+        turn.start(open_runner, workspace)
+    except ApiError as exc:
+        return _reject(exc)
+    return response
 
 
 def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | None:
@@ -158,8 +152,8 @@ def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | N
 
 
 async def _remembering_session_ids(
-    events: AsyncIterator[RunnerEvent], session_key: str, root: Path
-) -> AsyncIterator[RunnerEvent]:
+    events: AsyncGenerator[RunnerEvent, None], session_key: str, root: Path
+) -> AsyncGenerator[RunnerEvent, None]:
     async with contextlib.aclosing(events) as runner:
         async for ev in runner:
             if isinstance(ev, SessionEvent):
@@ -171,30 +165,18 @@ async def _remembering_session_ids(
             yield ev
 
 
-async def _preflight_busy(
-    body: ConverseRequest,
-    x_user_id: str | None,
-    gate,
-    registry: InflightRegistry,
-) -> ApiError | None:
-    if await registry.get(body.session_key) is not None:
-        return ApiError(
-            ErrorCode.BUSY, f"sessionKey {body.session_key!r} already in-flight"
-        )
-    try:
-        await gate.check(
-            user_id=x_user_id,
-            session_key=body.session_key if body.mode == "session" else None,
-        )
-    except ApiError as exc:
-        return exc
-    return None
+def _reject(error: ApiError) -> JSONResponse:
+    """A pre-stream error: its real HTTP status and the {code, message} body."""
+    log.warning("converse.reject", code=error.code.value, message=error.message)
+    REQUESTS.labels(outcome=error.code.value).inc()
+    return JSONResponse(
+        status_code=error.status_code,
+        content={"code": error.code.value, "message": error.message},
+    )
 
 
 async def _event_stream(
     turn: Turn,
-    open_runner,
-    workspace,
     shutdown: anyio.Event,
     settings: Settings,
     session_key: str,
@@ -212,7 +194,6 @@ async def _event_stream(
     shutdown_wait = asyncio.ensure_future(shutdown.wait())
     get: asyncio.Future | None = None
     outcome: str | None = None  # "ok" or the error code of the terminal frame sent
-    turn.start(open_runner, workspace)
     # After `done` the stream stays open, sending nothing, until TurnEnded: the CLI has
     # exited and the sessionKey / user slot are free again. End of stream therefore
     # means "a new turn on this sessionKey will be accepted" (no 429 window).
@@ -314,7 +295,7 @@ def _merge_system_prompt(
     return base or None
 
 
-def _get_runner(settings: Settings):
+def _get_runner(settings: Settings) -> Runner:
     if settings.provider == "codex":
         from ..codex_runner import run_turn
 
@@ -338,7 +319,7 @@ def _get_runner(settings: Settings):
     )
 
 
-def _to_sse(ev) -> dict[str, str]:
+def _to_sse(ev: RunnerEvent) -> dict[str, str]:
     if isinstance(ev, SessionEvent):
         return sse_event("session", {"sessionId": ev.session_id})
     if isinstance(ev, TextEvent):

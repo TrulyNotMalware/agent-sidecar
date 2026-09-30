@@ -2,10 +2,11 @@ import asyncio
 from contextlib import nullcontext
 from pathlib import Path
 
-from sidecar.claude_runner import DoneEvent, SessionEvent
-from sidecar.concurrency import ConcurrencyGate
+import pytest
+
+from sidecar.admission import Admission
 from sidecar.errors import ApiError, ErrorCode
-from sidecar.inflight import InflightHandle, InflightRegistry
+from sidecar.events import DoneEvent, SessionEvent
 from sidecar.turn import Turn, TurnEnded, TurnStopped
 
 DONE = DoneEvent(
@@ -21,9 +22,7 @@ def _turn(**overrides) -> Turn:
     kwargs = {
         "session_key": "k",
         "user_id": "u",
-        "gate_session_key": "k",
-        "gate": ConcurrencyGate(4),
-        "registry": InflightRegistry(),
+        "admission": Admission(4),
         "timeout_sec": 5,
     }
     kwargs.update(overrides)
@@ -65,21 +64,20 @@ async def test_events_are_followed_by_exactly_one_turn_ended():
         yield SessionEvent(session_id="s")
         yield DONE
 
-    gate, registry = ConcurrencyGate(4), InflightRegistry()
-    turn = _turn(gate=gate, registry=registry)
+    admission = Admission(4)
+    turn = _turn(admission=admission)
     turn.start(runner, _workspace)
 
     items = await _until_ended(turn)
 
     assert items == [SessionEvent(session_id="s"), DONE, TurnEnded(None, None)]
-    assert registry.active_count == 0
-    assert gate.inflight == 0
+    assert admission.inflight == 0
 
 
 async def test_stop_is_signalled_at_once_but_released_only_after_cleanup():
     slow = SlowToClose()
-    gate, registry = ConcurrencyGate(4), InflightRegistry()
-    turn = _turn(gate=gate, registry=registry)
+    admission = Admission(4)
+    turn = _turn(admission=admission)
     turn.start(slow.run, _workspace)
     assert await _next(turn) == SessionEvent(session_id="s")
 
@@ -87,8 +85,8 @@ async def test_stop_is_signalled_at_once_but_released_only_after_cleanup():
 
     # The marker is there immediately; the reservation is still held during cleanup.
     assert turn.events.get_nowait() == TurnStopped("cancelled")
-    assert await registry.get("k") is not None
-    assert gate.inflight == 1
+    assert admission.get("k") is turn
+    assert admission.inflight == 1
 
     turn.stop("timeout")  # a second stop must not interrupt the cleanup
     ended = await _next(turn)
@@ -96,8 +94,7 @@ async def test_stop_is_signalled_at_once_but_released_only_after_cleanup():
     assert isinstance(ended, TurnEnded)
     assert ended.stop_reason == "cancelled"
     assert slow.cleanup_finished
-    assert registry.active_count == 0
-    assert gate.inflight == 0
+    assert admission.inflight == 0
 
 
 async def test_timeout_stops_the_turn_even_if_nobody_reads_the_queue():
@@ -113,24 +110,21 @@ async def test_timeout_stops_the_turn_even_if_nobody_reads_the_queue():
     assert slow.cleanup_finished
 
 
-async def test_cancel_event_stops_the_turn():
-    slow = SlowToClose()
-    turn = _turn()
-    turn.start(slow.run, _workspace)
-    await _next(turn)
+async def test_start_reserves_before_the_task_runs():
+    admission = Admission(4)
+    turn = _turn(admission=admission)
 
-    turn.cancel_event.set()
+    turn.start(SlowToClose().run, _workspace)
 
-    assert await _next(turn) == TurnStopped("cancelled")
+    # Synchronously, in the same loop tick: the route relies on this to answer 429.
+    assert admission.get("k") is turn
+    turn.stop("disconnected")
     await _until_ended(turn)
 
 
-async def test_busy_session_key_ends_the_turn_without_opening_the_runner():
-    registry = InflightRegistry()
-    holder = asyncio.create_task(asyncio.Event().wait())
-    await registry.register(
-        InflightHandle(session_key="k", user_id=None, cancel_event=asyncio.Event(), task=holder)
-    )
+async def test_busy_start_raises_without_opening_the_runner():
+    admission = Admission(4)
+    admission.reserve(_turn(admission=admission))  # another turn on the same key
     opened = False
 
     def runner(_cwd):
@@ -138,14 +132,15 @@ async def test_busy_session_key_ends_the_turn_without_opening_the_runner():
         opened = True
         raise AssertionError("must not be opened")
 
-    turn = _turn(registry=registry)
-    turn.start(runner, _workspace)
-    [ended] = await _until_ended(turn)
+    turn = _turn(admission=admission)
+    with pytest.raises(ApiError) as exc:
+        turn.start(runner, _workspace)
 
-    assert isinstance(ended.error, ApiError)
-    assert ended.error.code is ErrorCode.BUSY
+    assert exc.value.code is ErrorCode.BUSY
+    assert turn.task is None
+    await asyncio.sleep(0)  # a task created anyway would have run by now
     assert not opened
-    holder.cancel()
+    assert turn.events.empty()
 
 
 async def test_runner_failure_is_carried_by_turn_ended():
@@ -163,12 +158,14 @@ async def test_runner_failure_is_carried_by_turn_ended():
 
 
 async def test_stop_before_the_task_runs_still_ends_the_turn():
-    registry = InflightRegistry()
-    turn = _turn(registry=registry)
+    admission = Admission(4)
+    turn = _turn(admission=admission)
     turn.start(SlowToClose().run, _workspace)
 
     turn.stop("disconnected")  # same loop tick: _main has not started yet
 
     assert await _next(turn) == TurnStopped("disconnected")
     assert await _next(turn) == TurnEnded(stop_reason="disconnected", error=None)
-    assert registry.active_count == 0
+    assert admission.inflight == 0
+    await asyncio.wait({turn.task})
+    assert turn.events.empty()  # _main never ran, so nothing follows TurnEnded

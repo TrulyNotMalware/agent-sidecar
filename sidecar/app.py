@@ -6,11 +6,10 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .admission import Admission
 from .codex_runner import ensure_codex_auth
-from .concurrency import ConcurrencyGate
 from .config import get_settings
 from .errors import ApiError, ErrorCode
-from .inflight import InflightRegistry
 from .observability.logging import configure_logging, get_logger
 from .routes import cancel, converse, health, metrics
 
@@ -40,12 +39,11 @@ def create_app() -> FastAPI:
         if settings.provider == "codex":
             authed = await ensure_codex_auth(settings.codex_auth_path)
             log.info("codex.auth", materialized=authed)
-        app.state.gate = ConcurrencyGate(settings.max_concurrent)
-        app.state.inflight = InflightRegistry()
+        app.state.admission = Admission(settings.max_concurrent)
         try:
             yield
         finally:
-            forced = await app.state.inflight.drain(grace_sec=TURN_CLEANUP_BUDGET_SEC)
+            forced = await app.state.admission.drain(grace_sec=TURN_CLEANUP_BUDGET_SEC)
             log.info("shutdown.drained", forced_cancellations=forced)
 
     app = FastAPI(title="Claude Sidecar", version="1.0.0", lifespan=lifespan)

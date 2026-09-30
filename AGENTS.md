@@ -19,10 +19,10 @@ and session continuity via simple HTTP, with no SDK integration required.
 │  ┌─────────────────────────────────────────────┐   │
 │  │          claude-sidecar (this repo)         │   │
 │  │                                             │   │
-│  │  FastAPI ──► SSE stream (EventSource)       │   │
+│  │  FastAPI ──► Admission (limits, registry)   │   │
+│  │          └─► SSE stream (EventSource)       │   │
 │  │               │ reads Turn.events           │   │
 │  │           Turn task (sidecar/turn.py)       │   │
-│  │           ──► InflightRegistry + Gate       │   │
 │  │           ──► claude_runner / codex_runner  │   │
 │  └─────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────┘
@@ -42,10 +42,10 @@ sidecar/                 # Application package
 ├── auth.py              # Bearer token dependency
 ├── claude_runner.py     # Claude Agent SDK adapter
 ├── codex_runner.py      # OpenAI Codex CLI adapter
-├── concurrency.py       # Global / user / session gates
+├── admission.py         # Limits (global / user / sessionKey), registry, drain
 ├── config.py            # Pydantic Settings (env-based)
 ├── errors.py            # ErrorCode enum + ApiError
-├── inflight.py          # Cancel registry + drain
+├── events.py            # Runner events + Runner protocol (provider contract)
 ├── turn.py              # One turn in its own task: reservation, runner, stop/timeout
 ├── models.py            # ConverseRequest + response models
 ├── session.py           # Workspace path logic
@@ -105,7 +105,7 @@ event: error        {"code": "...", "message": "..."}   ← terminal, replaces d
 ```
 Exactly one `session` first, then zero or more `text` / `tool_use` / `tool_result`,
 then exactly one terminal `done` **or** `error` — unless the turn fails before the CLI
-reports its session (busy race, CLI failing to start): then the stream is a lone `error`.
+reports its session (e.g. the CLI failing to start): then the stream is a lone `error`.
 Field shapes are the source-of-truth contract in `openapi.yaml`.
 
 ### `POST /v1/sessions/{session_key}/cancel`
@@ -167,7 +167,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 
 ## Concurrency & Session Model
 
-- **One in-flight turn per `session_key`** — second request gets `429 busy`.
+- **One in-flight turn per `session_key`**, in both modes (`/cancel` addresses a turn by
+  its `sessionKey`) — second request gets `429 busy`.
 - **One in-flight turn per `user_id` (`X-User-Id` header)** — same constraint.
 - **Global cap** — `MAX_CONCURRENT` total; excess gets `429 busy`.
 - Session workspaces are SHA-256–keyed directories under `WORKSPACE_ROOT` (`root/XX/YYYY...`).
@@ -194,9 +195,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 - A per-turn MCP entry carrying `X-Turn-Token` is written to a `0600` file in a
   fresh `0700` temp dir (outside the workspace) and passed to the SDK as a path —
   the SDK would otherwise inline the JSON, bearer included, on the CLI's argv.
-  The file is removed when the runner finishes (on a client disconnect that is
-  currently deferred until the runner generator is finalized — see the lifecycle
-  xfails in `tests/integration/test_lifecycle.py`).
+  The file is removed when the runner finishes, which includes a stopped turn
+  (timeout, cancel, client disconnect).
 - `BEARER_SECRET` and `OPENAI_API_KEY` are blanked in the CLI's environment (the
   SDK can only add or override variables, not remove them).
 
@@ -299,10 +299,8 @@ SSE stream has opened the response is already HTTP 200, so `timeout`, `sdk_error
 `internal`, and `cancelled` surface **only** as a terminal `event: error` frame —
 their HTTP code is never put on the wire for the converse response.
 
-`busy` is normally rejected pre-stream (a real HTTP 429 with a JSON body) via a
-preflight check in the converse route. A limit hit only in the narrow race
-window between preflight and in-stream registration still arrives as a terminal
-SSE `error` frame with `code=busy` on an HTTP 200 stream.
+`busy` is always a real HTTP 429: the route reserves every limit (`Admission`, one
+synchronous step) before the stream opens.
 
 Every stream ends with exactly one terminal frame: after `done`, anything the
 runner reports while the CLI shuts down is logged, never sent. Timeout, cancel and
@@ -390,23 +388,15 @@ Key manifests:
 
 ## Key Module Contracts
 
-### `sidecar/concurrency.py — ConcurrencyGate`
+### `sidecar/admission.py — Admission`
 ```python
-async with gate.acquire(user_id, session_key):
-    ...  # raises ApiError(BUSY) if any limit exceeded
-
-await gate.check(user_id=..., session_key=...)  # same BUSY checks, reserves nothing
+admission.reserve(turn)       # sessionKey + X-User-Id + global cap, all or nothing; raises ApiError(BUSY)
+admission.release(turn)       # no-op unless `turn` holds the reservation
+admission.get(session_key)    # → Turn | None (the cancel route)
+await admission.drain(grace_sec)  # stop all turns, wait for cleanup; returns force-cancelled count
 ```
 
-### `sidecar/inflight.py — InflightRegistry`
-```python
-handle = InflightHandle(session_key, user_id, cancel_event, task)
-await registry.register(handle)    # raises BUSY on duplicate
-await registry.unregister(session_key, handle)  # stale handles are no-ops
-await registry.drain(grace_sec)    # stop all turns, wait for cleanup; returns force-cancelled count
-```
-
-### `sidecar/claude_runner.py — run_turn()`
+### `sidecar/claude_runner.py` / `codex_runner.py` — `run_turn()`
 ```python
 async for event in run_turn(
     prompt=..., cwd=..., system_prompt=...,
@@ -414,18 +404,18 @@ async for event in run_turn(
 ):
     # event: SessionEvent | TextEvent | ToolUseEvent | ToolResultEvent | DoneEvent
 ```
+The events and the `Runner` protocol (the common keyword arguments) live in
+`sidecar/events.py`.
 Runners have no timeout of their own; the caller bounds the turn by cancelling the
 task that iterates the generator **once**, and each runner closes its CLI on the way
 out (`contextlib.aclosing` at every level).
 
 ### `sidecar/turn.py — Turn`
 ```python
-turn = Turn(session_key=..., user_id=..., gate_session_key=..., gate=..., registry=...,
-            timeout_sec=...)
-turn.start(open_runner, workspace)   # own asyncio task: register → acquire → workspace → runner
+turn = Turn(session_key=..., user_id=..., admission=..., timeout_sec=...)
+turn.start(open_runner, workspace)   # reserves (BUSY raises here), then own task: workspace → runner
 item = await turn.events.get()       # RunnerEvent* … then TurnStopped? … then exactly one TurnEnded
 turn.stop("cancelled")               # first call wins; queues TurnStopped, cancels the task once
-turn.cancel_event.set()              # same, from the cancel route / drain()
 ```
 `claude-agent-sdk` is lazy-imported — tests without the SDK installed remain importable.
 
@@ -441,8 +431,9 @@ with stateless_workspace(parent=settings.workspace_root / ".stateless") as ws:
 
 ## Adding a New Provider
 
-1. Create `sidecar/<name>_runner.py` implementing async `run_turn()` with the same common
-   keyword arguments and yielding the same event union types as `claude_runner.py`.
+1. Create `sidecar/<name>_runner.py` implementing async `run_turn()` that satisfies the
+   `Runner` protocol in `sidecar/events.py` (the common keyword arguments) and yields its
+   `RunnerEvent` types.
    Do not add a timeout: the turn cancels the task iterating the generator once, and the
    runner must close its CLI on the way out (`contextlib.aclosing` around every inner
    generator). Provider-specific options are bound in `_get_runner()` with

@@ -2,9 +2,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Request, status
 
+from ..admission import Admission
 from ..auth import require_bearer
 from ..errors import ApiError, ErrorCode
-from ..inflight import InflightRegistry
 from ..observability.logging import get_logger
 
 router = APIRouter()
@@ -20,13 +20,13 @@ log = get_logger("sidecar.cancel")
 async def cancel(
     session_key: Annotated[str, Path(min_length=1, max_length=256)], request: Request
 ) -> dict[str, str]:
-    registry: InflightRegistry = request.app.state.inflight
-    handle = await registry.get(session_key)
-    if handle is None:
+    admission: Admission = request.app.state.admission
+    turn = admission.get(session_key)
+    if turn is None:
         raise ApiError(ErrorCode.NOT_FOUND, "no active turn for sessionKey")
 
-    # The turn stops itself: the stream gets `error: cancelled` right away, and the
-    # sessionKey stays busy until the CLI has actually exited.
-    handle.cancel_event.set()
+    # The stream gets `error: cancelled` right away; the sessionKey stays busy until
+    # the turn's task has closed the CLI.
+    turn.stop("cancelled")
     log.info("cancel.requested", session_key=session_key)
     return {"status": "accepted", "sessionKey": session_key}

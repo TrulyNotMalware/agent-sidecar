@@ -32,7 +32,7 @@ def known_session_ids(session_key: str, *, root: Path) -> set[str]:
 
 def remember_session_id(session_key: str, session_id: str, *, root: Path) -> None:
     """Record an id issued to `session_key`. Not atomic across writers, which is fine:
-    the registry allows one in-flight turn per sessionKey."""
+    Admission allows one in-flight turn per sessionKey."""
     if session_id.lower() in known_session_ids(session_key, root=root):
         return
     directory = root / _SESSION_IDS_DIR

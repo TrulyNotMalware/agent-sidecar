@@ -113,8 +113,8 @@ sidecar/                  # the application
 ├── routes/               # converse, cancel, health, metrics
 ├── claude_runner.py      # Agent SDK adapter (event mapping)
 ├── codex_runner.py       # OpenAI Codex CLI adapter (PROVIDER=codex)
-├── concurrency.py        # global / user / session gates
-├── inflight.py           # cancel registry + drain
+├── admission.py          # limits (global / user / sessionKey) + registry + drain
+├── events.py             # runner events + Runner protocol
 ├── turn.py               # one turn in its own task (reservation, runner, stop/timeout)
 ├── observability/        # metrics, structured logging, OTel tracing
 └── …
@@ -259,8 +259,8 @@ sidecar/                  # 애플리케이션
 ├── routes/               # converse, cancel, health, metrics
 ├── claude_runner.py      # Agent SDK 어댑터 (이벤트 매핑)
 ├── codex_runner.py       # OpenAI Codex CLI 어댑터 (PROVIDER=codex)
-├── concurrency.py        # 글로벌 / user / session 게이트
-├── inflight.py           # 취소 레지스트리 + drain
+├── admission.py          # 동시 실행 제한(글로벌 / user / sessionKey) + 레지스트리 + drain
+├── events.py             # 러너 이벤트 + Runner 프로토콜
 ├── turn.py               # turn 하나를 독립 태스크로 실행 (예약, 러너, 중단/타임아웃)
 ├── observability/        # 메트릭, 구조화 로깅, OTel 트레이싱
 └── …

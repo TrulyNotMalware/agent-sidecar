@@ -325,7 +325,7 @@ Metrics:
 | Name | Type | Labels |
 |---|---|---|
 | `sidecar_requests_total` | counter | `outcome` ∈ `{ok, busy, timeout, sdk_error, internal, cancelled, bad_request}` |
-| `sidecar_request_duration_seconds` | histogram | `outcome` |
+| `sidecar_request_duration_seconds` | histogram | `outcome` (streamed turns only; pre-stream rejections are counted, not timed) |
 | `sidecar_inflight` | gauge | — (turns holding a slot, including the time spent closing their CLI) |
 | `sidecar_tool_calls_total` | counter | `tool_name`, `outcome` ∈ `{started, ok, error}` |
 | `sidecar_tokens_total` | counter | `kind` ∈ `{input, output}` |
@@ -339,7 +339,7 @@ in-cluster scrapers and probes can hit them without secret distribution.
   `401 unauthorized`, `404 not_found` (cancel target absent), `429 busy`.
 - After the SSE stream opens, every error is reported as the terminal
   `event: error` frame. No HTTP status changes mid-stream.
-- Error codes: `timeout | sdk_error | busy | internal | cancelled`.
+- SSE error codes: `timeout | sdk_error | internal | cancelled` (`busy` is always the pre-stream `429`).
 - `cancel` via `/v1/sessions/{sessionKey}/cancel` and a shutdown past
   `SHUTDOWN_GRACE_SEC` both end the stream with `error: cancelled`. A client that
   disconnects gets no frame (it is gone); its turn is stopped and recorded with
@@ -357,9 +357,10 @@ in-cluster scrapers and probes can hit them without secret distribution.
 ## Turn lifecycle: timeout, cancel, disconnect, shutdown
 
 Each turn runs in its own asyncio task (`sidecar/turn.py`), outside the SSE
-response's task group. That task owns the concurrency reservation, the workspace
-and the runner, and is cancelled at most once, so the runner always finishes
-closing the CLI before the reservation is released. Consequences:
+response's task group. The route reserves the turn's admission slots (`Turn.start`)
+before the stream opens; the task owns the workspace and the runner, is cancelled
+at most once, and releases the reservation only after the runner has finished
+closing the CLI. Consequences:
 
 - **The terminal frame never waits for the CLI.** On timeout, cancel or shutdown
   the stream gets its `error` frame at once and ends cleanly; the CLI is closed in
@@ -386,7 +387,7 @@ closing the CLI before the reservation is released. Consequences:
      `SHUTDOWN_GRACE_SEC` − 1 s to finish normally (`done`); the rest end with
      `error: cancelled` and a clean end of stream.
   3. uvicorn waits up to `SHUTDOWN_GRACE_SEC` + 2 s for connections to close.
-  4. Lifespan shutdown (`InflightRegistry.drain()`) waits up to 12 s for turns
+  4. Lifespan shutdown (`Admission.drain()`) waits up to 12 s for turns
      still closing their CLI, then force-cancels any survivors (logged as
      `shutdown.forced_cancel`; a forced turn may leave its CLI behind, which the
      container runtime reaps when PID 1 exits).

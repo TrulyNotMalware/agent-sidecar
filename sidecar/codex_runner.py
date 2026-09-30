@@ -6,7 +6,8 @@ import signal
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 
-from .claude_runner import (
+from .errors import ApiError, ErrorCode
+from .events import (
     DoneEvent,
     RunnerEvent,
     SessionEvent,
@@ -14,7 +15,6 @@ from .claude_runner import (
     ToolResultEvent,
     ToolUseEvent,
 )
-from .errors import ApiError, ErrorCode
 from .observability.logging import get_logger
 
 log = get_logger("sidecar.codex")

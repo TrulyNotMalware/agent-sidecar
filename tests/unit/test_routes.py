@@ -7,7 +7,7 @@ def _install_recording_runner(monkeypatch):
     The fake yields a single terminal DoneEvent so the SSE stream closes and the
     sync TestClient collects the full response.
     """
-    from sidecar.claude_runner import DoneEvent
+    from sidecar.events import DoneEvent
     from sidecar.routes import converse as converse_mod
 
     recorded: dict = {}
@@ -107,24 +107,18 @@ def test_unknown_field_returns_400(client):
 # in-flight state on the live app.state objects and hit the route.
 
 
+def _hold(app, session_key: str, user_id: str | None = None):
+    """Reserve admission slots as if another turn were running (never started)."""
+    from sidecar.turn import Turn
+
+    admission = app.state.admission
+    turn = Turn(session_key=session_key, user_id=user_id, admission=admission, timeout_sec=5)
+    admission.reserve(turn)
+    return turn
+
+
 def test_converse_busy_same_session_key_returns_429(client, app):
-    import asyncio
-
-    from sidecar.inflight import InflightHandle
-
-    registry = app.state.inflight
-
-    async def _register():
-        handle = InflightHandle(
-            session_key="dup-key",
-            user_id=None,
-            cancel_event=asyncio.Event(),
-            task=asyncio.create_task(asyncio.sleep(0)),
-        )
-        await registry.register(handle)
-        return handle
-
-    handle = asyncio.run(_register())
+    held = _hold(app, "dup-key")
     try:
         r = client.post(
             "/v1/converse",
@@ -132,17 +126,31 @@ def test_converse_busy_same_session_key_returns_429(client, app):
             headers={"Authorization": "Bearer test-secret"},
         )
     finally:
-        asyncio.run(registry.unregister("dup-key", handle))
+        app.state.admission.release(held)
 
     assert r.status_code == 429
     assert r.json()["code"] == "busy"
     assert "dup-key" in r.json()["message"]
 
 
+@pytest.mark.parametrize("mode", ["session", "stateless"])
+def test_converse_busy_same_session_key_in_either_mode(client, app, mode):
+    # /cancel addresses a turn by its sessionKey, so stateless turns hold it too.
+    held = _hold(app, "dup-key", None)
+    try:
+        r = client.post(
+            "/v1/converse",
+            json={"sessionKey": "dup-key", "prompt": "hi", "mode": mode},
+            headers={"Authorization": "Bearer test-secret"},
+        )
+    finally:
+        app.state.admission.release(held)
+
+    assert r.status_code == 429
+
+
 def test_converse_busy_same_user_returns_429(client, app):
-    gate = app.state.gate
-    # Simulate another turn holding the per-user slot.
-    gate._user_inflight.add("u1")
+    held = _hold(app, "held-key", "u1")
     try:
         r = client.post(
             "/v1/converse",
@@ -150,11 +158,45 @@ def test_converse_busy_same_user_returns_429(client, app):
             headers={"Authorization": "Bearer test-secret", "X-User-Id": "u1"},
         )
     finally:
-        gate._user_inflight.discard("u1")
+        app.state.admission.release(held)
 
     assert r.status_code == 429
     assert r.json()["code"] == "busy"
     assert "u1" in r.json()["message"]
+
+
+def test_finished_turn_releases_its_reservation(client, app, monkeypatch):
+    _install_recording_runner(monkeypatch)
+    for _ in range(2):  # the second turn is only accepted if the first released
+        r = client.post(
+            "/v1/converse",
+            json={"sessionKey": "again-k", "prompt": "hi"},
+            headers={"Authorization": "Bearer test-secret", "X-User-Id": "again-u"},
+        )
+        assert r.status_code == 200
+        assert "event: done" in r.text
+    assert app.state.admission.inflight == 0
+
+
+def test_a_failure_building_the_response_reserves_nothing(client, app, monkeypatch):
+    # The reservation is the handler's last step, so nothing can leave a turn running
+    # (and its sessionKey busy until the timeout) without a response to stop it.
+    from sidecar.routes import converse as converse_mod
+
+    _install_recording_runner(monkeypatch)
+
+    def broken_response(*_args, **_kwargs):
+        raise RuntimeError("response could not be built")
+
+    monkeypatch.setattr(converse_mod, "EventSourceResponse", broken_response)
+    with pytest.raises(RuntimeError):
+        client.post(
+            "/v1/converse",
+            json={"sessionKey": "broken-k", "prompt": "hi"},
+            headers={"Authorization": "Bearer test-secret"},
+        )
+
+    assert app.state.admission.inflight == 0
 
 
 def test_flag_like_session_id_is_rejected_before_streaming(client):

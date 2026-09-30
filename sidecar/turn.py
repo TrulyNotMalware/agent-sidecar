@@ -4,10 +4,10 @@ Why a separate task: the SSE response runs inside sse-starlette's anyio task gro
 whose cancellation is level-triggered — once it fires (client disconnect, SIGTERM),
 every later await in that task is cancelled again, so cleanup done there never
 finishes (the SDK's close() died at its first checkpoint and the CLI outlived the
-request). The turn task sits outside that group. It owns the concurrency
-reservation, the workspace and the runner, and is cancelled at most once, so the
-runner's cleanup (closing the CLI) always completes before the reservation is
-released — a new turn on the same sessionKey cannot overlap the old CLI.
+request). The turn task sits outside that group. It owns the admission
+reservation (taken by `start`), the workspace and the runner, and is cancelled at
+most once, so the runner's cleanup (closing the CLI) always completes before the
+reservation is released — a new turn on the same sessionKey cannot overlap the old CLI.
 
 The SSE side only reads `Turn.events`. Runner events arrive in order, followed by
 exactly one `TurnEnded`. When the turn is stopped (timeout, cancel, disconnect,
@@ -20,18 +20,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .claude_runner import DoneEvent, RunnerEvent, ToolResultEvent, ToolUseEvent
-from .concurrency import ConcurrencyGate
+from .admission import Admission
 from .errors import ApiError
-from .inflight import InflightHandle, InflightRegistry
+from .events import DoneEvent, RunnerEvent, ToolResultEvent, ToolUseEvent
 from .observability.logging import get_logger
-from .observability.metrics import INFLIGHT, TOKENS, TOOL_CALLS
+from .observability.metrics import TOKENS, TOOL_CALLS
 from .observability.tracing import get_tracer
 
 log = get_logger("sidecar.turn")
@@ -64,30 +63,34 @@ class Turn:
         *,
         session_key: str,
         user_id: str | None,
-        gate_session_key: str | None,
-        gate: ConcurrencyGate,
-        registry: InflightRegistry,
+        admission: Admission,
         timeout_sec: float,
         span_attributes: dict[str, str | bool] | None = None,
     ) -> None:
         self.session_key = session_key
         self.user_id = user_id
         self.events: asyncio.Queue[TurnItem] = asyncio.Queue()
-        self.cancel_event = asyncio.Event()  # set by the cancel route and by drain()
-        self._gate_session_key = gate_session_key
-        self._gate = gate
-        self._registry = registry
+        self._admission = admission
         self._timeout_sec = timeout_sec
         self._span_attributes = span_attributes or {}
         self._task: asyncio.Task | None = None
         self._started = False  # _main began executing (its finally will end the turn)
         self._stop_reason: StopReason | None = None
 
+    @property
+    def task(self) -> asyncio.Task | None:
+        return self._task
+
     def start(
         self,
-        open_runner: Callable[[Path], AsyncIterator[RunnerEvent]],
+        open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],
         workspace: Callable[[], AbstractContextManager[Path]],
     ) -> None:
+        """Reserve the turn's admission slots and start its task.
+
+        Raises ApiError(BUSY) — before anything runs — if a limit is hit.
+        """
+        self._admission.reserve(self)
         self._task = asyncio.create_task(self._main(open_runner, workspace))
 
     def stop(self, reason: StopReason) -> None:
@@ -99,20 +102,21 @@ class Turn:
         self.events.put_nowait(TurnStopped(reason))
         self._task.cancel()
         if not self._started:
-            # Cancelled before its first step: _main (and its finally) never runs, and
-            # nothing was reserved yet. Keep the "always ends with TurnEnded" contract.
+            # Cancelled before its first step: _main (and its finally) never runs and
+            # nothing was opened. Release here and keep the "always ends with
+            # TurnEnded" contract.
+            self._admission.release(self)
             self.events.put_nowait(TurnEnded(stop_reason=reason, error=None))
 
     async def _main(
         self,
-        open_runner: Callable[[Path], AsyncIterator[RunnerEvent]],
+        open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],
         workspace: Callable[[], AbstractContextManager[Path]],
     ) -> None:
         self._started = True
         started = time.perf_counter()
         loop = asyncio.get_running_loop()
         deadline = loop.call_later(self._timeout_sec, self.stop, "timeout")
-        cancel_watch = asyncio.create_task(self._stop_on_cancel_event())
         error: BaseException | None = None
         try:
             with tracer.start_as_current_span(
@@ -134,7 +138,9 @@ class Turn:
             error = exc
         finally:
             deadline.cancel()
-            cancel_watch.cancel()
+            # Released before TurnEnded is queued: once the stream has read it (and
+            # ended), a new turn on this sessionKey is accepted.
+            self._admission.release(self)
             self.events.put_nowait(TurnEnded(stop_reason=self._stop_reason, error=error))
             log.info(
                 "turn.closed",
@@ -148,38 +154,17 @@ class Turn:
 
     async def _run(
         self,
-        open_runner: Callable[[Path], AsyncIterator[RunnerEvent]],
+        open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],
         workspace: Callable[[], AbstractContextManager[Path]],
         span,
     ) -> None:
-        handle = InflightHandle(
-            session_key=self.session_key,
-            user_id=self.user_id,
-            cancel_event=self.cancel_event,
-            task=asyncio.current_task(),
-        )
-        await self._registry.register(handle)
-        try:
-            async with self._gate.acquire(
-                user_id=self.user_id, session_key=self._gate_session_key
-            ):
-                INFLIGHT.inc()
-                try:
-                    with workspace() as cwd:
-                        # aclosing: the runner (and the CLI it drives) is fully closed
-                        # before the workspace, gate and registry entry are released.
-                        async with contextlib.aclosing(open_runner(cwd)) as runner:
-                            async for ev in runner:
-                                _instrument(ev, span)
-                                self.events.put_nowait(ev)
-                finally:
-                    INFLIGHT.dec()
-        finally:
-            await self._registry.unregister(self.session_key, handle)
-
-    async def _stop_on_cancel_event(self) -> None:
-        await self.cancel_event.wait()
-        self.stop("cancelled")
+        with workspace() as cwd:
+            # aclosing: the runner (and the CLI it drives) is fully closed before the
+            # workspace and the admission reservation are released.
+            async with contextlib.aclosing(open_runner(cwd)) as runner:
+                async for ev in runner:
+                    _instrument(ev, span)
+                    self.events.put_nowait(ev)
 
 
 def _instrument(ev: RunnerEvent, span) -> None:
