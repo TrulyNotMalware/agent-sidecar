@@ -1,12 +1,14 @@
 # Dependabot reads this from the default branch only: nothing happens until it is merged.
-# Every update PR is checked by .github/workflows/ci.yml.
+# Every update PR is checked by .github/workflows/ci.yml. GitHub's default cooldown applies:
+# a release is only considered 3 days after it is published.
 version: 2
 updates:
   # constraints.txt (the image's runtime lock) is read as a requirements file: its lines
-  # are plain `name==version` pins. One weekly PR for the lock; claude-agent-sdk gets its
-  # own, since the runners depend on its bundled CLI's flags and events (AGENTS.md).
-  # If a grouped PR breaks a pinned pair (e.g. pydantic / pydantic_core), regenerate the
-  # lock as its header describes instead of editing pins by hand.
+  # are plain `name==version` pins, each bumped on its own (nothing is re-resolved). One
+  # weekly PR for the lock; claude-agent-sdk gets its own, since the runners depend on its
+  # bundled CLI's flags and events (AGENTS.md).
+  # If a grouped PR breaks a pinned pair, delete the stale pin and regenerate the lock as
+  # its header describes instead of editing pins by hand.
   - package-ecosystem: pip
     directory: /
     schedule:
@@ -15,11 +17,19 @@ updates:
       python-dependencies:
         patterns: ["*"]
         exclude-patterns: ["claude-agent-sdk"]
+    # pydantic pins pydantic-core exactly, and pydantic-core also publishes versions only
+    # a pydantic pre-release accepts (2.49.0 for 2.14.0b2): bumped alone, such a version
+    # cannot install and fails the whole group. It moves with pydantic: when the group
+    # bumps pydantic, delete the pydantic_core pin and regenerate. Dependabot normalizes
+    # names, so this also matches the `pydantic_core` line.
+    ignore:
+      - dependency-name: pydantic-core
 
   # The base image (python:<minor>-slim-bookworm). A Python minor bump also moves CI to
   # that Python (the workflow reads it from the Dockerfile); regenerate constraints.txt
-  # on it. Node (NODE_MAJOR) and codex (CODEX_VERSION) are Dockerfile ARGs, which
-  # Dependabot does not update: bump those by hand.
+  # on it as its header describes (with -c, only marker-dependent pins can change).
+  # Node (NODE_MAJOR) and codex (CODEX_VERSION) are Dockerfile ARGs, which Dependabot
+  # does not update: bump those by hand.
   - package-ecosystem: docker
     directory: /
     schedule:

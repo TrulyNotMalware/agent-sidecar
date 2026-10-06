@@ -1,8 +1,12 @@
 # Runtime dependency lock for the container image (pip install -c constraints.txt .).
-# Regenerate after changing pyproject.toml dependencies, in a clean venv on the
-# image's Python (3.12), so environment-marker dependencies resolve the same way:
-#   python3.12 -m venv /tmp/lock && /tmp/lock/bin/pip install .
+# Regenerate it in a clean venv on the image's Python (the Dockerfile's FROM), so
+# environment-marker dependencies resolve the same way:
+#   python3.<minor> -m venv /tmp/lock && /tmp/lock/bin/pip install -c constraints.txt .
 #   /tmp/lock/bin/pip freeze --exclude claude-sidecar  (keep this header)
+# -c keeps the current pins and resolves only what changed: a new pyproject.toml
+# dependency, a pin deleted to let it move, another Python's environment markers.
+# Without -c everything moves to its latest version, claude-agent-sdk too (bump that
+# one deliberately).
 # Then run the full test suite with these versions (pip install -c constraints.txt -e '.[dev]').
 annotated-doc==0.0.5
 annotated-types==0.8.0
