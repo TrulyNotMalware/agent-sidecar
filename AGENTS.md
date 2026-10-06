@@ -71,7 +71,7 @@ examples/                # Client example (Python)
 scripts/                 # test.sh (lint + pytest), smoke.py (e2e)
 docs/operations.md       # Full operational reference
 openapi.yaml             # Source-of-truth API contract
-Dockerfile               # python:3.12-slim-bookworm + Node 24 LTS + pinned codex + tini, uid 10001
+Dockerfile               # python:<minor>-slim-bookworm + Node 24 LTS + pinned codex + tini, uid 10001
 constraints.txt          # runtime dependency lock used by the image
 ```
 

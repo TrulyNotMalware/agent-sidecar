@@ -434,9 +434,10 @@ closing the CLI. Consequences:
   (`CODEX_HOME`: auth and rollouts). Mount one volume there; an `emptyDir` loses
   conversations when the Pod goes away, a persistent volume keeps them. Size it
   for transcripts too, and clean all three together (keep `.session-ids/`).
-- **Image.** Runs as uid/gid 10001 on `python:3.12-slim-bookworm` with Node.js 24
-  LTS and a pinned `@openai/codex`; the claude CLI is the one bundled with
-  `claude-agent-sdk`. Python dependencies are installed from `constraints.txt`.
+- **Image.** Runs as uid/gid 10001 on `python:<minor>-slim-bookworm` (the minor is
+  the Dockerfile's `FROM`) with Node.js 24 LTS and a pinned `@openai/codex`; the
+  claude CLI is the one bundled with `claude-agent-sdk`. Python dependencies are
+  installed from `constraints.txt`.
   The example manifest adds `runAsNonRoot`, `readOnlyRootFilesystem` (with
   `emptyDir`s for `/tmp` and `$HOME`), no capabilities and `RuntimeDefault` seccomp
   (not yet verified on a cluster; codex's own shell sandbox needs Landlock /
