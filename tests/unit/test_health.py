@@ -84,8 +84,15 @@ def _codex_settings(**overrides):
     return Settings(bearer_secret="x", provider="codex", **overrides)
 
 
-def test_readyz_codex_503_when_binary_missing(client, monkeypatch):
-    monkeypatch.setattr("sidecar.routes.health.get_settings", _codex_settings)
+def _use_codex_settings(app) -> None:
+    # Settings reach the route through Depends(get_settings): override the dependency.
+    from sidecar.config import get_settings
+
+    app.dependency_overrides[get_settings] = lambda: _codex_settings()  # no parameters
+
+
+def test_readyz_codex_503_when_binary_missing(client, app, monkeypatch):
+    _use_codex_settings(app)
     monkeypatch.setattr("sidecar.routes.health._codex_binary_ready", lambda: False)
     monkeypatch.setattr("sidecar.routes.health._codex_identity_ready", lambda s: True)
     r = client.get("/readyz")
@@ -93,8 +100,8 @@ def test_readyz_codex_503_when_binary_missing(client, monkeypatch):
     assert "codex binary" in r.json()["detail"]
 
 
-def test_readyz_codex_503_when_identity_missing(client, monkeypatch):
-    monkeypatch.setattr("sidecar.routes.health.get_settings", _codex_settings)
+def test_readyz_codex_503_when_identity_missing(client, app, monkeypatch):
+    _use_codex_settings(app)
     monkeypatch.setattr("sidecar.routes.health._codex_binary_ready", lambda: True)
     monkeypatch.setattr("sidecar.routes.health._codex_identity_ready", lambda s: False)
     r = client.get("/readyz")
@@ -102,8 +109,8 @@ def test_readyz_codex_503_when_identity_missing(client, monkeypatch):
     assert "codex identity" in r.json()["detail"]
 
 
-def test_readyz_codex_200_when_all_good(client, monkeypatch):
-    monkeypatch.setattr("sidecar.routes.health.get_settings", _codex_settings)
+def test_readyz_codex_200_when_all_good(client, app, monkeypatch):
+    _use_codex_settings(app)
     monkeypatch.setattr("sidecar.routes.health._codex_binary_ready", lambda: True)
     monkeypatch.setattr("sidecar.routes.health._codex_identity_ready", lambda s: True)
     r = client.get("/readyz")

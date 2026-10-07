@@ -7,7 +7,8 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from ..codex_runner import codex_auth_file
-from ..config import Settings, get_settings
+from ..config import Settings
+from ..deps import SettingsDep
 from ..models import HealthStatus
 
 router = APIRouter()
@@ -19,8 +20,8 @@ async def healthz() -> HealthStatus:
 
 
 @router.get("/readyz")
-async def readyz() -> JSONResponse:
-    failures = await asyncio.to_thread(_readyz_checks, get_settings())
+async def readyz(settings: SettingsDep) -> JSONResponse:
+    failures = await asyncio.to_thread(_readyz_checks, settings)
     if failures:
         body = HealthStatus(status="error", detail="; ".join(failures)).model_dump()
         return JSONResponse(body, status_code=503)

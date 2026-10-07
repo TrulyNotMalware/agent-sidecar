@@ -2,11 +2,11 @@ import os
 
 import pytest
 
+from sidecar.app import create_app
+from sidecar.config import get_settings
+
 os.environ.setdefault("BEARER_SECRET", "test-secret")
 os.environ.setdefault("WORKSPACE_ROOT", "/tmp/claude-sidecar-test-sessions")
-
-from sidecar.app import create_app  # noqa: E402
-from sidecar.config import get_settings  # noqa: E402
 
 
 @pytest.fixture

@@ -37,8 +37,9 @@ All business logic lives in MCP servers that the consumer configures and the sid
 
 ```
 sidecar/                 # Application package
-├── __main__.py          # Entry: uvicorn runner
+├── __main__.py          # Entry: uvicorn runner (app factory, no import-time work)
 ├── app.py               # FastAPI factory + lifespan
+├── deps.py              # SettingsDep (settings via Depends)
 ├── auth.py              # Bearer token dependency
 ├── claude_runner.py     # Claude Agent SDK adapter
 ├── codex_runner.py      # OpenAI Codex CLI adapter

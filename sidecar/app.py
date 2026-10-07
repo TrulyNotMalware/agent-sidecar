@@ -120,6 +120,3 @@ def create_app() -> FastAPI:
         configure_tracing(app, service_name=settings.otel_service_name)
 
     return app
-
-
-app = create_app()

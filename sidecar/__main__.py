@@ -6,7 +6,8 @@ from .config import get_settings
 def main() -> None:
     s = get_settings()
     uvicorn.run(
-        "sidecar.app:app",
+        "sidecar.app:create_app",
+        factory=True,  # the app is built on demand: importing sidecar.app does nothing
         host=s.bind,
         port=s.port,
         log_level=s.log_level.lower(),

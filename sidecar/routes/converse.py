@@ -19,7 +19,8 @@ from starlette.types import Message
 from .. import claude_runner, codex_runner
 from ..admission import Admission
 from ..auth import require_bearer
-from ..config import Settings, get_settings
+from ..config import Settings
+from ..deps import SettingsDep
 from ..errors import ApiError, ErrorCode
 from ..events import (
     DoneEvent,
@@ -54,14 +55,17 @@ _SEND_TIMEOUT_SEC = 30
 async def converse(
     body: ConverseRequest,
     request: Request,
+    settings: SettingsDep,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id", max_length=256)] = None,
     x_turn_token: Annotated[str | None, Header(alias="X-Turn-Token", max_length=4096)] = None,
 ) -> EventSourceResponse | JSONResponse:
-    settings = get_settings()
     admission: Admission = request.app.state.admission
     turn_id = uuid.uuid4().hex
     # Every log line of this request — route, stream and the turn's task (created
-    # below, so it inherits this context) — carries the id the client gets.
+    # below, so it inherits this context) — carries the id the client gets. Cleared
+    # first: a server runs each request in a fresh task, an in-process test client
+    # may not.
+    structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(turn_id=turn_id)
     register_turn_secret(x_turn_token)  # e.g. echoed in an MCP error or CLI stderr
 
