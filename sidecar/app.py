@@ -13,6 +13,7 @@ from .errors import ApiError, ErrorCode
 from .mcp import static_mcp_server_names
 from .observability.logging import configure_logging, get_logger
 from .observability.redaction import register_secrets
+from .observability.tracing import configure_tracing
 from .routes import cancel, converse, health, metrics
 
 log = get_logger("sidecar.app")
@@ -111,8 +112,6 @@ def create_app() -> FastAPI:
         )
 
     if settings.tracing_enabled:
-        from .observability.tracing import configure_tracing
-
         configure_tracing(app, service_name=settings.otel_service_name)
 
     return app

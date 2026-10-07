@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
+from .. import claude_runner, codex_runner
 from ..admission import Admission
 from ..auth import require_bearer
 from ..config import Settings, get_settings
@@ -317,17 +318,13 @@ def _merge_system_prompt(
 
 def _get_runner(settings: Settings) -> Runner:
     if settings.provider == "codex":
-        from ..codex_runner import run_turn
-
         return functools.partial(
-            run_turn,
+            codex_runner.run_turn,
             sandbox=settings.codex_sandbox,
             env_passthrough=settings.codex_env_passthrough_names,
         )
-    from ..claude_runner import run_turn
-
     return functools.partial(
-        run_turn,
+        claude_runner.run_turn,
         # Anything the operator routed to codex is none of the claude agent's business.
         withheld_env=settings.codex_env_passthrough_names,
         tools=settings.claude_tools_list,

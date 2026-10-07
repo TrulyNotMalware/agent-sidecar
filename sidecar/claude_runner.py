@@ -30,6 +30,7 @@ _WITHHELD_FROM_CLI = ("BEARER_SECRET", "OPENAI_API_KEY")
 _STDERR_TAIL_LINES = 40
 _STDERR_LINE_CHARS = 2000  # the SDK hands over lines of up to ~1 MB
 _STDERR_LOG_LINES = 200  # per turn; the tail still reaches error_detail
+_STDERR_DETAIL_CHARS = 2000  # of the stderr tail quoted in error_detail
 
 log = get_logger("sidecar.claude")
 
@@ -248,9 +249,6 @@ def _cli_failure(exc: Exception, stderr: str) -> ApiError:
     return ApiError(
         ErrorCode.SDK_ERROR, f"claude CLI failed ({type(exc).__name__}{code})", detail=detail
     )
-
-
-_STDERR_DETAIL_CHARS = 2000
 
 
 def _extract_session_id(message: Any) -> str | None:

@@ -20,6 +20,18 @@ from .observability.logging import get_logger
 
 log = get_logger("sidecar.codex")
 
+_MCP_TOKEN_ENV_VAR = "SIDECAR_MCP_TURN_TOKEN"
+_LOGIN_TIMEOUT_SEC = 30
+# stdout carries one JSON event per line; a single line can be huge (a command's
+# aggregated output). Lines past this size are skipped, not fatal.
+_MAX_EVENT_LINE_BYTES = 8 * 1024 * 1024
+_STDERR_TAIL_BYTES = 4096
+# Below Linux's MAX_ARG_STRLEN (128 KiB) for a single argv string.
+_MAX_ARG_BYTES = 100_000
+_TERM_GRACE_SEC = 2.0
+_KILL_WAIT_SEC = 5.0
+_EXIT_WAIT_SEC = 5.0
+
 
 def codex_auth_file(configured: Path | None = None) -> Path:
     """Where codex keeps auth.json: CODEX_AUTH_PATH if set, else $CODEX_HOME (~/.codex).
@@ -67,9 +79,6 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
         return False
     return proc.returncode == 0 and path.exists()
 
-
-_MCP_TOKEN_ENV_VAR = "SIDECAR_MCP_TURN_TOKEN"
-_LOGIN_TIMEOUT_SEC = 30
 
 # codex and the shell commands the model runs inherit only these. The sidecar's own
 # secrets (BEARER_SECRET, provider API keys) stay out: auth comes from CODEX_HOME.
@@ -333,17 +342,6 @@ async def run_turn(
     async with contextlib.aclosing(_stream()) as events:
         async for ev in events:
             yield ev
-
-
-# stdout carries one JSON event per line; a single line can be huge (a command's
-# aggregated output). Lines past this size are skipped, not fatal.
-_MAX_EVENT_LINE_BYTES = 8 * 1024 * 1024
-_STDERR_TAIL_BYTES = 4096
-# Below Linux's MAX_ARG_STRLEN (128 KiB) for a single argv string.
-_MAX_ARG_BYTES = 100_000
-_TERM_GRACE_SEC = 2.0
-_KILL_WAIT_SEC = 5.0
-_EXIT_WAIT_SEC = 5.0
 
 
 def _failure_text(event: dict) -> str:
