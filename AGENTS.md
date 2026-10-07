@@ -313,7 +313,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 
 ### OpenTelemetry
 - Activated only when `TRACING_ENABLED=true`.
-- Exports via OTLP HTTP (`opentelemetry-exporter-otlp-proto-http`).
+- Exports via OTLP HTTP (`opentelemetry-exporter-otlp-proto-http`). The provider is shut down
+  (last batch exported) at lifespan shutdown: the SDK's atexit flush does not run on SIGTERM.
 - FastAPI auto-instrumented. Per-turn span `claude.turn` carries:
   `session.key`, `session.mode`, `session.resume`, `user.id`, `turn.id`, `tokens.input`,
   `tokens.output`, `outcome`. A failed turn sets the span status to ERROR and adds an

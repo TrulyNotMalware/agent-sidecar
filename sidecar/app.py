@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -8,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.utils import is_body_allowed_for_status_code
+from opentelemetry.sdk.trace import TracerProvider
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .admission import Admission
@@ -17,7 +19,7 @@ from .errors import ApiError, ErrorCode
 from .mcp import static_mcp_server_names
 from .observability.logging import configure_logging, get_logger
 from .observability.redaction import register_secrets
-from .observability.tracing import configure_tracing
+from .observability.tracing import configure_tracing, shutdown_tracing
 from .routes import cancel, converse, health, metrics
 
 log = get_logger("sidecar.app")
@@ -26,6 +28,8 @@ log = get_logger("sidecar.app")
 # are still closing their CLI (the SDK waits up to 5s for exit, then SIGTERMs and
 # waits another 5s before SIGKILL).
 TURN_CLEANUP_BUDGET_SEC = 12.0
+# How long shutdown waits for the span exporter to flush its last batch.
+_TRACING_FLUSH_SEC = 10.0
 
 _CREDENTIAL_ENV_VARS = (
     "ANTHROPIC_API_KEY",
@@ -77,6 +81,8 @@ def create_app() -> FastAPI:
         *(os.environ.get(name) for name in settings.codex_env_passthrough_names),
     )
 
+    tracer_provider: TracerProvider | None = None
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(_prepare_filesystem, settings)
@@ -89,8 +95,17 @@ def create_app() -> FastAPI:
         finally:
             forced = await app.state.admission.drain(grace_sec=TURN_CLEANUP_BUDGET_SEC)
             log.info("shutdown.drained", forced_cancellations=forced)
+            if tracer_provider is not None:
+                # Bounded wait; the export thread finishes on its own either way.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        asyncio.to_thread(shutdown_tracing, tracer_provider), _TRACING_FLUSH_SEC
+                    )
 
     app = FastAPI(title="Claude Sidecar", version="1.0.0", lifespan=lifespan)
+    if settings.tracing_enabled:
+        # Instrumentation must be added before the app handles its first event.
+        tracer_provider = configure_tracing(app, service_name=settings.otel_service_name)
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(cancel.router)
@@ -144,8 +159,5 @@ def create_app() -> FastAPI:
             status_code=400,
             content={"code": ErrorCode.BAD_REQUEST.value, "message": msg or "invalid request"},
         )
-
-    if settings.tracing_enabled:
-        configure_tracing(app, service_name=settings.otel_service_name)
 
     return app
