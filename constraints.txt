@@ -14,7 +14,7 @@ anyio==4.15.1
 asgiref==3.12.1
 attrs==26.1.0
 cffi==2.1.1
-claude-agent-sdk==0.2.161
+claude-agent-sdk==0.2.163
 click==8.5.0
 cryptography==50.0.2
 fastapi==0.142.2
