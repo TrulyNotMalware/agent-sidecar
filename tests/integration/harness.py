@@ -44,7 +44,7 @@ def known_bug(reason: str) -> pytest.MarkDecorator:
     return pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)
 
 
-def precondition(condition: bool, message: str) -> None:
+def precondition(condition: bool, message: str) -> None:  # noqa: FBT001 — assert-like
     """Assert a setup step without letting its failure pass as a known_bug xfail."""
     if not condition:
         pytest.fail(f"harness precondition failed: {message}")
@@ -59,7 +59,10 @@ def pid_alive(pid: int) -> bool:
             return False
         return stat.rpartition(")")[2].split()[0] != "Z"
     out = subprocess.run(
-        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,  # non-zero when the pid is gone: that is an answer, not an error
     ).stdout.strip()
     return bool(out) and not out.startswith("Z")
 
@@ -237,7 +240,7 @@ class BackgroundConverse:
             self._box["result"] = converse(
                 port, session_key, on_event=lambda _name: self._first_event.set(), **kwargs
             )
-        except BaseException as exc:  # surfaced to the test via result()
+        except BaseException as exc:  # noqa: BLE001 — surfaced to the test via result()
             self._box["error"] = exc
 
     def wait_first_event(self, timeout: float) -> None:

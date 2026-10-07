@@ -30,7 +30,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from sidecar.events import TurnSpec
+from sidecar.events import Runner, TurnSpec
 
 _ROOT = Path(__file__).parent.parent
 
@@ -109,7 +109,7 @@ async def main() -> int:
             shutil.rmtree(os.environ["CODEX_HOME"], ignore_errors=True)
 
 
-async def _smoke(run_turn) -> int:
+async def _smoke(run_turn: Runner) -> int:
     if PROVIDER == "codex":
         from sidecar.codex_runner import ensure_codex_auth
 
@@ -129,7 +129,7 @@ async def _smoke(run_turn) -> int:
                 async for ev in run_turn(TurnSpec(prompt=PROMPT), cwd=Path(td)):
                     print(f"{type(ev).__name__:>16s}  {ev}")
                     done = done or type(ev).__name__ == "DoneEvent"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a smoke script reports whatever failed
             print(f"\nFAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1
     if not done:

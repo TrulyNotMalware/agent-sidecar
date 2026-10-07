@@ -381,7 +381,7 @@ async def test_exit_zero_without_turn_completed_is_an_error(monkeypatch):
     # e.g. codex printed help text instead of running a turn
     _install(monkeypatch, FakeProc([b"Usage: codex exec ...\n"]))
 
-    with pytest.raises(ApiError, match="without turn.completed"):
+    with pytest.raises(ApiError, match=r"without turn\.completed"):
         await _collect()
 
 

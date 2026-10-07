@@ -20,12 +20,14 @@ continues.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 KIND, PORT, RECORD = sys.argv[1], int(sys.argv[2]), Path(sys.argv[3])
 RECORD.mkdir(parents=True, exist_ok=True)
@@ -33,7 +35,7 @@ ERROR_STATUS = os.environ.get("FAKE_API_ERROR")
 COMPACT_ON = os.environ.get("FAKE_OPENAI_COMPACT_ON")
 ERROR_MESSAGE = "model not available for key sk-proj-leakedkey123456"
 _lock = threading.Lock()
-_count = 0
+_counter = itertools.count(1)
 _compacted = False
 
 USAGE_ANTHROPIC = {
@@ -52,10 +54,8 @@ USAGE_OPENAI = {
 
 
 def _record(raw: bytes) -> None:
-    global _count
     with _lock:
-        _count += 1
-        (RECORD / f"{_count:02d}.json").write_bytes(raw)
+        (RECORD / f"{next(_counter):02d}.json").write_bytes(raw)
 
 
 def _sse(name: str, data: dict) -> str:
@@ -216,26 +216,36 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         body = json.loads(raw or b"{}")
         if KIND == "anthropic" and path.endswith("/v1/messages"):
-            if body.get("tools"):  # the agent loop (side requests, e.g. a title, have none)
-                _record(raw)
-                if ERROR_STATUS:
-                    return self._error()
-                blocks, stop = _anthropic_blocks(body)
-                usage = USAGE_ANTHROPIC
-            else:  # zero usage: a side request must not change the turn's totals
-                blocks, stop = [{"type": "text", "text": "side"}], "end_turn"
-                usage = dict.fromkeys(USAGE_ANTHROPIC, 0)
-            if body.get("stream"):
-                stream = _anthropic_stream(body, blocks, stop, usage)
-                return self._send(200, stream, "text/event-stream")
-            message = _anthropic_message(body, blocks, stop, usage)
-            return self._send(200, json.dumps(message).encode(), "application/json")
-        if KIND == "openai" and path.endswith("/responses"):
+            self._anthropic(raw, body)
+        elif KIND == "openai" and path.endswith("/responses"):
+            self._openai(raw, body)
+        else:
+            self._send(404, b"", "text/plain")
+
+    def _anthropic(self, raw: bytes, body: dict[str, Any]) -> None:
+        if body.get("tools"):  # the agent loop (side requests, e.g. a title, have none)
             _record(raw)
             if ERROR_STATUS:
-                return self._error()
-            return self._send(200, _openai_stream(body), "text/event-stream")
-        self._send(404, b"", "text/plain")
+                self._error()
+                return
+            blocks, stop = _anthropic_blocks(body)
+            usage = USAGE_ANTHROPIC
+        else:  # zero usage: a side request must not change the turn's totals
+            blocks, stop = [{"type": "text", "text": "side"}], "end_turn"
+            usage = dict.fromkeys(USAGE_ANTHROPIC, 0)
+        if body.get("stream"):
+            stream = _anthropic_stream(body, blocks, stop, usage)
+            self._send(200, stream, "text/event-stream")
+        else:
+            message = _anthropic_message(body, blocks, stop, usage)
+            self._send(200, json.dumps(message).encode(), "application/json")
+
+    def _openai(self, raw: bytes, body: dict[str, Any]) -> None:
+        _record(raw)
+        if ERROR_STATUS:
+            self._error()
+        else:
+            self._send(200, _openai_stream(body), "text/event-stream")
 
 
 ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

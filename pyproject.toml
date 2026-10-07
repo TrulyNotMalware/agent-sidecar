@@ -43,7 +43,18 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "ANN", "ASYNC", "FAST", "RET", "PTH",
+    "DTZ", "ISC", "G", "T20", "BLE", "PERF", "FBT", "PGH", "PLE", "PLW", "TRY", "RUF", "COM818",
+]
+ignore = ["TRY003"]  # the message belongs where the exception is raised
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/**" = ["T201"]  # command-line output
+"examples/**" = ["T201"]
+# Test set-up does blocking file I/O inside async tests on purpose, and raising inside
+# a try block is how a test fakes a failure with a traceback.
+"tests/**" = ["ASYNC230", "ASYNC240", "TRY301", "ANN"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -85,10 +85,14 @@ def _codex_settings(**overrides):
 
 
 def _use_codex_settings(app) -> None:
-    # Settings reach the route through Depends(get_settings): override the dependency.
-    from sidecar.config import get_settings
+    # Settings reach the route through Depends(get_settings): override the dependency
+    # with a parameterless callable (FastAPI reads the signature of an override).
+    from sidecar.config import Settings, get_settings
 
-    app.dependency_overrides[get_settings] = lambda: _codex_settings()  # no parameters
+    def codex_settings() -> Settings:
+        return _codex_settings()
+
+    app.dependency_overrides[get_settings] = codex_settings
 
 
 def test_readyz_codex_503_when_binary_missing(client, app, monkeypatch):

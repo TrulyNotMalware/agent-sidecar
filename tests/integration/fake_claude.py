@@ -18,13 +18,14 @@ import os
 import signal
 import sys
 import time
+from pathlib import Path
 
-LOG = os.environ.get("FAKE_LOG", os.devnull)
+LOG = Path(os.environ.get("FAKE_LOG", os.devnull))
 SESSION_ID = "sess-fake-1"
 
 
 def log(msg: str) -> None:
-    with open(LOG, "a") as f:
+    with LOG.open("a", encoding="utf-8") as f:
         f.write(f"{time.time():.3f} pid={os.getpid()} {msg}\n")
 
 
@@ -43,7 +44,7 @@ def assistant(text: str) -> None:
     )
 
 
-def result(is_error: bool = False) -> None:
+def result(*, is_error: bool = False) -> None:
     out(
         {
             "type": "result",
@@ -69,7 +70,7 @@ def _on_term(*_args) -> None:
 
 def main() -> int:
     if "-v" in sys.argv or "--version" in sys.argv:
-        print("9.9.999 (Claude Code)")
+        print("9.9.999 (Claude Code)")  # noqa: T201 — what the CLI prints for --version
         return 0
 
     mode = os.environ.get("FAKE_CLAUDE_MODE", "normal")
@@ -77,14 +78,14 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_term)
     signal.alarm(int(os.environ.get("FAKE_MAX_LIFETIME", "120")))  # SIGALRM: not ignorable here
     log(f"start mode={mode} argv={json.dumps(sys.argv[1:])}")
-    log(f"cwd={json.dumps(os.getcwd())}")
+    log(f"cwd={json.dumps(str(Path.cwd()))}")
     for name in ("BEARER_SECRET", "OPENAI_API_KEY"):
         log(f"env {name}={'set' if os.environ.get(name) else 'unset'}")
     if "--mcp-config" in sys.argv:
         value = sys.argv[sys.argv.index("--mcp-config") + 1]
-        if os.path.isfile(value):
-            with open(value) as f:
-                log(f"mcp_config_file={json.dumps({'path': value, 'content': f.read()})}")
+        if Path(value).is_file():
+            content = Path(value).read_text(encoding="utf-8")
+            log(f"mcp_config_file={json.dumps({'path': value, 'content': content})}")
 
     # SDK handshake: one control request (initialize), then the user message.
     request = json.loads(sys.stdin.readline())

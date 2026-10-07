@@ -270,7 +270,7 @@ async def test_api_error_prose_is_not_streamed_as_text(monkeypatch):
     events = []
     with pytest.raises(ApiError) as exc_info:
         async for ev in claude_runner.run_turn(TurnSpec(prompt="hi"), cwd=Path("/tmp")):
-            events.append(ev)
+            events.append(ev)  # noqa: PERF401 — the raise lands mid-stream; what came before matters
 
     assert events == []
     assert exc_info.value.message == "API Error: 401 invalid x-api-key"

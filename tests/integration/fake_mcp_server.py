@@ -7,6 +7,7 @@ the CLI presented the turn token (X-Turn-Token) to the per-turn MCP server.
 """
 
 import sys
+from pathlib import Path
 
 import uvicorn
 from mcp.server.mcpserver import MCPServer
@@ -28,7 +29,7 @@ mcp_app = server.streamable_http_app(stateless_http=True, json_response=True)
 async def app(scope, receive, send):
     if scope["type"] == "http":
         auth = dict(scope["headers"]).get(b"authorization", b"").decode()
-        with open(AUTH_LOG, "a") as f:
+        with Path(AUTH_LOG).open("a", encoding="utf-8") as f:
             f.write(auth + "\n")
     await mcp_app(scope, receive, send)
 

@@ -237,13 +237,13 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncGenerator
             else:
                 yield _done_event(message, progress.final_text_parts)
 
+    # aclosing: closing this generator must close the SDK's query() (and so the CLI)
+    # right away, in this task — not whenever the GC gets to it. The SDK types query()
+    # as an AsyncIterator; it must really be a generator (nothing runs until iterated).
+    stream = query(prompt=prompt, options=options)
+    if not isinstance(stream, AsyncGenerator):
+        raise TypeError("claude_agent_sdk.query() no longer returns an async generator")
     try:
-        # aclosing: closing this generator must close the SDK's query() (and so
-        # the CLI) right away, in this task — not whenever the GC gets to it. The
-        # SDK types query() as an AsyncIterator; it must really be a generator.
-        stream = query(prompt=prompt, options=options)
-        if not isinstance(stream, AsyncGenerator):
-            raise TypeError("claude_agent_sdk.query() no longer returns an async generator")
         async with contextlib.aclosing(stream) as messages:
             async for message in messages:
                 if progress.result_error is None:
