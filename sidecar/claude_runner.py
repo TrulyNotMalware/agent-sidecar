@@ -1,7 +1,7 @@
 import collections
 import contextlib
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, Callable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +17,11 @@ from .events import (
     TurnSpec,
 )
 from .mcp import (
-    build_mcp_servers,
     mcp_tool_prefix,
+    per_turn_mcp_servers,
     private_file,
     private_mcp_config,
-    static_mcp_server_names,
+    static_mcp_servers,
 )
 from .observability.logging import get_logger
 
@@ -96,8 +96,9 @@ async def run_turn(
         options_kwargs["disallowed_tools"] = list(policy.disallowed_tools)
     if spec.resume_session_id:
         options_kwargs["resume"] = spec.resume_session_id
-    mcp_servers = build_mcp_servers(
-        static_config_path=spec.mcp_config_path,
+    static_servers = static_mcp_servers(spec.mcp_config_path)
+    merged_servers = per_turn_mcp_servers(
+        static_servers,
         server_name=spec.mcp_server_name,
         server_url=spec.mcp_server_url,
         turn_token=spec.turn_token,
@@ -105,11 +106,8 @@ async def run_turn(
     # Headless runs have nobody to approve tool prompts, so MCP servers the operator
     # configured must be pre-allowed ("mcp__<server>" covers every tool it exposes).
     # For the per-turn server, authorization is enforced server-side via the turn token.
-    approved = [
-        *policy.allowed_tools,
-        *map(mcp_tool_prefix, static_mcp_server_names(spec.mcp_config_path)),
-    ]
-    if spec.mcp_server_url is not None and spec.turn_token is not None:
+    approved = [*policy.allowed_tools, *map(mcp_tool_prefix, static_servers)]
+    if merged_servers is not None:
         approved.append(mcp_tool_prefix(spec.mcp_server_name))
     if approved:
         options_kwargs["allowed_tools"] = list(dict.fromkeys(approved))
@@ -120,14 +118,65 @@ async def run_turn(
             # 128 KiB per argument on Linux).
             path = cleanup.enter_context(private_file("system-prompt.md", spec.system_prompt))
             options_kwargs["system_prompt"] = {"type": "file", "path": str(path)}
-        if isinstance(mcp_servers, dict):
+        if merged_servers is not None:
             # Carries the turn token: pass a private file, never inline JSON on argv.
-            mcp_servers = str(cleanup.enter_context(private_mcp_config(mcp_servers)))
-        if mcp_servers is not None:
-            options_kwargs["mcp_servers"] = mcp_servers
+            mcp_path = cleanup.enter_context(private_mcp_config(merged_servers))
+            options_kwargs["mcp_servers"] = str(mcp_path)
+        elif spec.mcp_config_path is not None:
+            options_kwargs["mcp_servers"] = str(spec.mcp_config_path)
         async with contextlib.aclosing(_run(options_kwargs, prompt=spec.prompt)) as events:
             async for ev in events:
                 yield ev
+
+
+@dataclass(slots=True)
+class _Progress:
+    """What the SDK's messages have told us so far."""
+
+    final_text_parts: list[str] = field(default_factory=list)
+    pending_tool_names: dict[str, str] = field(default_factory=dict)  # tool_use_id → name
+    session_emitted: bool = False
+    # An error result is raised only after the SDK stream ends: raising inside the loop
+    # would aclose() the public query() at its yield, and its inner generator (which
+    # closes the CLI) would be finalized later in a detached task — releasing the
+    # turn's reservation while the CLI still runs.
+    result_error: ApiError | None = None
+
+
+def _stderr_sink() -> tuple[Callable[[str], None], collections.deque[str]]:
+    """A stderr callback for the SDK, and the tail of lines it keeps.
+
+    Setting a callback is what makes the SDK pipe the CLI's stderr at all (otherwise it
+    goes straight to the pod log, unscrubbed). Each line is logged — scrubbed, with the
+    turn's id — and the tail explains a failed CLI.
+    """
+    tail: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
+    lines = 0
+
+    def on_stderr(line: str) -> None:
+        nonlocal lines
+        line = line[:_STDERR_LINE_CHARS]
+        tail.append(line)
+        lines += 1
+        if lines <= _STDERR_LOG_LINES:
+            log.info("claude.stderr", line=line)
+        elif lines == _STDERR_LOG_LINES + 1:
+            log.warning("claude.stderr_not_logged", after_lines=_STDERR_LOG_LINES)
+
+    return on_stderr, tail
+
+
+def _done_event(message: object, final_text_parts: list[str]) -> DoneEvent:
+    """The terminal event for a successful result message."""
+    result = getattr(message, "result", None)
+    usage = _extract_usage(message)
+    return DoneEvent(
+        final_text=result if isinstance(result, str) and result else "".join(final_text_parts),
+        input_tokens=int(usage.get("input_tokens", 0) or 0),
+        output_tokens=int(usage.get("output_tokens", 0) or 0),
+        cache_read_input_tokens=usage.get("cache_read_input_tokens"),
+        cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
+    )
 
 
 async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncGenerator[RunnerEvent, None]:
@@ -135,6 +184,7 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncGenerator
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,
+        Message,
         ResultError,
         ResultMessage,
         TextBlock,
@@ -144,31 +194,46 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncGenerator
         query,
     )
 
-    # Setting a callback is what makes the SDK pipe the CLI's stderr at all (otherwise it
-    # goes straight to the pod log, unscrubbed). Each line is logged — scrubbed, with the
-    # turn's id — and the tail explains a failed CLI.
-    stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
-    stderr_lines = 0
-
-    def on_stderr(line: str) -> None:
-        nonlocal stderr_lines
-        line = line[:_STDERR_LINE_CHARS]
-        stderr_tail.append(line)
-        stderr_lines += 1
-        if stderr_lines <= _STDERR_LOG_LINES:
-            log.info("claude.stderr", line=line)
-        elif stderr_lines == _STDERR_LOG_LINES + 1:
-            log.warning("claude.stderr_not_logged", after_lines=_STDERR_LOG_LINES)
-
+    on_stderr, stderr_tail = _stderr_sink()
     options = ClaudeAgentOptions(**options_kwargs, stderr=on_stderr)
-    final_text_parts: list[str] = []
-    pending_tool_names: dict[str, str] = {}
-    session_emitted = False
-    # An error result is raised only after the SDK stream ends: raising inside the loop
-    # would aclose() the public query() at its yield, and its inner generator (which
-    # closes the CLI) would be finalized later in a detached task — releasing the
-    # turn's reservation while the CLI still runs.
-    result_error: ApiError | None = None
+    progress = _Progress()
+
+    def translate(message: Message) -> Iterator[RunnerEvent]:
+        """The runner events one SDK message amounts to; records what later ones need."""
+        if not progress.session_emitted and (sid := _extract_session_id(message)):
+            progress.session_emitted = True
+            yield SessionEvent(session_id=sid)
+
+        if isinstance(message, AssistantMessage):
+            if getattr(message, "error", None) is not None:
+                # An API failure the CLI reports as a synthetic assistant message. It is
+                # not the model's answer: the error result that follows becomes the
+                # terminal frame (scrubbed).
+                return
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    progress.final_text_parts.append(block.text)
+                    yield TextEvent(delta=block.text)
+                elif isinstance(block, ToolUseBlock):
+                    progress.pending_tool_names[block.id] = block.name
+                    yield ToolUseEvent(
+                        name=block.name, args=dict(block.input or {}), tool_use_id=block.id
+                    )
+        elif isinstance(message, UserMessage) and isinstance(message.content, list):
+            for block in message.content:
+                if isinstance(block, ToolResultBlock):
+                    yield ToolResultEvent(
+                        name=progress.pending_tool_names.get(block.tool_use_id, "unknown"),
+                        ok=not bool(getattr(block, "is_error", False)),
+                        tool_use_id=block.tool_use_id,
+                    )
+        elif isinstance(message, ResultMessage):
+            if message.is_error:
+                progress.result_error = _result_error(
+                    message.errors, message.result, message.subtype
+                )
+            else:
+                yield _done_event(message, progress.final_text_parts)
 
     try:
         # aclosing: closing this generator must close the SDK's query() (and so
@@ -179,69 +244,22 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncGenerator
             raise TypeError("claude_agent_sdk.query() no longer returns an async generator")
         async with contextlib.aclosing(stream) as messages:
             async for message in messages:
-                if result_error is not None:
-                    continue
-                if not session_emitted:
-                    sid = _extract_session_id(message)
-                    if sid:
-                        session_emitted = True
-                        yield SessionEvent(session_id=sid)
-
-                if isinstance(message, AssistantMessage):
-                    if getattr(message, "error", None) is not None:
-                        # An API failure the CLI reports as a synthetic assistant message.
-                        # It is not the model's answer: the error result that follows
-                        # becomes the terminal frame (scrubbed).
-                        continue
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            final_text_parts.append(block.text)
-                            yield TextEvent(delta=block.text)
-                        elif isinstance(block, ToolUseBlock):
-                            pending_tool_names[block.id] = block.name
-                            yield ToolUseEvent(
-                                name=block.name,
-                                args=dict(block.input or {}),
-                                tool_use_id=block.id,
-                            )
-                elif isinstance(message, UserMessage):
-                    if isinstance(message.content, list):
-                        for block in message.content:
-                            if isinstance(block, ToolResultBlock):
-                                tool_name = pending_tool_names.get(block.tool_use_id, "unknown")
-                                yield ToolResultEvent(
-                                    name=tool_name,
-                                    ok=not bool(getattr(block, "is_error", False)),
-                                    tool_use_id=block.tool_use_id,
-                                )
-                elif isinstance(message, ResultMessage):
-                    if message.is_error:
-                        result_error = _result_error(
-                            message.errors, message.result, message.subtype
-                        )
-                        continue
-                    final_text = getattr(message, "result", None) or "".join(final_text_parts)
-                    usage = _extract_usage(message)
-                    yield DoneEvent(
-                        final_text=final_text,
-                        input_tokens=int(usage.get("input_tokens", 0) or 0),
-                        output_tokens=int(usage.get("output_tokens", 0) or 0),
-                        cache_read_input_tokens=usage.get("cache_read_input_tokens"),
-                        cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
-                    )
+                if progress.result_error is None:
+                    for ev in translate(message):
+                        yield ev
     except ApiError:
         raise
     except Exception as exc:
         # After an error result the CLI exits non-zero and the SDK raises ResultError
         # restating it — also when no message came first (e.g. a resume refused during
         # the SDK's initialize).
-        if result_error is None and isinstance(exc, ResultError):
-            result_error = _result_error(exc.errors, exc.result, exc.subtype)
-        if result_error is None:
+        if progress.result_error is None and isinstance(exc, ResultError):
+            progress.result_error = _result_error(exc.errors, exc.result, exc.subtype)
+        if progress.result_error is None:
             raise _cli_failure(exc, "\n".join(stderr_tail)) from exc
-        raise result_error from exc
-    if result_error is not None:
-        raise result_error
+        raise progress.result_error from exc
+    if progress.result_error is not None:
+        raise progress.result_error
 
 
 def _result_error(errors: list[str] | None, result: str | None, subtype: str | None) -> ApiError:

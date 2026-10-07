@@ -3,7 +3,7 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -29,48 +29,48 @@ def mcp_tool_name(server_name: str, tool_name: str) -> str:
     return f"{mcp_tool_prefix(server_name)}__{_NOT_IN_TOOL_NAME.sub('_', tool_name)}"
 
 
-def static_mcp_server_names(static_config_path: Path | None) -> list[str]:
-    """Server names in the operator's mcp.json (empty if unset or unreadable)."""
+def static_mcp_servers(static_config_path: Path | None) -> dict[str, Any]:
+    """The `mcpServers` object of the operator's mcp.json.
+
+    Empty when unset, and empty with a warning when the file is unreadable or not
+    shaped like an mcp.json: a broken static config must not fail every turn.
+    """
     if static_config_path is None:
-        return []
+        return {}
     try:
         parsed = json.loads(static_config_path.read_text(encoding="utf-8"))
-        servers = parsed.get("mcpServers") or {}
-        if not isinstance(servers, dict):
-            raise TypeError("mcpServers must be an object")
-        return [str(name) for name in servers]
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:  # missing, unreadable, not JSON
         log.warning("mcp.static_config_unreadable", error_type=type(exc).__name__)
-        return []
+        return {}
+    servers = (parsed.get("mcpServers") or {}) if isinstance(parsed, dict) else None
+    if not isinstance(servers, dict):
+        log.warning("mcp.static_config_unreadable", error_type="TypeError")
+        return {}
+    return servers
 
 
-def build_mcp_servers(
+def static_mcp_server_names(static_config_path: Path | None) -> list[str]:
+    """Server names in the operator's mcp.json (empty if unset or unreadable)."""
+    return [str(name) for name in static_mcp_servers(static_config_path)]
+
+
+def per_turn_mcp_servers(
+    static_servers: Mapping[str, Any],
     *,
-    static_config_path: Path | None,
     server_name: str,
     server_url: str | None,
     turn_token: str | None,
-) -> dict[str, Any] | str | None:
-    """Resolve the `mcp_servers` value handed to the Claude Agent SDK.
+) -> dict[str, Any] | None:
+    """The `mcpServers` of a turn that reaches a per-turn MCP server, else None.
 
-    Without a per-turn scoped token (or a configured server url) this preserves
-    the legacy behaviour byte-for-byte: the static `mcp.json` path passthrough,
-    or `None` when unset. With both present it merges the static servers (if any)
-    with a per-turn streamable-HTTP entry carrying the token as a bearer; the
-    per-turn entry wins on a name collision.
+    With a server url and a turn token: the operator's static servers plus a
+    streamable-HTTP entry carrying the token as a bearer; the per-turn entry wins on
+    a name collision. Without both there is nothing to merge, and the caller passes
+    the static mcp.json to the CLI as a path, unchanged.
     """
     if server_url is None or turn_token is None:
-        return str(static_config_path) if static_config_path else None
-
-    servers: dict[str, Any] = {}
-    if static_config_path is not None:
-        try:
-            parsed = json.loads(static_config_path.read_text(encoding="utf-8"))
-            servers = dict(parsed.get("mcpServers") or {})
-        except Exception as exc:  # noqa: BLE001
-            log.warning("mcp.static_config_unreadable", error_type=type(exc).__name__)
-            servers = {}
-
+        return None
+    servers = dict(static_servers)
     servers[server_name] = {
         "type": "http",
         "url": server_url,
