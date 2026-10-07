@@ -22,7 +22,7 @@ import contextlib
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -90,7 +90,7 @@ class Turn:
     def start(
         self,
         open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],
-        workspace: Callable[[], AbstractContextManager[Path]],
+        workspace: Callable[[], AbstractAsyncContextManager[Path]],
     ) -> None:
         """Reserve the turn's admission slots and start its task.
 
@@ -117,7 +117,7 @@ class Turn:
     async def _main(
         self,
         open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],
-        workspace: Callable[[], AbstractContextManager[Path]],
+        workspace: Callable[[], AbstractAsyncContextManager[Path]],
     ) -> None:
         self._started = True
         started = time.perf_counter()
@@ -157,10 +157,10 @@ class Turn:
             # Our own stop() (or drain's force-cancel). The runner has been closed on
             # the way out; the outcome is carried by TurnStopped / TurnEnded.
             error = exc
-        except Exception as exc:  # noqa: BLE001 — reported to the client as TurnEnded
+        except Exception as exc:  # reported to the client as TurnEnded
             error = exc
             if not isinstance(exc, ApiError):  # a bug or an environment problem
-                log.error("turn.internal_error", error_type=type(exc).__name__, exc_info=exc)
+                log.exception("turn.internal_error", error_type=type(exc).__name__)
         finally:
             deadline.cancel()
             # Released before TurnEnded is queued: once the stream has read it (and
@@ -182,16 +182,18 @@ class Turn:
     async def _run(
         self,
         open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],
-        workspace: Callable[[], AbstractContextManager[Path]],
+        workspace: Callable[[], AbstractAsyncContextManager[Path]],
         span: Span,
     ) -> None:
-        with workspace() as cwd:
-            # aclosing: the runner (and the CLI it drives) is fully closed before the
-            # workspace and the admission reservation are released.
-            async with contextlib.aclosing(open_runner(cwd)) as runner:
-                async for ev in runner:
-                    _instrument(ev, span)
-                    self.events.put_nowait(ev)
+        # aclosing: the runner (and the CLI it drives) is fully closed before the
+        # workspace and the admission reservation are released.
+        async with (
+            workspace() as cwd,
+            contextlib.aclosing(open_runner(cwd)) as runner,
+        ):
+            async for ev in runner:
+                _instrument(ev, span)
+                self.events.put_nowait(ev)
 
 
 def _instrument(ev: RunnerEvent, span: Span) -> None:

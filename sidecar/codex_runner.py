@@ -59,7 +59,7 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
     is available afterwards.
     """
     path = codex_auth_file(auth_path)
-    if path.exists():
+    if await asyncio.to_thread(path.exists):
         return True
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -81,7 +81,7 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
     except TimeoutError:
         await _terminate(proc)
         return False
-    return proc.returncode == 0 and path.exists()
+    return proc.returncode == 0 and await asyncio.to_thread(path.exists)
 
 
 # codex and the shell commands the model runs inherit only these. The sidecar's own

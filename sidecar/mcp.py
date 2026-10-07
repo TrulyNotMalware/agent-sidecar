@@ -1,10 +1,11 @@
+import asyncio
 import json
 import os
 import re
 import shutil
 import tempfile
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -79,8 +80,8 @@ def per_turn_mcp_servers(
     return servers
 
 
-@contextmanager
-def private_mcp_config(servers: dict[str, Any]) -> Iterator[Path]:
+@asynccontextmanager
+async def private_mcp_config(servers: dict[str, Any]) -> AsyncIterator[Path]:
     """Write `servers` as an mcp.json readable only by this user; delete it on exit.
 
     The SDK serialises a dict `mcp_servers` into `--mcp-config '<json>'` on the CLI's
@@ -88,12 +89,12 @@ def private_mcp_config(servers: dict[str, Any]) -> Iterator[Path]:
     SDK a file path keeps it off argv. The file lives in a fresh 0700 directory
     outside the turn workspace, so the agent's cwd-scoped tools do not list it.
     """
-    with private_file("mcp.json", json.dumps({"mcpServers": servers})) as path:
+    async with private_file("mcp.json", json.dumps({"mcpServers": servers})) as path:
         yield path
 
 
-@contextmanager
-def private_file(name: str, content: str) -> Iterator[Path]:
+@asynccontextmanager
+async def private_file(name: str, content: str) -> AsyncIterator[Path]:
     """Write `content` to a file only this user can read; delete it on exit.
 
     For what must not go on a CLI's argv, where every process can read it via `ps`
@@ -101,12 +102,15 @@ def private_file(name: str, content: str) -> Iterator[Path]:
     directory outside the turn workspace, so the agent's cwd-scoped tools do not
     list it.
     """
-    directory = Path(tempfile.mkdtemp(prefix="claude-sidecar-"))
-    path = directory / name
+    directory = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="claude-sidecar-"))
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        yield path
+        yield await asyncio.to_thread(_write_private, directory / name, content)
     finally:
-        shutil.rmtree(directory, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
+
+
+def _write_private(path: Path, content: str) -> Path:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+    return path

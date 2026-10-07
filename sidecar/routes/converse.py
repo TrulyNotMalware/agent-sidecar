@@ -4,7 +4,7 @@ import functools
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -75,9 +75,22 @@ async def converse(
         prompt=body.prompt,
     )
 
-    rejected = _preflight_resume(body, settings)
+    rejected = await _preflight_resume(body, settings)
     if rejected is not None:
         return _reject(rejected, turn_id)
+    try:
+        # CLAUDE.md is re-read on every request (hot reload), off the event loop.
+        system_prompt = await asyncio.to_thread(
+            _merge_system_prompt,
+            base_path=settings.claude_md_path,
+            system_prompt=body.system_prompt,
+            append_system_prompt=body.append_system_prompt,
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        log.exception("system_prompt.unreadable", error_type=type(exc).__name__)
+        return _reject(
+            ApiError(ErrorCode.INTERNAL, "could not read the base system prompt"), turn_id
+        )
 
     span_attributes: dict[str, str | bool] = {
         "session.key": body.session_key,
@@ -100,11 +113,7 @@ async def converse(
     def open_runner(cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
         spec = TurnSpec(
             prompt=body.prompt,
-            system_prompt=_merge_system_prompt(
-                base_path=settings.claude_md_path,
-                system_prompt=body.system_prompt,
-                append_system_prompt=body.append_system_prompt,
-            ),
+            system_prompt=system_prompt,
             resume_session_id=body.session_id,
             mcp_config_path=settings.mcp_config_path,
             mcp_server_url=settings.mcp_server_url,
@@ -117,11 +126,15 @@ async def converse(
             return events  # only codex resumes are bound to recorded ids
         return _remembering_session_ids(events, body.session_key, settings.workspace_root)
 
-    def workspace() -> AbstractContextManager[Path]:
+    @asynccontextmanager
+    async def workspace() -> AsyncIterator[Path]:
         if body.mode == "stateless":
             # Under WORKSPACE_ROOT (a volume in k8s), not the container's /tmp.
-            return stateless_workspace(parent=settings.workspace_root / ".stateless")
-        return nullcontext(workspace_for(body.session_key, root=settings.workspace_root))
+            async with stateless_workspace(parent=settings.workspace_root / ".stateless") as ws:
+                yield ws
+        else:
+            root = settings.workspace_root
+            yield await asyncio.to_thread(workspace_for, body.session_key, root=root)
 
     state = _StreamState()
 
@@ -153,16 +166,18 @@ async def converse(
     return response
 
 
-def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | None:
+async def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | None:
     """codex resolves a thread id across *all* sessions in CODEX_HOME, so a resume is
     only allowed for ids this sessionKey was issued. (claude scopes transcripts by the
     workspace cwd, which is already per-sessionKey.)"""
     if settings.provider != "codex" or body.session_id is None:
         return None
     try:
-        known = known_session_ids(body.session_key, root=settings.workspace_root)
+        known = await asyncio.to_thread(
+            known_session_ids, body.session_key, root=settings.workspace_root
+        )
     except (OSError, UnicodeDecodeError) as exc:
-        log.error("session_id.record_unreadable", error_type=type(exc).__name__, exc_info=exc)
+        log.exception("session_id.record_unreadable", error_type=type(exc).__name__)
         return ApiError(ErrorCode.INTERNAL, "could not read this sessionKey's session record")
     if body.session_id not in known:
         return ApiError(ErrorCode.BAD_REQUEST, "sessionId was not issued for this sessionKey")
@@ -176,7 +191,9 @@ async def _remembering_session_ids(
         async for ev in runner:
             if isinstance(ev, SessionEvent):
                 try:
-                    remember_session_id(session_key, ev.session_id, root=root)
+                    await asyncio.to_thread(
+                        remember_session_id, session_key, ev.session_id, root=root
+                    )
                 except OSError as exc:
                     # The turn itself is fine; only a later resume of this id gets 400.
                     log.warning("session_id.not_recorded", error_type=type(exc).__name__)

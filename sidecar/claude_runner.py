@@ -1,3 +1,4 @@
+import asyncio
 import collections
 import contextlib
 from collections.abc import AsyncGenerator, Callable, Iterator
@@ -96,7 +97,7 @@ async def run_turn(
         options_kwargs["disallowed_tools"] = list(policy.disallowed_tools)
     if spec.resume_session_id:
         options_kwargs["resume"] = spec.resume_session_id
-    static_servers = static_mcp_servers(spec.mcp_config_path)
+    static_servers = await asyncio.to_thread(static_mcp_servers, spec.mcp_config_path)
     merged_servers = per_turn_mcp_servers(
         static_servers,
         server_name=spec.mcp_server_name,
@@ -112,15 +113,16 @@ async def run_turn(
     if approved:
         options_kwargs["allowed_tools"] = list(dict.fromkeys(approved))
 
-    with contextlib.ExitStack() as cleanup:
+    async with contextlib.AsyncExitStack() as cleanup:
         if spec.system_prompt is not None:
             # A file, not `--system-prompt <text>` on argv (visible via `ps`, capped at
             # 128 KiB per argument on Linux).
-            path = cleanup.enter_context(private_file("system-prompt.md", spec.system_prompt))
+            prompt_file = private_file("system-prompt.md", spec.system_prompt)
+            path = await cleanup.enter_async_context(prompt_file)
             options_kwargs["system_prompt"] = {"type": "file", "path": str(path)}
         if merged_servers is not None:
             # Carries the turn token: pass a private file, never inline JSON on argv.
-            mcp_path = cleanup.enter_context(private_mcp_config(merged_servers))
+            mcp_path = await cleanup.enter_async_context(private_mcp_config(merged_servers))
             options_kwargs["mcp_servers"] = str(mcp_path)
         elif spec.mcp_config_path is not None:
             options_kwargs["mcp_servers"] = str(spec.mcp_config_path)

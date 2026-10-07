@@ -338,7 +338,7 @@ def test_claude_policy_defaults():
     assert policy.setting_sources == ()
 
 
-def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path):
+async def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path):
     from sidecar.config import Settings
     from sidecar.models import ConverseRequest
     from sidecar.routes.converse import _preflight_resume
@@ -349,15 +349,15 @@ def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path):
     claude = Settings(_env_file=None, bearer_secret="x", workspace_root=tmp_path)
     body = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": sid})
 
-    rejected = _preflight_resume(body, codex)
+    rejected = await _preflight_resume(body, codex)
     assert rejected is not None and rejected.status_code == 400
-    assert _preflight_resume(body, claude) is None  # claude scopes transcripts by cwd
+    assert await _preflight_resume(body, claude) is None  # claude scopes transcripts by cwd
 
     remember_session_id("k", sid, root=tmp_path)
-    assert _preflight_resume(body, codex) is None
+    assert await _preflight_resume(body, codex) is None
 
 
-def test_an_unreadable_session_record_is_a_json_500(tmp_path):
+async def test_an_unreadable_session_record_is_a_json_500(tmp_path):
     import hashlib
 
     from sidecar.config import Settings
@@ -370,7 +370,7 @@ def test_an_unreadable_session_record_is_a_json_500(tmp_path):
     sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
     body = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": sid})
 
-    rejected = _preflight_resume(body, codex)
+    rejected = await _preflight_resume(body, codex)
 
     assert rejected is not None
     assert rejected.status_code == 500

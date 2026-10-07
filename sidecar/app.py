@@ -1,3 +1,4 @@
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from .admission import Admission
 from .codex_runner import ensure_codex_auth
-from .config import get_settings
+from .config import Settings, get_settings
 from .errors import ApiError, ErrorCode
 from .mcp import static_mcp_server_names
 from .observability.logging import configure_logging, get_logger
@@ -42,6 +43,24 @@ def _custom_header_values() -> list[str]:
     return [line.partition(":")[2].strip() for line in raw.splitlines() if ":" in line]
 
 
+def _prepare_filesystem(settings: Settings) -> None:
+    """Startup work that touches the disk; runs in a thread before the first request."""
+    # Fail at startup, not on the first request, if the workspace root is unusable.
+    settings.workspace_root.mkdir(parents=True, exist_ok=True)
+    # A volume mounted over the image's state dir hides the directories the image
+    # created, and codex refuses to run with a CODEX_HOME that does not exist.
+    for var in ("CODEX_HOME", "CLAUDE_CONFIG_DIR"):
+        if os.environ.get(var):
+            Path(os.environ[var]).mkdir(parents=True, exist_ok=True)
+    if settings.mcp_config_path is not None and not settings.mcp_config_path.is_file():
+        log.warning("mcp.config_missing", path=str(settings.mcp_config_path))
+    elif settings.provider == "codex" and (
+        names := static_mcp_server_names(settings.mcp_config_path)
+    ):
+        # Static MCP servers are claude-only; codex reads its own config.toml.
+        log.warning("mcp.static_config_ignored", provider="codex", servers=names)
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(level=settings.log_level, redact=not settings.log_prompts)
@@ -58,22 +77,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # Fail at startup, not on the first request, if the workspace root is unusable.
-        settings.workspace_root.mkdir(parents=True, exist_ok=True)
-        # A volume mounted over the image's state dir hides the directories the image
-        # created, and codex refuses to run with a CODEX_HOME that does not exist.
-        for var in ("CODEX_HOME", "CLAUDE_CONFIG_DIR"):
-            if os.environ.get(var):
-                Path(os.environ[var]).mkdir(parents=True, exist_ok=True)
-        if settings.mcp_config_path is not None and not settings.mcp_config_path.is_file():
-            log.warning("mcp.config_missing", path=str(settings.mcp_config_path))
-        elif settings.provider == "codex" and static_mcp_server_names(settings.mcp_config_path):
-            # Static MCP servers are claude-only; codex reads its own config.toml.
-            log.warning(
-                "mcp.static_config_ignored",
-                provider="codex",
-                servers=static_mcp_server_names(settings.mcp_config_path),
-            )
+        await asyncio.to_thread(_prepare_filesystem, settings)
         if settings.provider == "codex":
             authed = await ensure_codex_auth(settings.codex_auth_path)
             log.info("codex.auth", materialized=authed)

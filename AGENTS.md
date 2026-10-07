@@ -485,8 +485,8 @@ turn.stop("cancelled")               # first call wins; queues TurnStopped, canc
 ```python
 workspace_for(session_key, root=settings.workspace_root)  # → Path (deterministic SHA-256 shard)
 
-with stateless_workspace(parent=settings.workspace_root / ".stateless") as ws:
-    ...  # tempdir, auto-deleted on exit
+async with stateless_workspace(parent=settings.workspace_root / ".stateless") as ws:
+    ...  # tempdir, removed (in a thread) on exit
 ```
 
 ---
