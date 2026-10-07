@@ -50,7 +50,9 @@ jobs:
         run: pip install -c constraints.txt -e '.[dev]'
 
       - name: Lint
-        run: ruff check .
+        run: |
+          ruff format --check .
+          ruff check .
 
       - name: Unit tests
         run: pytest tests/ -m "not integration" -q

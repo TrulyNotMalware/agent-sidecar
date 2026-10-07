@@ -65,12 +65,27 @@ def fakes(tmp_path):
         record = tmp_path / f"{kind}-requests"
         auth_log = tmp_path / "mcp-auth.log"
         auth_log.touch()
-        procs.append(_serve([str(HERE / "fake_model_apis.py"), kind, str(api_port), str(record)],
-                            api_port, tmp_path / f"{kind}-api.log", env))
-        procs.append(_serve([str(HERE / "fake_mcp_server.py"), str(mcp_port), str(auth_log)],
-                            mcp_port, tmp_path / "mcp.log"))
-        return {"api": f"http://127.0.0.1:{api_port}", "mcp": f"http://127.0.0.1:{mcp_port}/mcp",
-                "record": record, "auth_log": auth_log}
+        procs.append(
+            _serve(
+                [str(HERE / "fake_model_apis.py"), kind, str(api_port), str(record)],
+                api_port,
+                tmp_path / f"{kind}-api.log",
+                env,
+            )
+        )
+        procs.append(
+            _serve(
+                [str(HERE / "fake_mcp_server.py"), str(mcp_port), str(auth_log)],
+                mcp_port,
+                tmp_path / "mcp.log",
+            )
+        )
+        return {
+            "api": f"http://127.0.0.1:{api_port}",
+            "mcp": f"http://127.0.0.1:{mcp_port}/mcp",
+            "record": record,
+            "auth_log": auth_log,
+        }
 
     yield start
     for p in procs:
@@ -97,14 +112,22 @@ def _claude(start_sidecar, fakes, **env):
 def test_claude_turn_reaches_the_per_turn_mcp_server(start_sidecar, fakes):
     srv, f = _claude(start_sidecar, fakes)
 
-    r = converse(srv.port, "real-claude", headers={"X-Turn-Token": TURN_TOKEN},
-                 body={"systemPrompt": SYSTEM_MARK}, read_timeout=60)
+    r = converse(
+        srv.port,
+        "real-claude",
+        headers={"X-Turn-Token": TURN_TOKEN},
+        body={"systemPrompt": SYSTEM_MARK},
+        read_timeout=60,
+    )
 
     assert r.event_names == ["session", "text", "tool_use", "tool_result", "text", "done"]
     tool_use, tool_result, done = r.events[2][1], r.events[3][1], r.events[-1][1]
     assert tool_use["name"] == "mcp__domain-tools__echo"
-    assert tool_result == {"name": "mcp__domain-tools__echo", "ok": True,
-                           "toolUseId": tool_use["toolUseId"]}
+    assert tool_result == {
+        "name": "mcp__domain-tools__echo",
+        "ok": True,
+        "toolUseId": tool_use["toolUseId"],
+    }
     assert done["finalText"] == "final answer"  # the last message only, not the preamble
     assert done["usage"]["cacheReadInputTokens"] == 14  # two model calls x 7
     assert f"Bearer {TURN_TOKEN}" in f["auth_log"].read_text()
@@ -163,8 +186,13 @@ def _codex(start_sidecar, fakes, tmp_path, config: str = "", **env):
 def test_codex_turn_reaches_the_per_turn_mcp_server(start_sidecar, fakes, tmp_path):
     srv, f = _codex(start_sidecar, fakes, tmp_path, FAKE_OPENAI_CALL_ECHO="1")
 
-    r = converse(srv.port, "real-codex", prompt="the prompt",
-                 headers={"X-Turn-Token": TURN_TOKEN}, body={"systemPrompt": SYSTEM_MARK})
+    r = converse(
+        srv.port,
+        "real-codex",
+        prompt="the prompt",
+        headers={"X-Turn-Token": TURN_TOKEN},
+        body={"systemPrompt": SYSTEM_MARK},
+    )
 
     assert r.event_names == ["session", "text", "tool_use", "tool_result", "text", "done"]
     tool_use, done = r.events[2][1], r.events[-1][1]
@@ -186,8 +214,9 @@ def test_codex_resume_does_not_repeat_the_system_prompt(start_sidecar, fakes, tm
 
     first = converse(srv.port, "real-codex-resume", body={"systemPrompt": SYSTEM_MARK})
     session_id = first.events[0][1]["sessionId"]
-    second = converse(srv.port, "real-codex-resume",
-                      body={"systemPrompt": SYSTEM_MARK, "sessionId": session_id})
+    second = converse(
+        srv.port, "real-codex-resume", body={"systemPrompt": SYSTEM_MARK, "sessionId": session_id}
+    )
 
     assert second.event_names[-1] == "done"
     last = _requests(f["record"])[-1]
@@ -199,21 +228,25 @@ def test_codex_system_prompt_survives_compaction_on_a_resumed_turn(start_sidecar
     # On auto-compaction codex rebuilds the thread from the developer instructions it
     # was started with *this* time — so a resume must pass them again.
     srv, f = _codex(
-        start_sidecar, fakes, tmp_path,
+        start_sidecar,
+        fakes,
+        tmp_path,
         config="model_auto_compact_token_limit = 5000\nmodel_context_window = 1000000\n",
         FAKE_OPENAI_COMPACT_ON="COMPACT-NOW",
     )
 
     first = converse(srv.port, "real-codex-compact", body={"systemPrompt": SYSTEM_MARK})
     session_id = first.events[0][1]["sessionId"]
-    second = converse(srv.port, "real-codex-compact", prompt="COMPACT-NOW",
-                      body={"systemPrompt": SYSTEM_MARK, "sessionId": session_id})
+    second = converse(
+        srv.port,
+        "real-codex-compact",
+        prompt="COMPACT-NOW",
+        body={"systemPrompt": SYSTEM_MARK, "sessionId": session_id},
+    )
 
     assert second.event_names[-1] == "done"
     requests = _requests(f["record"])
-    precondition(
-        any("COMPACTION" in json.dumps(r["input"]) for r in requests), "codex compacted"
-    )
+    precondition(any("COMPACTION" in json.dumps(r["input"]) for r in requests), "codex compacted")
     after = requests[-1]["input"]
     assert any(i.get("role") == "developer" and SYSTEM_MARK in json.dumps(i) for i in after)
     assert json.dumps(after).count(SYSTEM_MARK) == 1

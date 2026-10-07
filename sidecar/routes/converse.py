@@ -348,25 +348,34 @@ def _to_sse(ev: RunnerEvent) -> dict[str, str]:
     if isinstance(ev, TextEvent):
         return sse_event("text", {"delta": ev.delta})
     if isinstance(ev, ToolUseEvent):
-        return sse_event("tool_use", {
-            "name": ev.name,
-            "args": ev.args,
-            "toolUseId": ev.tool_use_id,
-        })
-    if isinstance(ev, ToolResultEvent):
-        return sse_event("tool_result", {
-            "name": ev.name,
-            "ok": ev.ok,
-            "toolUseId": ev.tool_use_id,
-        })
-    if isinstance(ev, DoneEvent):
-        return sse_event("done", {
-            "finalText": ev.final_text,
-            "usage": {
-                "inputTokens": ev.input_tokens,
-                "outputTokens": ev.output_tokens,
-                "cacheReadInputTokens": ev.cache_read_input_tokens,
-                "cacheCreationInputTokens": ev.cache_creation_input_tokens,
+        return sse_event(
+            "tool_use",
+            {
+                "name": ev.name,
+                "args": ev.args,
+                "toolUseId": ev.tool_use_id,
             },
-        })
+        )
+    if isinstance(ev, ToolResultEvent):
+        return sse_event(
+            "tool_result",
+            {
+                "name": ev.name,
+                "ok": ev.ok,
+                "toolUseId": ev.tool_use_id,
+            },
+        )
+    if isinstance(ev, DoneEvent):
+        return sse_event(
+            "done",
+            {
+                "finalText": ev.final_text,
+                "usage": {
+                    "inputTokens": ev.input_tokens,
+                    "outputTokens": ev.output_tokens,
+                    "cacheReadInputTokens": ev.cache_read_input_tokens,
+                    "cacheCreationInputTokens": ev.cache_creation_input_tokens,
+                },
+            },
+        )
     raise TypeError(f"unknown runner event: {type(ev).__name__}")

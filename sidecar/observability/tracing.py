@@ -25,4 +25,5 @@ def configure_tracing(app: Any, *, service_name: str) -> None:
 
 def get_tracer(name: str):
     from opentelemetry import trace
+
     return trace.get_tracer(name)

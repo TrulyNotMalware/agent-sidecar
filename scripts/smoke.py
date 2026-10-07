@@ -84,8 +84,7 @@ def _apply_auth_mode() -> str | None:
         os.environ.pop("ANTHROPIC_API_KEY", None)
         if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
             return (
-                "AUTH_MODE=subscription requires CLAUDE_CODE_OAUTH_TOKEN "
-                "(run `claude setup-token`)"
+                "AUTH_MODE=subscription requires CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token`)"
             )
     return None
 

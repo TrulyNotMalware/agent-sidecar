@@ -75,9 +75,9 @@ def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
             PORT=str(port),
             WORKSPACE_ROOT=str(workspace),
             PROVIDER=provider,
-            FAKE_CLI="" if real_cli else str(
-                _fake_cli_wrapper(bin_dir, "claude", "fake_claude.py")
-            ),
+            FAKE_CLI=""
+            if real_cli
+            else str(_fake_cli_wrapper(bin_dir, "claude", "fake_claude.py")),
             FAKE_LOG=str(fake_log),
             FAKE_CLAUDE_MODE=mode,
             FAKE_CODEX_MODE=mode,

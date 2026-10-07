@@ -213,8 +213,11 @@ async def test_cache_tokens_are_counted_too():
 
     before = {k: count(k) for k in ("input", "cache_read", "cache_creation")}
     done = DoneEvent(
-        final_text="ok", input_tokens=5, output_tokens=1,
-        cache_read_input_tokens=7, cache_creation_input_tokens=None,
+        final_text="ok",
+        input_tokens=5,
+        output_tokens=1,
+        cache_read_input_tokens=7,
+        cache_creation_input_tokens=None,
     )
 
     async def runner(_cwd):

@@ -150,8 +150,14 @@ async def _collect(
 async def test_maps_full_event_sequence(monkeypatch):
     # The shapes codex 0.159 emits (recorded against a fake model API).
     tool_call = {
-        "id": "item_1", "type": "mcp_tool_call", "server": "domain-tools", "tool": "echo",
-        "arguments": {"text": "hi"}, "result": None, "error": None, "status": "in_progress",
+        "id": "item_1",
+        "type": "mcp_tool_call",
+        "server": "domain-tools",
+        "tool": "echo",
+        "arguments": {"text": "hi"},
+        "result": None,
+        "error": None,
+        "status": "in_progress",
     }
     lines = [
         _line({"type": "thread.started", "thread_id": "t-1"}),
@@ -160,11 +166,18 @@ async def test_maps_full_event_sequence(monkeypatch):
         _line({"type": "item.started", "item": tool_call}),
         _line({"type": "item.completed", "item": {**tool_call, "status": "completed"}}),
         _line({"type": "item.completed", "item": {"type": "agent_message", "text": "final"}}),
-        _line({
-            "type": "turn.completed",
-            "usage": {"input_tokens": 20, "cached_input_tokens": 4, "cache_write_input_tokens": 3,
-                      "output_tokens": 6, "reasoning_output_tokens": 0},
-        }),
+        _line(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 20,
+                    "cached_input_tokens": 4,
+                    "cache_write_input_tokens": 3,
+                    "output_tokens": 6,
+                    "reasoning_output_tokens": 0,
+                },
+            }
+        ),
     ]
     calls = _install(monkeypatch, FakeProc(lines))
 
@@ -289,14 +302,18 @@ async def test_ephemeral_for_stateless_turns(monkeypatch):
 
 async def test_command_execution_maps_to_shell_events(monkeypatch):
     lines = [
-        _line({
-            "type": "item.started",
-            "item": {"type": "command_execution", "id": "c-1", "command": "ls -la"},
-        }),
-        _line({
-            "type": "item.completed",
-            "item": {"type": "command_execution", "id": "c-1", "exit_code": 1},
-        }),
+        _line(
+            {
+                "type": "item.started",
+                "item": {"type": "command_execution", "id": "c-1", "command": "ls -la"},
+            }
+        ),
+        _line(
+            {
+                "type": "item.completed",
+                "item": {"type": "command_execution", "id": "c-1", "exit_code": 1},
+            }
+        ),
         COMPLETED,
     ]
     _install(monkeypatch, FakeProc(lines))
@@ -462,10 +479,7 @@ async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
 
     assert events[-1].__class__ is DoneEvent
     assert 'mcp_servers.domain-tools.url="https://app.example/mcp"' in calls["cmd"]
-    assert (
-        'mcp_servers.domain-tools.bearer_token_env_var="SIDECAR_MCP_TURN_TOKEN"'
-        in calls["cmd"]
-    )
+    assert 'mcp_servers.domain-tools.bearer_token_env_var="SIDECAR_MCP_TURN_TOKEN"' in calls["cmd"]
     assert 'mcp_servers.domain-tools.default_tools_approval_mode="approve"' in calls["cmd"]
     assert calls["kwargs"]["env"]["SIDECAR_MCP_TURN_TOKEN"] == "tok-xyz"
 
@@ -563,7 +577,10 @@ async def test_closing_the_runner_early_terminates_the_process(monkeypatch):
     _install(monkeypatch, proc)
 
     agen = run_turn(
-        prompt="hi", cwd=Path("/tmp"), system_prompt=None, resume_session_id=None,
+        prompt="hi",
+        cwd=Path("/tmp"),
+        system_prompt=None,
+        resume_session_id=None,
         mcp_config_path=None,
     )
     assert await anext(agen) == SessionEvent(session_id="t-1")

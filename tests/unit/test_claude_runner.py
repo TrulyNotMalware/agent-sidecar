@@ -169,8 +169,13 @@ def _error_result(**fields):
     from claude_agent_sdk import ResultMessage
 
     return ResultMessage(
-        subtype=fields.pop("subtype", "success"), duration_ms=1, duration_api_ms=1,
-        is_error=True, num_turns=1, session_id="s", **fields,
+        subtype=fields.pop("subtype", "success"),
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=True,
+        num_turns=1,
+        session_id="s",
+        **fields,
     )
 
 
@@ -250,7 +255,8 @@ async def test_api_error_prose_is_not_streamed_as_text(monkeypatch):
     from claude_agent_sdk import AssistantMessage, ResultError, TextBlock
 
     synthetic = AssistantMessage(
-        content=[TextBlock(text="API Error: 401 invalid x-api-key")], model="x",
+        content=[TextBlock(text="API Error: 401 invalid x-api-key")],
+        model="x",
         error="authentication_failed",
     )
     data = {"subtype": "success", "result": "API Error: 401 invalid x-api-key"}
@@ -259,7 +265,10 @@ async def test_api_error_prose_is_not_streamed_as_text(monkeypatch):
     events = []
     with pytest.raises(ApiError) as exc_info:
         async for ev in claude_runner.run_turn(
-            prompt="hi", cwd=Path("/tmp"), system_prompt=None, resume_session_id=None,
+            prompt="hi",
+            cwd=Path("/tmp"),
+            system_prompt=None,
+            resume_session_id=None,
             mcp_config_path=None,
         ):
             events.append(ev)

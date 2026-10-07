@@ -52,4 +52,3 @@ class ConverseRequest(BaseModel):
 class HealthStatus(BaseModel):
     status: Literal["ok", "degraded", "error"]
     detail: str | None = None
-

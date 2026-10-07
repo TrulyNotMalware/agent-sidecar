@@ -37,12 +37,16 @@ _count = 0
 _compacted = False
 
 USAGE_ANTHROPIC = {
-    "input_tokens": 10, "output_tokens": 5,
-    "cache_read_input_tokens": 7, "cache_creation_input_tokens": 3,
+    "input_tokens": 10,
+    "output_tokens": 5,
+    "cache_read_input_tokens": 7,
+    "cache_creation_input_tokens": 3,
 }
 USAGE_OPENAI = {
-    "input_tokens": 10, "input_tokens_details": {"cached_tokens": 4},
-    "output_tokens": 5, "output_tokens_details": {"reasoning_tokens": 0},
+    "input_tokens": 10,
+    "input_tokens_details": {"cached_tokens": 4},
+    "output_tokens": 5,
+    "output_tokens_details": {"reasoning_tokens": 0},
     "total_tokens": 15,
 }
 
@@ -59,6 +63,7 @@ def _sse(name: str, data: dict) -> str:
 
 
 # --- anthropic (Messages API) --------------------------------------------------------
+
 
 def _anthropic_blocks(body: dict) -> tuple[list[dict], str]:
     tools = [t.get("name", "") for t in body.get("tools", [])]
@@ -78,8 +83,14 @@ def _anthropic_blocks(body: dict) -> tuple[list[dict], str]:
 
 def _anthropic_message(body: dict, blocks: list[dict], stop: str | None, usage: dict) -> dict:
     return {
-        "id": "msg_1", "type": "message", "role": "assistant", "model": body.get("model"),
-        "content": blocks, "stop_reason": stop, "stop_sequence": None, "usage": usage,
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": body.get("model"),
+        "content": blocks,
+        "stop_reason": stop,
+        "stop_sequence": None,
+        "usage": usage,
     }
 
 
@@ -96,42 +107,59 @@ def _anthropic_stream(body: dict, blocks: list[dict], stop: str, usage: dict) ->
         out.append(_sse("content_block_start", {"index": i, "content_block": opening}))
         out.append(_sse("content_block_delta", {"index": i, "delta": delta}))
         out.append(_sse("content_block_stop", {"index": i}))
-    out.append(_sse("message_delta", {
-        "delta": {"stop_reason": stop, "stop_sequence": None},
-        "usage": {"output_tokens": usage["output_tokens"]},
-    }))
+    out.append(
+        _sse(
+            "message_delta",
+            {
+                "delta": {"stop_reason": stop, "stop_sequence": None},
+                "usage": {"output_tokens": usage["output_tokens"]},
+            },
+        )
+    )
     out.append(_sse("message_stop", {}))
     return "".join(out).encode()
 
 
 # --- openai (Responses API, as codex calls it) ----------------------------------------
 
+
 def _openai_items(body: dict) -> tuple[list[dict], dict]:
     global _compacted
 
     def message(text: str, i: int) -> dict:
         return {
-            "type": "message", "id": f"msg_{i}", "role": "assistant", "status": "completed",
+            "type": "message",
+            "id": f"msg_{i}",
+            "role": "assistant",
+            "status": "completed",
             "content": [{"type": "output_text", "text": text, "annotations": []}],
         }
 
     def code_call(code: str) -> dict:
         # codex exposes its tools (MCP ones too) through its `functions.exec` code tool.
         return {
-            "type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1",
-            "namespace": "functions", "name": "exec", "status": "completed", "input": code,
+            "type": "custom_tool_call",
+            "id": "ctc_1",
+            "call_id": "call_1",
+            "namespace": "functions",
+            "name": "exec",
+            "status": "completed",
+            "input": code,
         }
 
     items = body.get("input", [])
     answered = any(i.get("type") == "custom_tool_call_output" for i in items)
-    last_user = next((json.dumps(i.get("content")) for i in reversed(items)
-                      if i.get("role") == "user"), "")
+    last_user = next(
+        (json.dumps(i.get("content")) for i in reversed(items) if i.get("role") == "user"), ""
+    )
     if COMPACT_ON and COMPACT_ON in last_user and not answered:
         with _lock:
             first, _compacted = not _compacted, True
         if first:
             return [message("preamble", 0), code_call("text('hi')")], {
-                **USAGE_OPENAI, "input_tokens": 900_000, "total_tokens": 900_005,
+                **USAGE_OPENAI,
+                "input_tokens": 900_000,
+                "total_tokens": 900_005,
             }
     if answered or os.environ.get("FAKE_OPENAI_CALL_ECHO") != "1":
         return [message("final answer", 1)], USAGE_OPENAI
@@ -146,9 +174,19 @@ def _openai_stream(body: dict) -> bytes:
     out = [_sse("response.created", {"response": {"id": "resp_1"}})]
     for idx, item in enumerate(items):
         out.append(_sse("response.output_item.done", {"output_index": idx, "item": item}))
-    out.append(_sse("response.completed", {"response": {
-        "id": "resp_1", "status": "completed", "output": items, "usage": usage,
-    }}))
+    out.append(
+        _sse(
+            "response.completed",
+            {
+                "response": {
+                    "id": "resp_1",
+                    "status": "completed",
+                    "output": items,
+                    "usage": usage,
+                }
+            },
+        )
+    )
     return "".join(out).encode()
 
 

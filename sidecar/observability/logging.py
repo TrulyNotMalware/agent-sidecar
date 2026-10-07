@@ -5,16 +5,18 @@ import structlog
 
 from .redaction import scrub_secrets
 
-REDACT_KEYS = frozenset({
-    "prompt",
-    "system_prompt",
-    "append_system_prompt",
-    "delta",
-    "final_text",
-    "text",
-    "args",
-    "tool_args",
-})
+REDACT_KEYS = frozenset(
+    {
+        "prompt",
+        "system_prompt",
+        "append_system_prompt",
+        "delta",
+        "final_text",
+        "text",
+        "args",
+        "tool_args",
+    }
+)
 
 REDACTED = "<redacted>"
 
@@ -111,8 +113,10 @@ def configure_logging(*, level: str = "INFO", redact: bool = True) -> None:
     logging.basicConfig(format="%(message)s", level=level)
     _install_stdlib_scrubbing()
     if redact:
-        for name in ("claude_agent_sdk._internal.query",
-                     "claude_agent_sdk._internal.transport.subprocess_cli"):
+        for name in (
+            "claude_agent_sdk._internal.query",
+            "claude_agent_sdk._internal.transport.subprocess_cli",
+        ):
             logging.getLogger(name).addFilter(_DropSdkLinesQuotingCliOutput())
 
     processors: list[Any] = [

@@ -34,25 +34,29 @@ def out(obj: dict) -> None:
 
 
 def assistant(text: str) -> None:
-    out({
-        "type": "assistant",
-        "session_id": SESSION_ID,
-        "message": {"model": "fake", "content": [{"type": "text", "text": text}]},
-    })
+    out(
+        {
+            "type": "assistant",
+            "session_id": SESSION_ID,
+            "message": {"model": "fake", "content": [{"type": "text", "text": text}]},
+        }
+    )
 
 
 def result(is_error: bool = False) -> None:
-    out({
-        "type": "result",
-        "subtype": "error_during_execution" if is_error else "success",
-        "duration_ms": 1,
-        "duration_api_ms": 1,
-        "is_error": is_error,
-        "num_turns": 1,
-        "session_id": SESSION_ID,
-        "result": "final",
-        "usage": {"input_tokens": 3, "output_tokens": 4},
-    })
+    out(
+        {
+            "type": "result",
+            "subtype": "error_during_execution" if is_error else "success",
+            "duration_ms": 1,
+            "duration_api_ms": 1,
+            "is_error": is_error,
+            "num_turns": 1,
+            "session_id": SESSION_ID,
+            "result": "final",
+            "usage": {"input_tokens": 3, "output_tokens": 4},
+        }
+    )
 
 
 def _on_term(*_args) -> None:
@@ -84,10 +88,12 @@ def main() -> int:
 
     # SDK handshake: one control request (initialize), then the user message.
     request = json.loads(sys.stdin.readline())
-    out({
-        "type": "control_response",
-        "response": {"subtype": "success", "request_id": request["request_id"], "response": {}},
-    })
+    out(
+        {
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": request["request_id"], "response": {}},
+        }
+    )
     sys.stdin.readline()
     out({"type": "system", "subtype": "init", "session_id": SESSION_ID, "uuid": "u0"})
 

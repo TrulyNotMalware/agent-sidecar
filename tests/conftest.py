@@ -23,5 +23,6 @@ def app():
 @pytest.fixture
 def client(app):
     from fastapi.testclient import TestClient
+
     with TestClient(app) as c:
         yield c

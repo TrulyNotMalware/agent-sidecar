@@ -103,9 +103,9 @@ def parse_sse_frames(buf: str) -> tuple[list[tuple[str, dict[str, Any]]], str]:
         data_lines: list[str] = []
         for line in frame.split("\n"):
             if line.startswith("event:"):
-                name = line[len("event:"):].strip()
+                name = line[len("event:") :].strip()
             elif line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
+                data_lines.append(line[len("data:") :].strip())
         if name is not None:
             data = "\n".join(data_lines)
             events.append((name, json.loads(data) if data else {}))

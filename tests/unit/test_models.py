@@ -65,9 +65,7 @@ def test_session_id_accepts_real_ids(session_id):
 )
 def test_session_id_rejects_values_a_cli_could_parse_as_flags(session_id):
     with pytest.raises(ValidationError):
-        ConverseRequest.model_validate(
-            {"sessionKey": "k", "prompt": "hi", "sessionId": session_id}
-        )
+        ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": session_id})
 
 
 def test_empty_session_id_means_start_fresh():

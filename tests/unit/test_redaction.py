@@ -86,12 +86,16 @@ def test_provider_message_is_scrubbed_and_bounded():
 def test_every_logged_value_is_scrubbed_nested_too(monkeypatch):
     monkeypatch.setattr(redaction, "_known", {"the-bearer-secret"})
 
-    out = _scrub_processor(None, "info", {
-        "event": "turn.closed",
-        "error_detail": "stderr: Authorization: Bearer the-bearer-secret",
-        "nested": {"list": ["sk-proj-abcdef123456"]},
-        "count": 3,
-    })
+    out = _scrub_processor(
+        None,
+        "info",
+        {
+            "event": "turn.closed",
+            "error_detail": "stderr: Authorization: Bearer the-bearer-secret",
+            "nested": {"list": ["sk-proj-abcdef123456"]},
+            "count": 3,
+        },
+    )
 
     assert out["error_detail"] == f"stderr: Authorization: Bearer {REDACTED}"
     assert out["nested"] == {"list": [f"sk-{REDACTED}"]}

@@ -140,11 +140,16 @@ class Turn:
                     outcome = exc.code.value if isinstance(exc, ApiError) else type(exc).__name__
                     if not isinstance(exc, asyncio.CancelledError):
                         span.set_status(Status(StatusCode.ERROR, outcome))
-                        span.add_event("exception", {
-                            "exception.type": type(exc).__name__,
-                            # Only what the client was told; details are in the log.
-                            "exception.message": exc.message if isinstance(exc, ApiError) else "",
-                        })
+                        span.add_event(
+                            "exception",
+                            {
+                                "exception.type": type(exc).__name__,
+                                # Only what the client was told; details are in the log.
+                                "exception.message": exc.message
+                                if isinstance(exc, ApiError)
+                                else "",
+                            },
+                        )
                     raise
                 finally:
                     span.set_attribute("outcome", self._stop_reason or outcome)

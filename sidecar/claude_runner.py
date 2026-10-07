@@ -193,9 +193,7 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
                     if isinstance(message.content, list):
                         for block in message.content:
                             if isinstance(block, ToolResultBlock):
-                                tool_name = pending_tool_names.get(
-                                    block.tool_use_id, "unknown"
-                                )
+                                tool_name = pending_tool_names.get(block.tool_use_id, "unknown")
                                 yield ToolResultEvent(
                                     name=tool_name,
                                     ok=not bool(getattr(block, "is_error", False)),
@@ -207,18 +205,14 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
                             message.errors, message.result, message.subtype
                         )
                         continue
-                    final_text = (
-                        getattr(message, "result", None) or "".join(final_text_parts)
-                    )
+                    final_text = getattr(message, "result", None) or "".join(final_text_parts)
                     usage = _extract_usage(message)
                     yield DoneEvent(
                         final_text=final_text,
                         input_tokens=int(usage.get("input_tokens", 0) or 0),
                         output_tokens=int(usage.get("output_tokens", 0) or 0),
                         cache_read_input_tokens=usage.get("cache_read_input_tokens"),
-                        cache_creation_input_tokens=usage.get(
-                            "cache_creation_input_tokens"
-                        ),
+                        cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
                     )
     except ApiError:
         raise

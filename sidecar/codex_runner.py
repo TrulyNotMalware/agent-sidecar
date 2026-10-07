@@ -73,29 +73,58 @@ _LOGIN_TIMEOUT_SEC = 30
 
 # codex and the shell commands the model runs inherit only these. The sidecar's own
 # secrets (BEARER_SECRET, provider API keys) stay out: auth comes from CODEX_HOME.
-_ENV_ALLOWLIST = frozenset({
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ",
-    "TMPDIR", "TMP", "TEMP", "CODEX_HOME", "RUST_LOG",
-    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
-    # CA bundles: codex's own first, then what tools run by the model look at.
-    "CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT", "NODE_EXTRA_CA_CERTS",
-    "NODE_OPTIONS",  # the npm `codex` entry point is a node wrapper (e.g. --use-openssl-ca)
-    # Org/project attribution headers. OPENAI_BASE_URL only reaches tools the model runs:
-    # codex ignores it (0.153/0.159) — a gateway goes in config.toml (openai_base_url).
-    "OPENAI_BASE_URL", "OPENAI_ORGANIZATION", "OPENAI_PROJECT",
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
-    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
-})
+_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "LANG",
+        "LANGUAGE",
+        "TZ",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "CODEX_HOME",
+        "RUST_LOG",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        # CA bundles: codex's own first, then what tools run by the model look at.
+        "CODEX_CA_CERTIFICATE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "PIP_CERT",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_OPTIONS",  # the npm `codex` entry point is a node wrapper (e.g. --use-openssl-ca)
+        # Org/project attribution headers. OPENAI_BASE_URL only reaches tools the model runs:
+        # codex ignores it (0.153/0.159) — a gateway goes in config.toml (openai_base_url).
+        "OPENAI_BASE_URL",
+        "OPENAI_ORGANIZATION",
+        "OPENAI_PROJECT",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "all_proxy",
+    }
+)
 _ENV_ALLOWLIST_PREFIXES = ("LC_",)
 
 
 def _child_env(passthrough: Iterable[str], extra: dict[str, str]) -> dict[str, str]:
     allowed = _ENV_ALLOWLIST | set(passthrough)
     env = {
-        k: v
-        for k, v in os.environ.items()
-        if k in allowed or k.startswith(_ENV_ALLOWLIST_PREFIXES)
+        k: v for k, v in os.environ.items() if k in allowed or k.startswith(_ENV_ALLOWLIST_PREFIXES)
     }
     env.update(extra)
     return env
@@ -140,9 +169,12 @@ async def run_turn(
         # The name is validated as a bare TOML key ([A-Za-z0-9_-]+); values are quoted.
         server = f"mcp_servers.{mcp_server_name}"
         cmd += [
-            "-c", f"{server}.url={_toml_string(mcp_server_url)}",
-            "-c", f"{server}.bearer_token_env_var={_toml_string(_MCP_TOKEN_ENV_VAR)}",
-            "-c", f"{server}.default_tools_approval_mode={_toml_string('approve')}",
+            "-c",
+            f"{server}.url={_toml_string(mcp_server_url)}",
+            "-c",
+            f"{server}.bearer_token_env_var={_toml_string(_MCP_TOKEN_ENV_VAR)}",
+            "-c",
+            f"{server}.default_tools_approval_mode={_toml_string('approve')}",
         ]
 
     # The system prompt becomes codex's developer instructions: a developer message at
@@ -171,9 +203,7 @@ async def run_turn(
     else:
         cmd += ["--", "-"]
 
-    turn_env = _child_env(
-        env_passthrough, {_MCP_TOKEN_ENV_VAR: turn_token} if mcp_scoped else {}
-    )
+    turn_env = _child_env(env_passthrough, {_MCP_TOKEN_ENV_VAR: turn_token} if mcp_scoped else {})
 
     async def _stream() -> AsyncIterator[RunnerEvent]:
         try:
@@ -279,7 +309,8 @@ async def run_turn(
             if not completed:
                 raise ApiError(
                     ErrorCode.SDK_ERROR,
-                    provider_message(last_error) if last_error
+                    provider_message(last_error)
+                    if last_error
                     else "codex ended without turn.completed",
                 )
 
@@ -431,17 +462,21 @@ def _tool_use_from_item(item: dict) -> list[RunnerEvent]:
     tool_id = item.get("id")
 
     if item_type == "mcp_tool_call":
-        return [ToolUseEvent(
-            name=_mcp_name(item),
-            args=item.get("arguments") or {},
-            tool_use_id=tool_id,
-        )]
+        return [
+            ToolUseEvent(
+                name=_mcp_name(item),
+                args=item.get("arguments") or {},
+                tool_use_id=tool_id,
+            )
+        ]
     if item_type == "command_execution":
-        return [ToolUseEvent(
-            name="shell",
-            args={"command": item.get("command") or ""},
-            tool_use_id=tool_id,
-        )]
+        return [
+            ToolUseEvent(
+                name="shell",
+                args={"command": item.get("command") or ""},
+                tool_use_id=tool_id,
+            )
+        ]
     return []
 
 

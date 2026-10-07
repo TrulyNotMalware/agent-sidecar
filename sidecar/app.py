@@ -23,9 +23,14 @@ log = get_logger("sidecar.app")
 TURN_CLEANUP_BUDGET_SEC = 12.0
 
 _CREDENTIAL_ENV_VARS = (
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-    "OPENAI_API_KEY", "CODEX_API_KEY",
-    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
 )
 
 
@@ -107,6 +112,7 @@ def create_app() -> FastAPI:
 
     if settings.tracing_enabled:
         from .observability.tracing import configure_tracing
+
         configure_tracing(app, service_name=settings.otel_service_name)
 
     return app

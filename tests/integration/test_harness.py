@@ -23,7 +23,7 @@ def test_frame_split_across_reads_is_parsed_once_complete():
 
 
 def test_ping_comment_frames_are_skipped():
-    buf = ': ping - 2026-01-01 00:00:00\r\n\r\nevent: done\r\ndata: {}\r\n\r\n'
+    buf = ": ping - 2026-01-01 00:00:00\r\n\r\nevent: done\r\ndata: {}\r\n\r\n"
 
     events, _ = parse_sse_frames(buf)
 
