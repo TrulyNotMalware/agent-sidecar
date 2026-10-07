@@ -50,7 +50,10 @@ async def stateless_workspace(*, parent: Path | None = None) -> AsyncIterator[Pa
     and the workspace must not leak across calls. The removal runs in a thread:
     the agent may have filled the directory, and the event loop must not wait.
     """
-    path = await asyncio.to_thread(_make_stateless_dir, parent)
+    # Created synchronously (a mkdir or two): a cancellation can then not land between
+    # creating the directory and the try/finally that removes it. Only the removal goes
+    # to a thread — the agent may have filled the directory.
+    path = _make_stateless_dir(parent)
     try:
         yield path
     finally:

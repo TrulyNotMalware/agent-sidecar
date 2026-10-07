@@ -483,3 +483,27 @@ def test_prompt_size_is_bounded(client: TestClient) -> None:
         headers={"Authorization": "Bearer test-secret"},
     )
     assert r.status_code == 400
+
+
+def test_an_unreadable_claude_md_is_a_json_500_before_the_stream(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    from sidecar.config import get_settings
+
+    unreadable = tmp_path / "CLAUDE.md"
+    unreadable.mkdir()  # reading it raises IsADirectoryError
+
+    def settings() -> Settings:
+        return _settings(bearer_secret="test-secret", claude_md_path=unreadable)
+
+    app.dependency_overrides[get_settings] = settings
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k", "prompt": "hi"},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 500
+    assert r.json() == {"code": "internal", "message": "could not read the base system prompt"}
+    assert len(r.headers["x-turn-id"]) == 32
+    assert app.state.admission.inflight == 0  # rejected before the reservation

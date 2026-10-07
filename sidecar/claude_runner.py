@@ -61,7 +61,7 @@ class ClaudePolicy:
     # Blanked in the CLI's environment on top of _WITHHELD_FROM_CLI.
     withheld_env: tuple[str, ...] = ()
     # Settings' key (which may come from .env, not the environment the CLI inherits).
-    anthropic_api_key: str | None = None
+    anthropic_api_key: str | None = field(default=None, repr=False)
 
 
 async def run_turn(

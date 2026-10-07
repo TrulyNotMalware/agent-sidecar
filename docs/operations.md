@@ -417,10 +417,10 @@ closing the CLI. Consequences:
      still closing their CLI, then force-cancels any survivors (logged as
      `shutdown.forced_cancel`; a forced turn may leave its CLI behind, which the
      container runtime reaps when PID 1 exits).
-- Worst case the process needs about `SHUTDOWN_GRACE_SEC` + 15 s. As a native
+- Worst case the process needs about `SHUTDOWN_GRACE_SEC` + 15 s (+ 2 s with `TRACING_ENABLED`). As a native
   sidecar (k8s ≥ 1.29) it receives SIGTERM only after the app container has
   exited, out of the same `terminationGracePeriodSeconds`, so size that as app
-  shutdown time + `SHUTDOWN_GRACE_SEC` + 15 s (the default 30 s fits an app that
+  shutdown time + `SHUTDOWN_GRACE_SEC` + 15 s (+ 2 s with `TRACING_ENABLED`) (the default 30 s fits an app that
   stops quickly and the default `SHUTDOWN_GRACE_SEC=10`); otherwise k8s SIGKILLs
   the pod while CLIs are being closed.
 

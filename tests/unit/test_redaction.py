@@ -123,7 +123,7 @@ def test_plain_logging_is_scrubbed_after_formatting(caplog: pytest.LogCaptureFix
 
 def test_plain_logging_is_scrubbed_too(caplog: pytest.LogCaptureFixture) -> None:
     # uvicorn and the Agent SDK log through `logging`, not structlog. (The app's
-    # logging is configured when tests/conftest.py imports sidecar.app.)
+    # logging is configured once per test session by tests/conftest.py.)
     with caplog.at_level(logging.INFO):
         logging.getLogger("uvicorn.error").warning("upstream said %s", "Bearer abc.def.123456")
         try:

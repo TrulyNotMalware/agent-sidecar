@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -28,8 +29,9 @@ log = get_logger("sidecar.app")
 # are still closing their CLI (the SDK waits up to 5s for exit, then SIGTERMs and
 # waits another 5s before SIGKILL).
 TURN_CLEANUP_BUDGET_SEC = 12.0
-# How long shutdown waits for the span exporter to flush its last batch.
-_TRACING_FLUSH_SEC = 10.0
+# How long shutdown waits for the span exporter to flush its last batch (part of the
+# documented terminationGracePeriodSeconds budget).
+_TRACING_FLUSH_SEC = 2.0
 
 _CREDENTIAL_ENV_VARS = (
     "ANTHROPIC_API_KEY",
@@ -143,10 +145,13 @@ def create_app() -> FastAPI:
     @app.exception_handler(Exception)
     async def _unhandled_handler(_request: Request, exc: Exception) -> JSONResponse:
         # Last resort, for a bug before the stream opens: the server logs the traceback;
-        # the client gets the shape and nothing of the exception's text.
+        # the client gets the shape and nothing of the exception's text — plus the turn
+        # id to find the traceback with, when the converse route had bound one.
+        turn_id = structlog.contextvars.get_contextvars().get("turn_id")
         return JSONResponse(
             status_code=500,
             content={"code": ErrorCode.INTERNAL.value, "message": "internal error"},
+            headers={"X-Turn-Id": turn_id} if isinstance(turn_id, str) else None,
         )
 
     @app.exception_handler(RequestValidationError)

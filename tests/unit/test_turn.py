@@ -238,3 +238,18 @@ async def test_cache_tokens_are_counted_too() -> None:
     assert count("input") - before["input"] == 5
     assert count("cache_read") - before["cache_read"] == 7
     assert count("cache_creation") == before["cache_creation"]  # None counts as 0
+
+
+async def test_a_stopped_turn_still_removes_its_stateless_workspace(tmp_path: Path) -> None:
+    from sidecar.session import stateless_workspace
+
+    slow = SlowToClose()
+    turn = _turn()
+    turn.start(slow.run, lambda: stateless_workspace(parent=tmp_path))
+    assert await _next(turn) == SessionEvent(session_id="s")
+
+    turn.stop("cancelled")
+    await _until_ended(turn)
+
+    assert slow.cleanup_finished
+    assert list(tmp_path.iterdir()) == []  # the single cancel lets the removal complete

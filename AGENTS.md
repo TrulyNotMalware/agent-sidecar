@@ -349,7 +349,9 @@ dependency, a validation error (mapped to `bad_request`), the router's own `404`
 opens (`internal`, never the exception's text) — all handlers live in `app.py`. `401` also
 sends `WWW-Authenticate: Bearer`.
 On `/v1/converse` only pre-stream errors are sent with that status and a JSON body:
-`bad_request`, `unauthorized`, and `busy` (plus `not_found` on `/cancel`). Once the
+`bad_request`, `unauthorized`, `busy`, and `internal` when a file the turn needs cannot
+be read before it starts (the base system prompt, a codex session record) — plus
+`not_found` on `/cancel`. Once the
 SSE stream has opened the response is already HTTP 200, so `timeout`, `sdk_error`,
 `internal`, and `cancelled` surface **only** as a terminal `event: error` frame —
 their HTTP code is never put on the wire for the converse response.
@@ -452,7 +454,8 @@ Key manifests:
 - `tini` is required as PID-1 to reap zombie claude subprocesses. Do not remove from Dockerfile.
 - The image runs as uid 10001; all mutable state is under `/var/lib/claude-sidecar`
   (`WORKSPACE_ROOT`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) — mount one volume there.
-- Keep k8s `terminationGracePeriodSeconds` ≥ app shutdown + `SHUTDOWN_GRACE_SEC` + 15 s: a
+- Keep k8s `terminationGracePeriodSeconds` ≥ app shutdown + `SHUTDOWN_GRACE_SEC` + 15 s
+  (+ 2 s with `TRACING_ENABLED`, for the span flush): a
   native sidecar is SIGTERMed only after the app container exits (stream grace + uvicorn +
   up to 12 s for turns still closing their CLI).
 

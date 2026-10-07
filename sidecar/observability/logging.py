@@ -132,12 +132,16 @@ def stdlib_formatter(*, redact: bool = True) -> logging.Formatter:
     )
 
 
+_configured = False
+
+
 def configure_logging(*, level: str = "INFO", redact: bool = True) -> None:
     """Configure structlog and plain logging once: every line is one JSON object.
 
     The first configuration wins: tests build several apps in one process.
     """
-    if structlog.is_configured():
+    global _configured  # noqa: PLW0603 — the flag is exactly that fact
+    if _configured:
         return
 
     handler = logging.StreamHandler()
@@ -160,6 +164,7 @@ def configure_logging(*, level: str = "INFO", redact: bool = True) -> None:
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level)),
         cache_logger_on_first_use=True,
     )
+    _configured = True
 
 
 def get_logger(name: str | None = None) -> FilteringBoundLogger:

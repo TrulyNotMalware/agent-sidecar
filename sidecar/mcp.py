@@ -40,7 +40,7 @@ def static_mcp_servers(static_config_path: Path | None) -> dict[str, Any]:
         return {}
     try:
         parsed = json.loads(static_config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:  # missing, unreadable, not JSON
+    except (OSError, ValueError, RecursionError) as exc:  # missing, unreadable, not JSON
         log.warning("mcp.static_config_unreadable", error_type=type(exc).__name__)
         return {}
     servers = (parsed.get("mcpServers") or {}) if isinstance(parsed, dict) else None
@@ -102,9 +102,12 @@ async def private_file(name: str, content: str) -> AsyncIterator[Path]:
     directory outside the turn workspace, so the agent's cwd-scoped tools do not
     list it.
     """
-    directory = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="claude-sidecar-"))
+    # Created and written synchronously (a few syscalls on a local disk): a cancellation
+    # can then not land between creating the file and the try/finally that removes it,
+    # nor race the removal. Only the removal goes to a thread.
+    directory = Path(tempfile.mkdtemp(prefix="claude-sidecar-"))
     try:
-        yield await asyncio.to_thread(_write_private, directory / name, content)
+        yield _write_private(directory / name, content)
     finally:
         await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
 
