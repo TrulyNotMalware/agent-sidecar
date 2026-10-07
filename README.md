@@ -125,7 +125,8 @@ openapi.yaml              # the contract — source of truth
 
 ```bash
 .venv/bin/python -m pytest          # unit tests
-.venv/bin/ruff check .              # lint
+.venv/bin/ruff format --check . && .venv/bin/ruff check .   # format + lint
+.venv/bin/mypy                      # types (strict)
 .venv/bin/python scripts/smoke.py   # manual e2e (uses real Claude quota)
 ```
 
@@ -267,7 +268,8 @@ openapi.yaml              # 계약 — source of truth
 
 ```bash
 .venv/bin/python -m pytest          # unit 테스트
-.venv/bin/ruff check .              # lint
+.venv/bin/ruff format --check . && .venv/bin/ruff check .   # 포맷 + lint
+.venv/bin/mypy                      # 타입 (strict)
 .venv/bin/python scripts/smoke.py   # 수동 e2e (실제 Claude quota 소비)
 ```
 

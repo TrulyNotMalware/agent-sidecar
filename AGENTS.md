@@ -383,12 +383,17 @@ pip install -e ".[dev]"
 BEARER_SECRET=dev-secret python -m sidecar
 ```
 
-### Lint + Test
+### Format + Lint + Types + Test
 ```bash
-ruff check .
-pytest tests/ -v                      # everything (integration tests take ~30s)
-pytest tests/ -m "not integration"    # fast unit-only loop
+ruff format --check . && ruff check .   # formatter, then the rule set in pyproject (ANN, ASYNC, FAST, …)
+mypy                                    # strict, with the pydantic plugin: sidecar/ tests/ scripts/ examples/
+pytest tests/ -v                        # everything (integration tests take ~70s)
+pytest tests/ -m "not integration"      # fast unit-only loop
 ```
+
+Every function is fully annotated — parameters and return types, tests and fixtures
+included — and `mypy --strict` must stay clean; a `# type: ignore[code]` or `# noqa: CODE`
+carries its code and a reason.
 
 `tests/integration/` starts the real server per test with the SDK pointed at
 `tests/integration/fake_claude.py`, so cancel / disconnect / timeout / SIGTERM
