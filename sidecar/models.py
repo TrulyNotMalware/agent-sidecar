@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -10,7 +10,7 @@ SESSION_ID_PATTERN = (
 
 
 class ConverseRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    model_config = ConfigDict(validate_by_name=True, extra="forbid")
 
     session_key: str = Field(alias="sessionKey", min_length=1, max_length=256)
     # Generous (~250k tokens) but bounded: the whole body is held in memory.
@@ -43,7 +43,7 @@ class ConverseRequest(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _stateless_cannot_resume(self) -> "ConverseRequest":
+    def _stateless_cannot_resume(self) -> Self:
         if self.mode == "stateless" and self.session_id is not None:
             raise ValueError("sessionId cannot be used with mode=stateless (nothing to resume)")
         return self

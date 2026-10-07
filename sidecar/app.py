@@ -6,7 +6,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from fastapi.utils import is_body_allowed_for_status_code
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .admission import Admission
 from .codex_runner import ensure_codex_auth
@@ -103,6 +105,33 @@ def create_app() -> FastAPI:
             status_code=exc.status_code,
             content={"code": exc.code.value, "message": exc.message},
             headers=headers,
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error_handler(_request: Request, exc: StarletteHTTPException) -> Response:
+        # The router's own errors (unknown path, wrong method) in the same shape. The
+        # Starlette class, not FastAPI's: the router raises the base class.
+        if not is_body_allowed_for_status_code(exc.status_code):
+            return Response(status_code=exc.status_code, headers=exc.headers)
+        if exc.status_code == 404:
+            code = ErrorCode.NOT_FOUND
+        elif exc.status_code < 500:
+            code = ErrorCode.BAD_REQUEST
+        else:
+            code = ErrorCode.INTERNAL
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"code": code.value, "message": str(exc.detail)},
+            headers=exc.headers,  # e.g. Allow on 405
+        )
+
+    @app.exception_handler(Exception)
+    async def _unhandled_handler(_request: Request, exc: Exception) -> JSONResponse:
+        # Last resort, for a bug before the stream opens: the server logs the traceback;
+        # the client gets the shape and nothing of the exception's text.
+        return JSONResponse(
+            status_code=500,
+            content={"code": ErrorCode.INTERNAL.value, "message": "internal error"},
         )
 
     @app.exception_handler(RequestValidationError)

@@ -8,7 +8,7 @@ authors = [{ name = "Claude Sidecar Maintainers" }]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "pydantic>=2.9",
+    "pydantic>=2.11",  # validate_by_name
     "pydantic-settings>=2.6",
     "sse-starlette>=3.4",  # shutdown_event / grace; verified with 3.4.1
     "claude-agent-sdk>=0.2.161,<0.3",  # runners depend on CLI flag semantics; bump deliberately

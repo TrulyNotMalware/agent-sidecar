@@ -14,7 +14,7 @@ from ..models import HealthStatus
 router = APIRouter()
 
 
-@router.get("/healthz", response_model=HealthStatus)
+@router.get("/healthz")
 async def healthz() -> HealthStatus:
     return HealthStatus(status="ok")
 

@@ -38,3 +38,32 @@ def test_codex_warns_that_static_mcp_servers_are_ignored(monkeypatch, tmp_path, 
         get_settings.cache_clear()
 
     assert '"mcp.static_config_ignored"' in capsys.readouterr().out
+
+
+def test_router_errors_have_the_error_schema_shape(client):
+    # Unknown path and wrong method are raised by Starlette's router, outside any route.
+    r = client.get("/no/such/path")
+    assert r.status_code == 404
+    assert r.json() == {"code": "not_found", "message": "Not Found"}
+
+    r = client.get("/v1/converse")
+    assert r.status_code == 405
+    assert r.json() == {"code": "bad_request", "message": "Method Not Allowed"}
+    assert "POST" in r.headers["allow"]
+
+
+def test_an_unhandled_exception_is_a_json_500_without_the_exception_text(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from sidecar.app import create_app
+    from sidecar.routes import health
+
+    def boom(_settings):
+        raise RuntimeError("private detail sk-proj-abcdef123456")
+
+    monkeypatch.setattr(health, "_readyz_checks", boom)
+    with TestClient(create_app(), raise_server_exceptions=False) as client:
+        r = client.get("/readyz")
+
+    assert r.status_code == 500
+    assert r.json() == {"code": "internal", "message": "internal error"}

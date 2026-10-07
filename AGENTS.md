@@ -340,9 +340,11 @@ An `error` frame's `message` is what the provider reported (API status, quota,
 context length — credentials scrubbed, ≤ 500 chars) or a fixed text; CLI stderr and
 exception text stay in the log (`ApiError.detail`), and the message then names the
 turn id (`X-Turn-Id`) to look them up with.
-Every error body from a sidecar route is `{"code": ..., "message": ...}` (one `ApiError` handler in
-`app.py`; validation errors are mapped to `bad_request`); `401` also sends
-`WWW-Authenticate: Bearer`.
+Every error body is `{"code": ..., "message": ...}`: an `ApiError` from a route or
+dependency, a validation error (mapped to `bad_request`), the router's own `404` / `405`
+(`not_found` / `bad_request`, `Allow` kept) and an unhandled exception before a stream
+opens (`internal`, never the exception's text) — all handlers live in `app.py`. `401` also
+sends `WWW-Authenticate: Bearer`.
 On `/v1/converse` only pre-stream errors are sent with that status and a JSON body:
 `bad_request`, `unauthorized`, and `busy` (plus `not_found` on `/cancel`). Once the
 SSE stream has opened the response is already HTTP 200, so `timeout`, `sdk_error`,
