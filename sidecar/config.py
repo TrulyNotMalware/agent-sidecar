@@ -5,6 +5,9 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"]
+CodexSandbox = Literal["read-only", "workspace-write", "danger-full-access"]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -38,9 +41,7 @@ class Settings(BaseSettings):
     # Comma-separated tools pre-approved on top of the configured MCP servers, e.g.
     # "WebFetch,Bash(git status:*)". Under dontAsk everything else that would prompt is denied.
     claude_allowed_tools: str = ""
-    claude_permission_mode: Literal[
-        "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"
-    ] = "dontAsk"
+    claude_permission_mode: PermissionMode = "dontAsk"
     # Comma-separated tools denied even if allowed elsewhere, e.g. one destructive tool
     # of an otherwise pre-approved MCP server ("mcp__domain-tools__delete_all").
     claude_disallowed_tools: str = ""
@@ -53,7 +54,7 @@ class Settings(BaseSettings):
     # Codex (PROVIDER=codex) — auth state written by `codex login`
     codex_auth_path: Path | None = None  # defaults to ~/.codex/auth.json at check time
     # Always passed as `codex exec --sandbox`, so a config.toml cannot loosen it.
-    codex_sandbox: Literal["read-only", "workspace-write", "danger-full-access"] = "read-only"
+    codex_sandbox: CodexSandbox = "read-only"
     # Comma-separated env var names passed to codex on top of the built-in allowlist
     # (e.g. a custom model provider's `env_key`). Everything else is withheld.
     codex_env_passthrough: str = ""
@@ -91,8 +92,8 @@ class Settings(BaseSettings):
         return _csv(self.codex_env_passthrough)
 
     @property
-    def claude_tools_list(self) -> list[str] | None:
-        return None if self.claude_tools is None else list(_csv(self.claude_tools))
+    def claude_tools_names(self) -> tuple[str, ...] | None:
+        return None if self.claude_tools is None else _csv(self.claude_tools)
 
     @property
     def claude_allowed_tools_names(self) -> tuple[str, ...]:

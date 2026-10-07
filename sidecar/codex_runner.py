@@ -3,9 +3,12 @@ import contextlib
 import json
 import os
 import signal
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from .config import CodexSandbox
 from .errors import ApiError, ErrorCode, provider_message
 from .events import (
     DoneEvent,
@@ -14,11 +17,24 @@ from .events import (
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
+    TurnSpec,
 )
 from .mcp import mcp_tool_name
 from .observability.logging import get_logger
 
 log = get_logger("sidecar.codex")
+
+_MCP_TOKEN_ENV_VAR = "SIDECAR_MCP_TURN_TOKEN"
+_LOGIN_TIMEOUT_SEC = 30
+# stdout carries one JSON event per line; a single line can be huge (a command's
+# aggregated output). Lines past this size are skipped, not fatal.
+_MAX_EVENT_LINE_BYTES = 8 * 1024 * 1024
+_STDERR_TAIL_BYTES = 4096
+# Below Linux's MAX_ARG_STRLEN (128 KiB) for a single argv string.
+_MAX_ARG_BYTES = 100_000
+_TERM_GRACE_SEC = 2.0
+_KILL_WAIT_SEC = 5.0
+_EXIT_WAIT_SEC = 5.0
 
 
 def codex_auth_file(configured: Path | None = None) -> Path:
@@ -43,7 +59,7 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
     is available afterwards.
     """
     path = codex_auth_file(auth_path)
-    if path.exists():
+    if await asyncio.to_thread(path.exists):
         return True
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -65,66 +81,93 @@ async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
     except TimeoutError:
         await _terminate(proc)
         return False
-    return proc.returncode == 0 and path.exists()
+    return proc.returncode == 0 and await asyncio.to_thread(path.exists)
 
-
-_MCP_TOKEN_ENV_VAR = "SIDECAR_MCP_TURN_TOKEN"
-_LOGIN_TIMEOUT_SEC = 30
 
 # codex and the shell commands the model runs inherit only these. The sidecar's own
 # secrets (BEARER_SECRET, provider API keys) stay out: auth comes from CODEX_HOME.
-_ENV_ALLOWLIST = frozenset({
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ",
-    "TMPDIR", "TMP", "TEMP", "CODEX_HOME", "RUST_LOG",
-    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
-    # CA bundles: codex's own first, then what tools run by the model look at.
-    "CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "PIP_CERT", "NODE_EXTRA_CA_CERTS",
-    "NODE_OPTIONS",  # the npm `codex` entry point is a node wrapper (e.g. --use-openssl-ca)
-    # Org/project attribution headers. OPENAI_BASE_URL only reaches tools the model runs:
-    # codex ignores it (0.153/0.159) — a gateway goes in config.toml (openai_base_url).
-    "OPENAI_BASE_URL", "OPENAI_ORGANIZATION", "OPENAI_PROJECT",
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
-    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
-})
+_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "LANG",
+        "LANGUAGE",
+        "TZ",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "CODEX_HOME",
+        "RUST_LOG",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        # CA bundles: codex's own first, then what tools run by the model look at.
+        "CODEX_CA_CERTIFICATE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "PIP_CERT",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_OPTIONS",  # the npm `codex` entry point is a node wrapper (e.g. --use-openssl-ca)
+        # Org/project attribution headers. OPENAI_BASE_URL only reaches tools the model runs:
+        # codex ignores it (0.153/0.159) — a gateway goes in config.toml (openai_base_url).
+        "OPENAI_BASE_URL",
+        "OPENAI_ORGANIZATION",
+        "OPENAI_PROJECT",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "all_proxy",
+    }
+)
 _ENV_ALLOWLIST_PREFIXES = ("LC_",)
 
 
-def _child_env(passthrough: Iterable[str], extra: dict[str, str]) -> dict[str, str]:
+def _child_env(passthrough: tuple[str, ...], extra: dict[str, str]) -> dict[str, str]:
     allowed = _ENV_ALLOWLIST | set(passthrough)
     env = {
-        k: v
-        for k, v in os.environ.items()
-        if k in allowed or k.startswith(_ENV_ALLOWLIST_PREFIXES)
+        k: v for k, v in os.environ.items() if k in allowed or k.startswith(_ENV_ALLOWLIST_PREFIXES)
     }
     env.update(extra)
     return env
 
 
-async def run_turn(
-    *,
-    prompt: str,
-    cwd: Path,
-    system_prompt: str | None,
-    resume_session_id: str | None,
-    mcp_config_path: Path | None,  # interface parity only; static MCP servers are claude-only
-    mcp_server_url: str | None = None,
-    mcp_server_name: str = "domain-tools",
-    turn_token: str | None = None,
-    sandbox: str = "read-only",
-    env_passthrough: Iterable[str] = (),
-    ephemeral: bool = False,
-) -> AsyncIterator[RunnerEvent]:
-    """Drive one `codex exec` turn and yield internal events.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CodexPolicy:
+    """The operator's policy for codex turns, built once from Settings (see _get_runner)."""
 
-    No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
-    task iterating this generator once; the process group is then terminated.
-    """
+    # Always passed as `codex exec --sandbox`, so a config.toml cannot change the mode.
+    sandbox: CodexSandbox = "read-only"
+    # Env var names codex may inherit on top of _ENV_ALLOWLIST (a custom provider's key).
+    env_passthrough: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Invocation:
+    """One `codex exec` run: argv, what goes to stdin, and the child's environment."""
+
+    cmd: list[str]
+    stdin_prompt: str
+    env: dict[str, str]
+
+
+def _invocation(spec: TurnSpec, policy: CodexPolicy) -> _Invocation:
     # Session workspaces are plain scratch dirs; without the flag `codex exec`
     # refuses to run outside a trusted git repository. --sandbox is always explicit
     # so a config.toml cannot change the sandbox mode.
-    cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", sandbox]
-    if ephemeral:
+    cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", policy.sandbox]
+    if spec.ephemeral:
         cmd.append("--ephemeral")  # stateless: no rollout that could be resumed later
 
     # Per-turn MCP scoping: inject a streamable-HTTP server via dotted `-c` TOML
@@ -135,14 +178,18 @@ async def run_turn(
     # the env var from model-run shell commands, so the model can read its own turn
     # token. Acceptable: the token is short-TTL and the model already holds the same
     # tool-call authority the token grants.
-    mcp_scoped = mcp_server_url is not None and turn_token is not None
-    if mcp_scoped:
+    env_extra: dict[str, str] = {}
+    if spec.mcp_server_url is not None and spec.turn_token is not None:
+        env_extra[_MCP_TOKEN_ENV_VAR] = spec.turn_token
         # The name is validated as a bare TOML key ([A-Za-z0-9_-]+); values are quoted.
-        server = f"mcp_servers.{mcp_server_name}"
+        server = f"mcp_servers.{spec.mcp_server_name}"
         cmd += [
-            "-c", f"{server}.url={_toml_string(mcp_server_url)}",
-            "-c", f"{server}.bearer_token_env_var={_toml_string(_MCP_TOKEN_ENV_VAR)}",
-            "-c", f"{server}.default_tools_approval_mode={_toml_string('approve')}",
+            "-c",
+            f"{server}.url={_toml_string(spec.mcp_server_url)}",
+            "-c",
+            f"{server}.bearer_token_env_var={_toml_string(_MCP_TOKEN_ENV_VAR)}",
+            "-c",
+            f"{server}.default_tools_approval_mode={_toml_string('approve')}",
         ]
 
     # The system prompt becomes codex's developer instructions: a developer message at
@@ -152,170 +199,204 @@ async def run_turn(
     # from the value passed in — without it the system prompt would be gone from then
     # on (checked with codex 0.153 and 0.159). A changed CLAUDE.md or systemPrompt
     # therefore reaches new sessions, and resumed ones once codex compacts.
-    stdin_prompt = prompt
-    if system_prompt:
-        instructions = f"developer_instructions={_toml_string(system_prompt)}"
+    stdin_prompt = spec.prompt
+    if spec.system_prompt:
+        instructions = f"developer_instructions={_toml_string(spec.system_prompt)}"
         if len(instructions.encode()) <= _MAX_ARG_BYTES:
             cmd += ["-c", instructions]
-        elif not resume_session_id:
+        elif not spec.resume_session_id:
             # Too long for one argv string (Linux: 128 KiB): send it with the first
             # prompt. (It then survives compaction only as far as codex keeps that
             # user message.)
             log.warning("codex.system_prompt_in_prompt", bytes=len(instructions.encode()))
-            stdin_prompt = f"{system_prompt}\n\n{prompt}"
+            stdin_prompt = f"{spec.system_prompt}\n\n{spec.prompt}"
 
     # The prompt goes through stdin ("-"): no ARG_MAX limit and never visible in `ps`.
     # "--" ends option parsing, so a resume id can never be read as a flag either.
-    if resume_session_id:
-        cmd += ["resume", "--", resume_session_id, "-"]
+    if spec.resume_session_id:
+        cmd += ["resume", "--", spec.resume_session_id, "-"]
     else:
         cmd += ["--", "-"]
 
-    turn_env = _child_env(
-        env_passthrough, {_MCP_TOKEN_ENV_VAR: turn_token} if mcp_scoped else {}
+    return _Invocation(
+        cmd=cmd, stdin_prompt=stdin_prompt, env=_child_env(policy.env_passthrough, env_extra)
     )
 
-    async def _stream() -> AsyncIterator[RunnerEvent]:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=turn_env,
-                # Own process group: shell commands and MCP servers codex starts (and the
-                # native binary behind the npm node wrapper) are terminated with it.
-                start_new_session=True,
-            )
-        except OSError as exc:  # not installed, not executable, …
-            raise ApiError(
-                ErrorCode.SDK_ERROR,
-                f"codex could not be started ({type(exc).__name__})",
-                detail=f"{type(exc).__name__}: {exc}",
-            ) from exc
-        stderr_tail = _Tail(_STDERR_TAIL_BYTES)
-        stderr_task = asyncio.create_task(_drain(proc.stderr, stderr_tail))
-        # Written concurrently with reading stdout: if codex ever produced a pipe's worth
-        # of output before reading stdin, a sequential write would deadlock both sides.
-        stdin_task = asyncio.create_task(_send_prompt(proc, stdin_prompt))
-        # finalText is the last agent message, as claude's result is its last message;
-        # earlier ones (e.g. before a tool call) were streamed as `text`.
-        last_message = ""
-        completed = False
-        last_error: str | None = None
 
-        try:
-            async for line in _ndjson_lines(proc.stdout):
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+async def run_turn(
+    spec: TurnSpec, *, cwd: Path, policy: CodexPolicy | None = None
+) -> AsyncGenerator[RunnerEvent, None]:
+    """Drive one `codex exec` turn and yield internal events.
 
-                ev_type = event.get("type")
-
-                if ev_type == "thread.started":
-                    thread_id = event.get("thread_id")
-                    if thread_id:
-                        yield SessionEvent(session_id=thread_id)
-
-                elif ev_type == "item.started":
-                    item = event.get("item", {})
-                    for tool_ev in _tool_use_from_item(item):
-                        yield tool_ev
-
-                elif ev_type == "item.completed":
-                    item = event.get("item", {})
-                    item_type = item.get("type")
-
-                    if item_type == "agent_message":
-                        text = item.get("text") or ""
-                        if text:
-                            last_message = text
-                            yield TextEvent(delta=text)
-                    else:
-                        result = _tool_result_from_item(item)
-                        if result is not None:
-                            yield result
-
-                elif ev_type == "turn.completed":
-                    completed = True
-                    usage = event.get("usage") or {}
-                    yield DoneEvent(
-                        final_text=last_message,
-                        # OpenAI semantics: input_tokens includes the cached ones.
-                        input_tokens=int(usage.get("input_tokens") or 0),
-                        output_tokens=int(usage.get("output_tokens") or 0),
-                        cache_read_input_tokens=usage.get("cached_input_tokens"),
-                        cache_creation_input_tokens=usage.get("cache_write_input_tokens"),
-                    )
-
-                elif ev_type == "turn.failed":
-                    raise ApiError(ErrorCode.SDK_ERROR, provider_message(_failure_text(event)))
-
-                elif ev_type == "error":
-                    # Not terminal: codex reports transient trouble this way too
-                    # ("Reconnecting... 2/5" while falling back from WebSocket to HTTPS).
-                    # Kept for the error message if the turn then ends without a result.
-                    last_error = event.get("message") or "codex error"
-
-            # Bounded: on Python 3.12 wait() only returns once every pipe is closed, and a
-            # leftover process can hold stderr open. returncode is set at exit regardless.
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(proc.wait()), _EXIT_WAIT_SEC)
-            if proc.returncode is None:
-                raise ApiError(ErrorCode.SDK_ERROR, "codex closed its output but did not exit")
-            await _terminate(proc)  # sweep leftovers now so they cannot hold stderr open
-            await _finish(stderr_task)
-            if proc.returncode != 0:
-                # What codex reported goes to the client; its stderr only to the log.
-                reported = f": {provider_message(last_error)}" if last_error else ""
-                tail = stderr_tail.text()
-                raise ApiError(
-                    ErrorCode.SDK_ERROR,
-                    f"codex exited with code {proc.returncode}{reported}",
-                    detail=f"stderr: {tail}" if tail.strip() else None,
-                )
-            if not completed:
-                raise ApiError(
-                    ErrorCode.SDK_ERROR,
-                    provider_message(last_error) if last_error
-                    else "codex ended without turn.completed",
-                )
-
-        except ApiError:
-            raise
-        except Exception as exc:
-            raise ApiError(
-                ErrorCode.SDK_ERROR,
-                f"codex runner failed ({type(exc).__name__})",
-                detail=f"{type(exc).__name__}: {exc}",
-            ) from exc
-        finally:
-            # Kill first so the pipes close, then reap the helpers; no step may raise,
-            # or the rest of the cleanup would be skipped.
-            await _terminate(proc)
-            await _finish(stdin_task)
-            await _finish(stderr_task)
-
+    No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
+    task iterating this generator once; the process group is then terminated.
+    `spec.mcp_config_path` is unused: static MCP servers are claude-only, codex reads
+    its own config.toml.
+    """
+    run = _invocation(spec, CodexPolicy() if policy is None else policy)
     # aclosing makes closing this generator kill the process now, in this task.
-    async with contextlib.aclosing(_stream()) as events:
+    async with contextlib.aclosing(_stream(run, cwd=cwd)) as events:
         async for ev in events:
             yield ev
 
 
-# stdout carries one JSON event per line; a single line can be huge (a command's
-# aggregated output). Lines past this size are skipped, not fatal.
-_MAX_EVENT_LINE_BYTES = 8 * 1024 * 1024
-_STDERR_TAIL_BYTES = 4096
-# Below Linux's MAX_ARG_STRLEN (128 KiB) for a single argv string.
-_MAX_ARG_BYTES = 100_000
-_TERM_GRACE_SEC = 2.0
-_KILL_WAIT_SEC = 5.0
-_EXIT_WAIT_SEC = 5.0
+class _Tail:
+    """The last `limit` bytes written — enough for an error message, bounded memory."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._buf = bytearray()
+
+    def append(self, chunk: bytes) -> None:
+        self._buf += chunk
+        del self._buf[: max(0, len(self._buf) - self._limit)]
+
+    def text(self, chars: int = 400) -> str:
+        return self._buf.decode(errors="replace")[-chars:]
 
 
-def _failure_text(event: dict) -> str:
+@dataclass(slots=True)
+class _Progress:
+    """What codex's event stream has told us so far."""
+
+    # finalText is the last agent message, as claude's result is its last message;
+    # earlier ones (e.g. before a tool call) were streamed as `text`.
+    last_message: str = ""
+    completed: bool = False
+    # The last `type: "error"` event. Not terminal by itself: codex reports transient
+    # trouble that way too ("Reconnecting... 2/5" while falling back from WebSocket to
+    # HTTPS). Kept for the error message if the turn then ends without a result.
+    last_error: str | None = None
+
+
+async def _spawn(run: _Invocation, *, cwd: Path) -> asyncio.subprocess.Process:
+    try:
+        return await asyncio.create_subprocess_exec(
+            *run.cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=run.env,
+            # Own process group: shell commands and MCP servers codex starts (and the
+            # native binary behind the npm node wrapper) are terminated with it.
+            start_new_session=True,
+        )
+    except OSError as exc:  # not installed, not executable, …
+        raise ApiError(
+            ErrorCode.SDK_ERROR,
+            f"codex could not be started ({type(exc).__name__})",
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
+
+
+async def _stream(run: _Invocation, *, cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
+    proc = await _spawn(run, cwd=cwd)
+    # PIPE was requested for all three, so none is None.
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    stderr_tail = _Tail(_STDERR_TAIL_BYTES)
+    stderr_task = asyncio.create_task(_drain(proc.stderr, stderr_tail))
+    # Written concurrently with reading stdout: if codex ever produced a pipe's worth
+    # of output before reading stdin, a sequential write would deadlock both sides.
+    stdin_task = asyncio.create_task(_send_prompt(proc.stdin, run.stdin_prompt))
+    progress = _Progress()
+
+    try:
+        async for line in _ndjson_lines(proc.stdout):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if (ev := _translate_event(event, progress)) is not None:
+                yield ev
+        await _exit_status(proc, stderr_task, stderr_tail, progress)
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(
+            ErrorCode.SDK_ERROR,
+            f"codex runner failed ({type(exc).__name__})",
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
+    finally:
+        # Kill first so the pipes close, then reap the helpers; no step may raise,
+        # or the rest of the cleanup would be skipped.
+        await _terminate(proc)
+        await _finish(stdin_task)
+        await _finish(stderr_task)
+
+
+def _translate_event(event: dict[str, Any], progress: _Progress) -> RunnerEvent | None:
+    """The runner event one codex JSON event amounts to, if any; raises on turn.failed."""
+    ev_type = event.get("type")
+    if ev_type == "thread.started":
+        thread_id = event.get("thread_id")
+        return SessionEvent(session_id=thread_id) if thread_id else None
+    if ev_type == "item.started":
+        return _tool_use_from_item(event.get("item") or {})
+    if ev_type == "item.completed":
+        item = event.get("item") or {}
+        if item.get("type") != "agent_message":
+            return _tool_result_from_item(item)
+        text = item.get("text") or ""
+        if not text:
+            return None
+        progress.last_message = text
+        return TextEvent(delta=text)
+    if ev_type == "turn.completed":
+        progress.completed = True
+        usage = event.get("usage") or {}
+        return DoneEvent(
+            final_text=progress.last_message,
+            # OpenAI semantics: input_tokens includes the cached ones.
+            input_tokens=int(usage.get("input_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or 0),
+            cache_read_input_tokens=usage.get("cached_input_tokens"),
+            cache_creation_input_tokens=usage.get("cache_write_input_tokens"),
+        )
+    if ev_type == "turn.failed":
+        raise ApiError(ErrorCode.SDK_ERROR, provider_message(_failure_text(event)))
+    if ev_type == "error":
+        progress.last_error = event.get("message") or "codex error"
+    return None
+
+
+async def _exit_status(
+    proc: asyncio.subprocess.Process,
+    stderr_task: asyncio.Task[None],
+    stderr_tail: _Tail,
+    progress: _Progress,
+) -> None:
+    """stdout has closed: wait (bounded) for codex to exit and raise what went wrong."""
+    # Bounded: on Python 3.12 wait() only returns once every pipe is closed, and a
+    # leftover process can hold stderr open. returncode is set at exit regardless.
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(asyncio.shield(proc.wait()), _EXIT_WAIT_SEC)
+    if proc.returncode is None:
+        raise ApiError(ErrorCode.SDK_ERROR, "codex closed its output but did not exit")
+    await _terminate(proc)  # sweep leftovers now so they cannot hold stderr open
+    await _finish(stderr_task)
+    if proc.returncode != 0:
+        # What codex reported goes to the client; its stderr only to the log.
+        reported = f": {provider_message(progress.last_error)}" if progress.last_error else ""
+        tail = stderr_tail.text()
+        raise ApiError(
+            ErrorCode.SDK_ERROR,
+            f"codex exited with code {proc.returncode}{reported}",
+            detail=f"stderr: {tail}" if tail.strip() else None,
+        )
+    if not progress.completed:
+        raise ApiError(
+            ErrorCode.SDK_ERROR,
+            provider_message(progress.last_error)
+            if progress.last_error
+            else "codex ended without turn.completed",
+        )
+
+
+def _failure_text(event: dict[str, Any]) -> str:
     """turn.failed carries {"error": {"message": ...}}; tolerate a bare string too."""
     error = event.get("error")
     message = error.get("message") if isinstance(error, dict) else error
@@ -331,18 +412,17 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
-async def _send_prompt(proc, prompt: str) -> None:
-    assert proc.stdin is not None
+async def _send_prompt(stdin: asyncio.StreamWriter, prompt: str) -> None:
     try:
-        proc.stdin.write(prompt.encode())
-        await proc.stdin.drain()
+        stdin.write(prompt.encode())
+        await stdin.drain()
     except (BrokenPipeError, ConnectionResetError):
         pass  # codex exited early; its exit code / stderr tell the story
     finally:
-        proc.stdin.close()
+        stdin.close()
 
 
-async def _ndjson_lines(reader) -> AsyncIterator[bytes]:
+async def _ndjson_lines(reader: asyncio.StreamReader) -> AsyncIterator[bytes]:
     buf = bytearray()
     skipping = False
     while chunk := await reader.read(65536):
@@ -365,27 +445,12 @@ async def _ndjson_lines(reader) -> AsyncIterator[bytes]:
         yield bytes(buf)
 
 
-class _Tail:
-    """The last `limit` bytes written — enough for an error message, bounded memory."""
-
-    def __init__(self, limit: int) -> None:
-        self._limit = limit
-        self._buf = bytearray()
-
-    def append(self, chunk: bytes) -> None:
-        self._buf += chunk
-        del self._buf[: max(0, len(self._buf) - self._limit)]
-
-    def text(self, chars: int = 400) -> str:
-        return self._buf.decode(errors="replace")[-chars:]
-
-
-async def _drain(reader, tail: _Tail) -> None:
+async def _drain(reader: asyncio.StreamReader, tail: _Tail) -> None:
     while chunk := await reader.read(65536):
         tail.append(chunk)
 
 
-async def _finish(task: asyncio.Task) -> None:
+async def _finish(task: asyncio.Task[None]) -> None:
     """Wait (bounded) for a helper task; its failure never reaches the caller's cleanup.
 
     asyncio.wait never raises the task's exception, but does let a cancellation of the
@@ -405,7 +470,7 @@ def _signal_group(pid: int, sig: int) -> None:
         os.killpg(pid, sig)
 
 
-async def _terminate(proc) -> None:
+async def _terminate(proc: asyncio.subprocess.Process) -> None:
     """Stop codex's process group with bounded waits (never raises).
 
     The group holds the npm node wrapper, the native codex binary and anything else
@@ -426,26 +491,22 @@ async def _terminate(proc) -> None:
             await asyncio.wait_for(asyncio.shield(proc.wait()), _KILL_WAIT_SEC)
 
 
-def _tool_use_from_item(item: dict) -> list[RunnerEvent]:
+def _tool_use_from_item(item: dict[str, Any]) -> ToolUseEvent | None:
     item_type = item.get("type")
     tool_id = item.get("id")
 
     if item_type == "mcp_tool_call":
-        return [ToolUseEvent(
-            name=_mcp_name(item),
-            args=item.get("arguments") or {},
-            tool_use_id=tool_id,
-        )]
+        return ToolUseEvent(
+            name=_mcp_name(item), args=item.get("arguments") or {}, tool_use_id=tool_id
+        )
     if item_type == "command_execution":
-        return [ToolUseEvent(
-            name="shell",
-            args={"command": item.get("command") or ""},
-            tool_use_id=tool_id,
-        )]
-    return []
+        return ToolUseEvent(
+            name="shell", args={"command": item.get("command") or ""}, tool_use_id=tool_id
+        )
+    return None
 
 
-def _tool_result_from_item(item: dict) -> RunnerEvent | None:
+def _tool_result_from_item(item: dict[str, Any]) -> ToolResultEvent | None:
     item_type = item.get("type")
     tool_id = item.get("id")
 
@@ -459,7 +520,7 @@ def _tool_result_from_item(item: dict) -> RunnerEvent | None:
     return None
 
 
-def _mcp_name(item: dict) -> str:
+def _mcp_name(item: dict[str, Any]) -> str:
     """`mcp__<server>__<tool>`, the name claude reports for the same tool."""
     tool = item.get("tool") or "unknown"
     server = item.get("server")

@@ -3,8 +3,8 @@ import contextlib
 import functools
 import time
 import uuid
-from collections.abc import AsyncGenerator
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -14,10 +14,13 @@ import structlog
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
+from starlette.types import Message
 
+from .. import claude_runner, codex_runner
 from ..admission import Admission
 from ..auth import require_bearer
-from ..config import Settings, get_settings
+from ..config import Settings
+from ..deps import SettingsDep
 from ..errors import ApiError, ErrorCode
 from ..events import (
     DoneEvent,
@@ -27,6 +30,7 @@ from ..events import (
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
+    TurnSpec,
 )
 from ..models import ConverseRequest
 from ..observability.logging import get_logger
@@ -39,7 +43,7 @@ from ..session import (
     workspace_for,
 )
 from ..sse import sse_event
-from ..turn import StopReason, Turn, TurnEnded, TurnStopped
+from ..turn import StopReason, Turn, TurnEnded, TurnItem, TurnStopped
 
 router = APIRouter()
 log = get_logger("sidecar.converse")
@@ -51,14 +55,17 @@ _SEND_TIMEOUT_SEC = 30
 async def converse(
     body: ConverseRequest,
     request: Request,
+    settings: SettingsDep,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id", max_length=256)] = None,
     x_turn_token: Annotated[str | None, Header(alias="X-Turn-Token", max_length=4096)] = None,
 ) -> EventSourceResponse | JSONResponse:
-    settings = get_settings()
     admission: Admission = request.app.state.admission
     turn_id = uuid.uuid4().hex
     # Every log line of this request — route, stream and the turn's task (created
-    # below, so it inherits this context) — carries the id the client gets.
+    # below, so it inherits this context) — carries the id the client gets. Cleared
+    # first: a server runs each request in a fresh task, an in-process test client
+    # may not.
+    structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(turn_id=turn_id)
     register_turn_secret(x_turn_token)  # e.g. echoed in an MCP error or CLI stderr
 
@@ -72,9 +79,22 @@ async def converse(
         prompt=body.prompt,
     )
 
-    rejected = _preflight_resume(body, settings)
+    rejected = await _preflight_resume(body, settings)
     if rejected is not None:
         return _reject(rejected, turn_id)
+    try:
+        # CLAUDE.md is re-read on every request (hot reload), off the event loop.
+        system_prompt = await asyncio.to_thread(
+            _merge_system_prompt,
+            base_path=settings.claude_md_path,
+            system_prompt=body.system_prompt,
+            append_system_prompt=body.append_system_prompt,
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        log.exception("system_prompt.unreadable", error_type=type(exc).__name__)
+        return _reject(
+            ApiError(ErrorCode.INTERNAL, "could not read the base system prompt"), turn_id
+        )
 
     span_attributes: dict[str, str | bool] = {
         "session.key": body.session_key,
@@ -95,14 +115,9 @@ async def converse(
     run_turn = _get_runner(settings)
 
     def open_runner(cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
-        events = run_turn(
+        spec = TurnSpec(
             prompt=body.prompt,
-            cwd=cwd,
-            system_prompt=_merge_system_prompt(
-                base_path=settings.claude_md_path,
-                system_prompt=body.system_prompt,
-                append_system_prompt=body.append_system_prompt,
-            ),
+            system_prompt=system_prompt,
             resume_session_id=body.session_id,
             mcp_config_path=settings.mcp_config_path,
             mcp_server_url=settings.mcp_server_url,
@@ -110,19 +125,24 @@ async def converse(
             turn_token=x_turn_token,
             ephemeral=body.mode == "stateless",
         )
+        events = run_turn(spec, cwd=cwd)
         if body.mode == "stateless" or settings.provider != "codex":
             return events  # only codex resumes are bound to recorded ids
         return _remembering_session_ids(events, body.session_key, settings.workspace_root)
 
-    def workspace() -> AbstractContextManager[Path]:
+    @asynccontextmanager
+    async def workspace() -> AsyncIterator[Path]:
         if body.mode == "stateless":
             # Under WORKSPACE_ROOT (a volume in k8s), not the container's /tmp.
-            return stateless_workspace(parent=settings.workspace_root / ".stateless")
-        return nullcontext(workspace_for(body.session_key, root=settings.workspace_root))
+            async with stateless_workspace(parent=settings.workspace_root / ".stateless") as ws:
+                yield ws
+        else:
+            root = settings.workspace_root
+            yield await asyncio.to_thread(workspace_for, body.session_key, root=root)
 
     state = _StreamState()
 
-    async def on_client_close(_message) -> None:
+    async def on_client_close(_message: Message) -> None:
         # After `done` the client leaving is expected; let the CLI wind down on its own.
         if not state.done_delivered:
             turn.stop("disconnected")
@@ -150,16 +170,18 @@ async def converse(
     return response
 
 
-def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | None:
+async def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | None:
     """codex resolves a thread id across *all* sessions in CODEX_HOME, so a resume is
     only allowed for ids this sessionKey was issued. (claude scopes transcripts by the
     workspace cwd, which is already per-sessionKey.)"""
     if settings.provider != "codex" or body.session_id is None:
         return None
     try:
-        known = known_session_ids(body.session_key, root=settings.workspace_root)
+        known = await asyncio.to_thread(
+            known_session_ids, body.session_key, root=settings.workspace_root
+        )
     except (OSError, UnicodeDecodeError) as exc:
-        log.error("session_id.record_unreadable", error_type=type(exc).__name__, exc_info=exc)
+        log.exception("session_id.record_unreadable", error_type=type(exc).__name__)
         return ApiError(ErrorCode.INTERNAL, "could not read this sessionKey's session record")
     if body.session_id not in known:
         return ApiError(ErrorCode.BAD_REQUEST, "sessionId was not issued for this sessionKey")
@@ -173,7 +195,9 @@ async def _remembering_session_ids(
         async for ev in runner:
             if isinstance(ev, SessionEvent):
                 try:
-                    remember_session_id(session_key, ev.session_id, root=root)
+                    await asyncio.to_thread(
+                        remember_session_id, session_key, ev.session_id, root=root
+                    )
                 except OSError as exc:
                     # The turn itself is fine; only a later resume of this id gets 400.
                     log.warning("session_id.not_recorded", error_type=type(exc).__name__)
@@ -197,7 +221,7 @@ async def _event_stream(
     settings: Settings,
     session_key: str,
     state: "_StreamState",
-):
+) -> AsyncIterator[dict[str, str]]:
     """Relay the turn's queue as SSE: session → events → exactly one `done` | `error`.
 
     Runs inside sse-starlette's task group, so it never awaits cleanup: every exit
@@ -208,7 +232,7 @@ async def _event_stream(
     drain_budget = max(0.0, settings.shutdown_grace_sec - 1.0)
     drain_deadline: float | None = None
     shutdown_wait = asyncio.ensure_future(shutdown.wait())
-    get: asyncio.Future | None = None
+    get: asyncio.Future[TurnItem] | None = None
     outcome: str | None = None  # "ok" or the error code of the terminal frame sent
     # After `done` the stream stays open, sending nothing, until TurnEnded: the CLI has
     # exited and the sessionKey / user slot are free again. End of stream therefore
@@ -287,6 +311,7 @@ def _terminal_error(
     if reason is not None:
         code, template = _STOP_ERRORS[reason]
         return code.value, template.format(timeout=timeout_sec)
+    assert isinstance(item, TurnEnded)  # a TurnStopped always carries a reason
     error = item.error  # TurnEnded without a stop: the runner finished or failed
     # Details withheld from the wire (CLI stderr, exception text) are in the log.
     see_log = f" (details in the sidecar log, turn {turn_id})"
@@ -316,30 +341,27 @@ def _merge_system_prompt(
 
 
 def _get_runner(settings: Settings) -> Runner:
+    """The provider's run_turn with the operator's policy (from Settings) bound."""
     if settings.provider == "codex":
-        from ..codex_runner import run_turn
-
-        return functools.partial(
-            run_turn,
+        codex_policy = codex_runner.CodexPolicy(
             sandbox=settings.codex_sandbox,
             env_passthrough=settings.codex_env_passthrough_names,
         )
-    from ..claude_runner import run_turn
-
-    return functools.partial(
-        run_turn,
-        # Anything the operator routed to codex is none of the claude agent's business.
-        withheld_env=settings.codex_env_passthrough_names,
-        tools=settings.claude_tools_list,
+        return functools.partial(codex_runner.run_turn, policy=codex_policy)
+    claude_policy = claude_runner.ClaudePolicy(
+        tools=settings.claude_tools_names,
         allowed_tools=settings.claude_allowed_tools_names,
         disallowed_tools=settings.claude_disallowed_tools_names,
         permission_mode=settings.claude_permission_mode,
         setting_sources=settings.claude_setting_sources_names,
         restricted=settings.claude_restricted,
+        # Anything the operator routed to codex is none of the claude agent's business.
+        withheld_env=settings.codex_env_passthrough_names,
         anthropic_api_key=(
             settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None
         ),
     )
+    return functools.partial(claude_runner.run_turn, policy=claude_policy)
 
 
 def _to_sse(ev: RunnerEvent) -> dict[str, str]:
@@ -348,25 +370,34 @@ def _to_sse(ev: RunnerEvent) -> dict[str, str]:
     if isinstance(ev, TextEvent):
         return sse_event("text", {"delta": ev.delta})
     if isinstance(ev, ToolUseEvent):
-        return sse_event("tool_use", {
-            "name": ev.name,
-            "args": ev.args,
-            "toolUseId": ev.tool_use_id,
-        })
-    if isinstance(ev, ToolResultEvent):
-        return sse_event("tool_result", {
-            "name": ev.name,
-            "ok": ev.ok,
-            "toolUseId": ev.tool_use_id,
-        })
-    if isinstance(ev, DoneEvent):
-        return sse_event("done", {
-            "finalText": ev.final_text,
-            "usage": {
-                "inputTokens": ev.input_tokens,
-                "outputTokens": ev.output_tokens,
-                "cacheReadInputTokens": ev.cache_read_input_tokens,
-                "cacheCreationInputTokens": ev.cache_creation_input_tokens,
+        return sse_event(
+            "tool_use",
+            {
+                "name": ev.name,
+                "args": ev.args,
+                "toolUseId": ev.tool_use_id,
             },
-        })
+        )
+    if isinstance(ev, ToolResultEvent):
+        return sse_event(
+            "tool_result",
+            {
+                "name": ev.name,
+                "ok": ev.ok,
+                "toolUseId": ev.tool_use_id,
+            },
+        )
+    if isinstance(ev, DoneEvent):
+        return sse_event(
+            "done",
+            {
+                "finalText": ev.final_text,
+                "usage": {
+                    "inputTokens": ev.input_tokens,
+                    "outputTokens": ev.output_tokens,
+                    "cacheReadInputTokens": ev.cache_read_input_tokens,
+                    "cacheCreationInputTokens": ev.cache_creation_input_tokens,
+                },
+            },
+        )
     raise TypeError(f"unknown runner event: {type(ev).__name__}")

@@ -1,23 +1,27 @@
 import asyncio
+from collections.abc import AsyncGenerator
 from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from sidecar.admission import Admission
-from sidecar.events import SessionEvent
+from sidecar.events import RunnerEvent, SessionEvent
 from sidecar.turn import Turn, TurnStopped
 
 
-def _admission(app) -> Admission:
+def _admission(app: FastAPI) -> Admission:
     # ASGITransport doesn't run the lifespan, so set up state manually.
     if not hasattr(app.state, "admission"):
         app.state.admission = Admission(4)
-    return app.state.admission
+    admission: Admission = app.state.admission
+    return admission
 
 
 async def _running_turn(admission: Admission, session_key: str) -> Turn:
-    async def runner(_cwd):
+    async def runner(_cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
         yield SessionEvent(session_id="s")
         await asyncio.Event().wait()
 
@@ -27,7 +31,7 @@ async def _running_turn(admission: Admission, session_key: str) -> Turn:
     return turn
 
 
-def test_cancel_unknown_session_returns_404(client):
+def test_cancel_unknown_session_returns_404(client: TestClient) -> None:
     r = client.post(
         "/v1/sessions/never-active/cancel",
         headers={"Authorization": "Bearer test-secret"},
@@ -36,13 +40,13 @@ def test_cancel_unknown_session_returns_404(client):
     assert r.json() == {"code": "not_found", "message": "no active turn for sessionKey"}
 
 
-def test_cancel_requires_bearer(client):
+def test_cancel_requires_bearer(client: TestClient) -> None:
     r = client.post("/v1/sessions/anything/cancel")
     assert r.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_cancel_active_stops_the_turn_and_returns_202(app):
+async def test_cancel_active_stops_the_turn_and_returns_202(app: FastAPI) -> None:
     from httpx import ASGITransport, AsyncClient
 
     turn = await _running_turn(_admission(app), "active-key")
@@ -57,12 +61,13 @@ async def test_cancel_active_stops_the_turn_and_returns_202(app):
         assert turn.events.get_nowait() == TurnStopped("cancelled")
     finally:
         turn.stop("disconnected")
+        assert turn.task is not None
         await asyncio.wait({turn.task})
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path_key", ["team/task", "team%2Ftask"])
-async def test_session_key_with_a_slash_can_be_cancelled(app, path_key):
+async def test_session_key_with_a_slash_can_be_cancelled(app: FastAPI, path_key: str) -> None:
     from httpx import ASGITransport, AsyncClient
 
     turn = await _running_turn(_admission(app), "team/task")
@@ -76,4 +81,5 @@ async def test_session_key_with_a_slash_can_be_cancelled(app, path_key):
         assert turn.events.get_nowait() == TurnStopped("cancelled")
     finally:
         turn.stop("disconnected")
+        assert turn.task is not None
         await asyncio.wait({turn.task})

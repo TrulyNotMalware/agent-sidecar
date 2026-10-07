@@ -15,7 +15,7 @@ from sidecar.observability.redaction import (
 R = REDACTED
 
 
-def test_registered_values_are_replaced_longest_first(monkeypatch):
+def test_registered_values_are_replaced_longest_first(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(redaction, "_known", set())
     register_secrets("bearer-secret-value", "bearer-secret-value-2", None, "short")
 
@@ -43,7 +43,7 @@ def test_registered_values_are_replaced_longest_first(monkeypatch):
         ("https://user:hunter22@gw.example/v1", f"https://{R}@gw.example/v1"),
     ],
 )
-def test_credential_shaped_strings_are_replaced(text, scrubbed):
+def test_credential_shaped_strings_are_replaced(text: str, scrubbed: str) -> None:
     assert scrub_secrets(text) == scrubbed
 
 
@@ -60,14 +60,14 @@ def test_credential_shaped_strings_are_replaced(text, scrubbed):
         "Basic Authentication required",
     ],
 )
-def test_ordinary_text_is_left_alone(text):
+def test_ordinary_text_is_left_alone(text: str) -> None:
     assert scrub_secrets(text) == text
 
 
-def test_a_turn_secret_is_scrubbed_only_in_its_own_context():
+def test_a_turn_secret_is_scrubbed_only_in_its_own_context() -> None:
     import contextvars
 
-    def in_turn():
+    def in_turn() -> str:
         register_turn_secret("per-turn-token-value")
         return scrub_secrets("mcp said: per-turn-token-value")
 
@@ -75,7 +75,7 @@ def test_a_turn_secret_is_scrubbed_only_in_its_own_context():
     assert scrub_secrets("per-turn-token-value") == "per-turn-token-value"
 
 
-def test_provider_message_is_scrubbed_and_bounded():
+def test_provider_message_is_scrubbed_and_bounded() -> None:
     message = provider_message("  quota for sk-proj-abcdef123456 " + "x" * 1000)
 
     assert "abcdef123456" not in message
@@ -83,22 +83,26 @@ def test_provider_message_is_scrubbed_and_bounded():
     assert message.endswith("…")
 
 
-def test_every_logged_value_is_scrubbed_nested_too(monkeypatch):
+def test_every_logged_value_is_scrubbed_nested_too(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(redaction, "_known", {"the-bearer-secret"})
 
-    out = _scrub_processor(None, "info", {
-        "event": "turn.closed",
-        "error_detail": "stderr: Authorization: Bearer the-bearer-secret",
-        "nested": {"list": ["sk-proj-abcdef123456"]},
-        "count": 3,
-    })
+    out = _scrub_processor(
+        None,
+        "info",
+        {
+            "event": "turn.closed",
+            "error_detail": "stderr: Authorization: Bearer the-bearer-secret",
+            "nested": {"list": ["sk-proj-abcdef123456"]},
+            "count": 3,
+        },
+    )
 
     assert out["error_detail"] == f"stderr: Authorization: Bearer {REDACTED}"
     assert out["nested"] == {"list": [f"sk-{REDACTED}"]}
     assert out["count"] == 3
 
 
-def test_plain_logging_is_scrubbed_after_formatting(caplog):
+def test_plain_logging_is_scrubbed_after_formatting(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO):
         log = logging.getLogger("some.lib")
         log.info("Authorization: Bearer %s", "abc123def456ghi789")  # split across format/arg
@@ -112,12 +116,14 @@ def test_plain_logging_is_scrubbed_after_formatting(caplog):
     assert messages[0] == f"Authorization: Bearer {R}"
     assert messages[1] == f"connecting to https://{R}@host"
     assert messages[2] == f"boom sk-{R}"
-    assert caplog.records[3].args[2] == f"/x?api_key={R}"  # its formatter unpacks args
+    args = caplog.records[3].args
+    assert isinstance(args, tuple)
+    assert args[2] == f"/x?api_key={R}"  # its formatter unpacks args
 
 
-def test_plain_logging_is_scrubbed_too(caplog):
+def test_plain_logging_is_scrubbed_too(caplog: pytest.LogCaptureFixture) -> None:
     # uvicorn and the Agent SDK log through `logging`, not structlog. (The app's
-    # logging is configured when tests/conftest.py imports sidecar.app.)
+    # logging is configured once per test session by tests/conftest.py.)
     with caplog.at_level(logging.INFO):
         logging.getLogger("uvicorn.error").warning("upstream said %s", "Bearer abc.def.123456")
         try:
@@ -127,10 +133,11 @@ def test_plain_logging_is_scrubbed_too(caplog):
 
     first, second = caplog.records
     assert first.getMessage() == f"upstream said Bearer {R}"
+    assert second.exc_text is not None
     assert "abcdef123456" not in second.exc_text
 
 
-def test_sdk_reader_errors_quoting_cli_output_are_dropped(caplog):
+def test_sdk_reader_errors_quoting_cli_output_are_dropped(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.DEBUG):
         logging.getLogger("claude_agent_sdk._internal.query").error(
             'Fatal error in message reader: Failed to decode JSON: {"text":"private words'

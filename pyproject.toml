@@ -8,7 +8,7 @@ authors = [{ name = "Claude Sidecar Maintainers" }]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "pydantic>=2.9",
+    "pydantic>=2.11",  # validate_by_name
     "pydantic-settings>=2.6",
     "sse-starlette>=3.4",  # shutdown_event / grace; verified with 3.4.1
     "claude-agent-sdk>=0.2.161,<0.3",  # runners depend on CLI flag semantics; bump deliberately
@@ -25,7 +25,8 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
-    "ruff>=0.7",
+    "ruff>=0.16",  # the formatter and rule semantics the project is checked with
+    "mypy>=2.3",
     # tests/integration/fake_mcp_server.py (the SDK allows mcp>=1.23,<3)
     "mcp>=2",
 ]
@@ -40,9 +41,36 @@ packages = ["sidecar"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# ruff >= 0.16 also formats Python code blocks in Markdown; the snippets in AGENTS.md
+# are illustrative (placeholders, trailing comments) and are left as written.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "ANN", "ASYNC", "FAST", "RET", "PTH",
+    "DTZ", "ISC", "G", "T20", "BLE", "PERF", "FBT", "PGH", "PLE", "PLW", "TRY", "RUF", "COM818",
+]
+ignore = ["TRY003"]  # the message belongs where the exception is raised
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/**" = ["T201"]  # command-line output
+"examples/**" = ["T201"]
+# Test set-up does blocking file I/O inside async tests on purpose, and raising inside
+# a try block is how a test fakes a failure with a traceback.
+"tests/**" = ["ASYNC230", "ASYNC240", "TRY301"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code"]
+plugins = ["pydantic.mypy"]
+files = ["sidecar", "tests", "scripts", "examples"]
+
+[tool.pydantic-mypy]
+init_typed = true
+init_forbid_extra = true
+warn_required_dynamic_aliases = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

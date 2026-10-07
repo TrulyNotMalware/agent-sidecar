@@ -30,6 +30,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from sidecar.events import Runner, TurnSpec
+
 _ROOT = Path(__file__).parent.parent
 
 
@@ -84,17 +86,15 @@ def _apply_auth_mode() -> str | None:
         os.environ.pop("ANTHROPIC_API_KEY", None)
         if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
             return (
-                "AUTH_MODE=subscription requires CLAUDE_CODE_OAUTH_TOKEN "
-                "(run `claude setup-token`)"
+                "AUTH_MODE=subscription requires CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token`)"
             )
     return None
 
 
 async def main() -> int:
-    if PROVIDER == "codex":
-        from sidecar.codex_runner import run_turn
-    else:
-        from sidecar.claude_runner import run_turn
+    from sidecar import claude_runner, codex_runner
+
+    run_turn: Runner = codex_runner.run_turn if PROVIDER == "codex" else claude_runner.run_turn
 
     auth_error = _apply_auth_mode()
     if auth_error is not None:
@@ -108,7 +108,7 @@ async def main() -> int:
             shutil.rmtree(os.environ["CODEX_HOME"], ignore_errors=True)
 
 
-async def _smoke(run_turn) -> int:
+async def _smoke(run_turn: Runner) -> int:
     if PROVIDER == "codex":
         from sidecar.codex_runner import ensure_codex_auth
 
@@ -125,16 +125,10 @@ async def _smoke(run_turn) -> int:
     with tempfile.TemporaryDirectory(prefix="sidecar-smoke-") as td:
         try:
             async with asyncio.timeout(60):
-                async for ev in run_turn(
-                    prompt=PROMPT,
-                    cwd=Path(td),
-                    system_prompt=None,
-                    resume_session_id=None,
-                    mcp_config_path=None,
-                ):
+                async for ev in run_turn(TurnSpec(prompt=PROMPT), cwd=Path(td)):
                     print(f"{type(ev).__name__:>16s}  {ev}")
                     done = done or type(ev).__name__ == "DoneEvent"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — a smoke script reports whatever failed
             print(f"\nFAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 1
     if not done:

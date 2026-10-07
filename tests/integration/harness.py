@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TypedDict, Unpack
 
 import pytest
 
@@ -44,7 +44,7 @@ def known_bug(reason: str) -> pytest.MarkDecorator:
     return pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)
 
 
-def precondition(condition: bool, message: str) -> None:
+def precondition(condition: bool, message: str) -> None:  # noqa: FBT001 — assert-like
     """Assert a setup step without letting its failure pass as a known_bug xfail."""
     if not condition:
         pytest.fail(f"harness precondition failed: {message}")
@@ -59,7 +59,10 @@ def pid_alive(pid: int) -> bool:
             return False
         return stat.rpartition(")")[2].split()[0] != "Z"
     out = subprocess.run(
-        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,  # non-zero when the pid is gone: that is an answer, not an error
     ).stdout.strip()
     return bool(out) and not out.startswith("Z")
 
@@ -103,9 +106,9 @@ def parse_sse_frames(buf: str) -> tuple[list[tuple[str, dict[str, Any]]], str]:
         data_lines: list[str] = []
         for line in frame.split("\n"):
             if line.startswith("event:"):
-                name = line[len("event:"):].strip()
+                name = line[len("event:") :].strip()
             elif line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
+                data_lines.append(line[len("data:") :].strip())
         if name is not None:
             data = "\n".join(data_lines)
             events.append((name, json.loads(data) if data else {}))
@@ -221,24 +224,37 @@ def converse(
     return result
 
 
+class ConverseOptions(TypedDict, total=False):
+    """The converse() keyword arguments BackgroundConverse passes through."""
+
+    prompt: str
+    mode: str
+    body: dict[str, Any] | None
+    headers: dict[str, str] | None
+    read_timeout: float
+    total_timeout: float
+    disconnect_after: int | None
+
+
 class BackgroundConverse:
     """Run converse() on a thread so the test can act (cancel, SIGTERM) mid-stream."""
 
-    def __init__(self, port: int, session_key: str, **kwargs: Any) -> None:
+    def __init__(self, port: int, session_key: str, **kwargs: Unpack[ConverseOptions]) -> None:
         self._first_event = threading.Event()
-        self._box: dict[str, Any] = {}
+        self._result: StreamResult | None = None
+        self._error: BaseException | None = None
         self._thread = threading.Thread(
             target=self._run, args=(port, session_key, kwargs), daemon=True
         )
         self._thread.start()
 
-    def _run(self, port: int, session_key: str, kwargs: dict[str, Any]) -> None:
+    def _run(self, port: int, session_key: str, kwargs: ConverseOptions) -> None:
         try:
-            self._box["result"] = converse(
+            self._result = converse(
                 port, session_key, on_event=lambda _name: self._first_event.set(), **kwargs
             )
-        except BaseException as exc:  # surfaced to the test via result()
-            self._box["error"] = exc
+        except BaseException as exc:  # noqa: BLE001 — surfaced to the test via result()
+            self._error = exc
 
     def wait_first_event(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
@@ -246,22 +262,24 @@ class BackgroundConverse:
             if not self._thread.is_alive() or time.monotonic() > deadline:
                 pytest.fail(
                     f"harness precondition failed: no SSE event within {timeout}s "
-                    f"(result={self._box.get('result')!r}, error={self._box.get('error')!r})"
+                    f"(result={self._result!r}, error={self._error!r})"
                 )
 
     def result(self, timeout: float) -> StreamResult:
         self._thread.join(timeout)
         if self._thread.is_alive():
             pytest.fail(f"harness: converse did not finish within {timeout}s")
-        if "error" in self._box:
-            raise self._box["error"]
-        return self._box["result"]
+        if self._error is not None:
+            raise self._error
+        if self._result is None:  # _run sets one of the two before the thread ends
+            raise HarnessError("converse thread ended without a result")
+        return self._result
 
 
 @dataclass
 class SidecarServer:
     port: int
-    proc: subprocess.Popen
+    proc: subprocess.Popen[bytes]
     fake_log: Path
     server_log: Path
 
@@ -317,3 +335,16 @@ class SidecarServer:
         """
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self.proc.pid, signal.SIGKILL)
+
+
+class StartSidecar(Protocol):
+    """The start_sidecar fixture (conftest.py): start a server, return it once it is up."""
+
+    def __call__(
+        self,
+        *,
+        mode: str = ...,
+        provider: str = ...,
+        real_cli: bool = ...,
+        **env_overrides: str,
+    ) -> SidecarServer: ...

@@ -14,7 +14,8 @@ spec:
     spec:
       # ≥ app shutdown + SHUTDOWN_GRACE_SEC + 15s: the native sidecar is SIGTERMed only
       # after the app exits; then stream grace, uvicorn, and up to 12s for turns still
-      # closing their CLI (see docs/operations.md#shutdown).
+      # closing their CLI, and up to 2s flushing spans when TRACING_ENABLED
+      # (see docs/operations.md#shutdown).
       terminationGracePeriodSeconds: 30
       securityContext:
         fsGroup: 10001        # the image's non-root user owns the state volume

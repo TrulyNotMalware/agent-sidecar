@@ -18,17 +18,18 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 
-LOG = os.environ.get("FAKE_LOG", os.devnull)
+LOG = Path(os.environ.get("FAKE_LOG", os.devnull))
 THREAD_ID = "01a0ec52-3a8c-7d43-871b-149bbb8c0acf"
 
 
 def log(msg: str) -> None:
-    with open(LOG, "a") as f:
+    with LOG.open("a", encoding="utf-8") as f:
         f.write(f"{time.time():.3f} pid={os.getpid()} {msg}\n")
 
 
-def out(obj: dict) -> None:
+def out(obj: dict[str, object]) -> None:
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
 

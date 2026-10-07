@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 from pathlib import Path
@@ -6,22 +7,30 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from ..codex_runner import codex_auth_file
-from ..config import Settings, get_settings
+from ..config import Settings
+from ..deps import SettingsDep
 from ..models import HealthStatus
 
 router = APIRouter()
 
 
-@router.get("/healthz", response_model=HealthStatus)
+@router.get("/healthz")
 async def healthz() -> HealthStatus:
     return HealthStatus(status="ok")
 
 
 @router.get("/readyz")
-async def readyz() -> JSONResponse:
-    settings = get_settings()
-    failures: list[str] = []
+async def readyz(settings: SettingsDep) -> JSONResponse:
+    failures = await asyncio.to_thread(_readyz_checks, settings)
+    if failures:
+        body = HealthStatus(status="error", detail="; ".join(failures)).model_dump()
+        return JSONResponse(body, status_code=503)
+    return JSONResponse(HealthStatus(status="ok").model_dump(), status_code=200)
 
+
+def _readyz_checks(settings: Settings) -> list[str]:
+    """What keeps the provider CLI from serving a turn (stat calls: run off the loop)."""
+    failures: list[str] = []
     if settings.provider == "codex":
         if not _codex_binary_ready():
             failures.append("codex binary not found on PATH")
@@ -38,11 +47,7 @@ async def readyz() -> JSONResponse:
                 "no anthropic identity (set ANTHROPIC_API_KEY, or for local testing "
                 "CLAUDE_CODE_OAUTH_TOKEN / a .claude.json in CLAUDE_CONFIG_DIR or ~)"
             )
-
-    if failures:
-        body = HealthStatus(status="error", detail="; ".join(failures)).model_dump()
-        return JSONResponse(body, status_code=503)
-    return JSONResponse(HealthStatus(status="ok").model_dump(), status_code=200)
+    return failures
 
 
 def _binary_ready() -> bool:

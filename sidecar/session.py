@@ -1,8 +1,9 @@
+import asyncio
 import hashlib
 import shutil
 import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 
@@ -41,19 +42,25 @@ def remember_session_id(session_key: str, session_id: str, *, root: Path) -> Non
         f.write(session_id.lower() + "\n")
 
 
-@contextmanager
-def stateless_workspace(*, parent: Path | None = None) -> Iterator[Path]:
+@asynccontextmanager
+async def stateless_workspace(*, parent: Path | None = None) -> AsyncIterator[Path]:
     """Create a fresh workspace directory and remove it on exit.
 
     Used for `mode=stateless` requests where session continuity is not desired
-    and the workspace must not leak across calls.
+    and the workspace must not leak across calls. The removal runs in a thread:
+    the agent may have filled the directory, and the event loop must not wait.
     """
-    parent_str: str | None = None
-    if parent is not None:
-        parent.mkdir(parents=True, exist_ok=True)
-        parent_str = str(parent)
-    path = Path(tempfile.mkdtemp(prefix="claude-sidecar-stateless-", dir=parent_str))
+    # Created synchronously (a mkdir or two): a cancellation can then not land between
+    # creating the directory and the try/finally that removes it. Only the removal goes
+    # to a thread — the agent may have filled the directory.
+    path = _make_stateless_dir(parent)
     try:
         yield path
     finally:
-        shutil.rmtree(path, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, path, ignore_errors=True)
+
+
+def _make_stateless_dir(parent: Path | None) -> Path:
+    if parent is not None:
+        parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="claude-sidecar-stateless-", dir=parent))

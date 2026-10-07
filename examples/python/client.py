@@ -30,9 +30,7 @@ def main(prompt: str) -> None:
     }
     with (
         httpx.Client(timeout=None) as client,
-        client.stream(
-            "POST", f"{SIDECAR_URL}/v1/converse", json=payload, headers=headers
-        ) as r,
+        client.stream("POST", f"{SIDECAR_URL}/v1/converse", json=payload, headers=headers) as r,
     ):
         r.raise_for_status()
         event: str | None = None
@@ -41,9 +39,9 @@ def main(prompt: str) -> None:
                 event = None
                 continue
             if line.startswith("event: "):
-                event = line[len("event: "):]
+                event = line[len("event: ") :]
             elif line.startswith("data: "):
-                data = json.loads(line[len("data: "):])
+                data = json.loads(line[len("data: ") :])
                 print(f"[{event}] {data}")
 
 

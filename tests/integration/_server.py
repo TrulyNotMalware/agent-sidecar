@@ -18,9 +18,9 @@ if not callable(getattr(subprocess_cli.SubprocessCLITransport, "_find_cli", None
         "update tests/integration/_server.py before running the integration tests"
     )
 if os.environ.get("FAKE_CLI"):
-    subprocess_cli.SubprocessCLITransport._find_cli = lambda self: os.environ["FAKE_CLI"]
+    subprocess_cli.SubprocessCLITransport._find_cli = lambda self: os.environ["FAKE_CLI"]  # type: ignore[method-assign]  # swaps the SDK's CLI lookup for the fake
 os.environ.setdefault("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
 
-from sidecar.__main__ import main  # noqa: E402
+from sidecar.__main__ import main
 
 main()

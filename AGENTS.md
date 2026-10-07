@@ -37,8 +37,9 @@ All business logic lives in MCP servers that the consumer configures and the sid
 
 ```
 sidecar/                 # Application package
-├── __main__.py          # Entry: uvicorn runner
+├── __main__.py          # Entry: uvicorn runner (app factory, no import-time work)
 ├── app.py               # FastAPI factory + lifespan
+├── deps.py              # SettingsDep (settings via Depends)
 ├── auth.py              # Bearer token dependency
 ├── claude_runner.py     # Claude Agent SDK adapter
 ├── codex_runner.py      # OpenAI Codex CLI adapter
@@ -287,7 +288,9 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 > names, apply Prometheus relabeling rules to cap cardinality.
 
 ### Structured Logging (structlog)
-- JSON output by default.
+- JSON output, one object per line — for the sidecar's structlog lines and, through the
+  same processor chain, for uvicorn's and the Agent SDK's plain `logging` records
+  (`__main__` starts uvicorn with `log_config=None`, so they reach the root handler).
 - When `LOG_PROMPTS=false` (default), these keys are redacted to `"<redacted>"`:
   `prompt`, `system_prompt`, `append_system_prompt`, `delta`, `final_text`, `text`, `args`, `tool_args`.
 - Empty / `None` values are **not** redacted.
@@ -312,7 +315,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 
 ### OpenTelemetry
 - Activated only when `TRACING_ENABLED=true`.
-- Exports via OTLP HTTP (`opentelemetry-exporter-otlp-proto-http`).
+- Exports via OTLP HTTP (`opentelemetry-exporter-otlp-proto-http`). The provider is shut down
+  (last batch exported) at lifespan shutdown: the SDK's atexit flush does not run on SIGTERM.
 - FastAPI auto-instrumented. Per-turn span `claude.turn` carries:
   `session.key`, `session.mode`, `session.resume`, `user.id`, `turn.id`, `tokens.input`,
   `tokens.output`, `outcome`. A failed turn sets the span status to ERROR and adds an
@@ -339,11 +343,15 @@ An `error` frame's `message` is what the provider reported (API status, quota,
 context length — credentials scrubbed, ≤ 500 chars) or a fixed text; CLI stderr and
 exception text stay in the log (`ApiError.detail`), and the message then names the
 turn id (`X-Turn-Id`) to look them up with.
-Every error body from a sidecar route is `{"code": ..., "message": ...}` (one `ApiError` handler in
-`app.py`; validation errors are mapped to `bad_request`); `401` also sends
-`WWW-Authenticate: Bearer`.
+Every error body is `{"code": ..., "message": ...}`: an `ApiError` from a route or
+dependency, a validation error (mapped to `bad_request`), the router's own `404` / `405`
+(`not_found` / `bad_request`, `Allow` kept) and an unhandled exception before a stream
+opens (`internal`, never the exception's text) — all handlers live in `app.py`. `401` also
+sends `WWW-Authenticate: Bearer`.
 On `/v1/converse` only pre-stream errors are sent with that status and a JSON body:
-`bad_request`, `unauthorized`, and `busy` (plus `not_found` on `/cancel`). Once the
+`bad_request`, `unauthorized`, `busy`, and `internal` when a file the turn needs cannot
+be read before it starts (the base system prompt, a codex session record) — plus
+`not_found` on `/cancel`. Once the
 SSE stream has opened the response is already HTTP 200, so `timeout`, `sdk_error`,
 `internal`, and `cancelled` surface **only** as a terminal `event: error` frame —
 their HTTP code is never put on the wire for the converse response.
@@ -377,12 +385,17 @@ pip install -e ".[dev]"
 BEARER_SECRET=dev-secret python -m sidecar
 ```
 
-### Lint + Test
+### Format + Lint + Types + Test
 ```bash
-ruff check .
-pytest tests/ -v                      # everything (integration tests take ~30s)
-pytest tests/ -m "not integration"    # fast unit-only loop
+ruff format --check . && ruff check .   # formatter, then the rule set in pyproject (ANN, ASYNC, FAST, …)
+mypy                                    # strict, with the pydantic plugin: sidecar/ tests/ scripts/ examples/
+pytest tests/ -v                        # everything (integration tests take ~70s)
+pytest tests/ -m "not integration"      # fast unit-only loop
 ```
+
+Every function is fully annotated — parameters and return types, tests and fixtures
+included — and `mypy --strict` must stay clean; a `# type: ignore[code]` or `# noqa: CODE`
+carries its code and a reason.
 
 `tests/integration/` starts the real server per test with the SDK pointed at
 `tests/integration/fake_claude.py`, so cancel / disconnect / timeout / SIGTERM
@@ -441,7 +454,8 @@ Key manifests:
 - `tini` is required as PID-1 to reap zombie claude subprocesses. Do not remove from Dockerfile.
 - The image runs as uid 10001; all mutable state is under `/var/lib/claude-sidecar`
   (`WORKSPACE_ROOT`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) — mount one volume there.
-- Keep k8s `terminationGracePeriodSeconds` ≥ app shutdown + `SHUTDOWN_GRACE_SEC` + 15 s: a
+- Keep k8s `terminationGracePeriodSeconds` ≥ app shutdown + `SHUTDOWN_GRACE_SEC` + 15 s
+  (+ 2 s with `TRACING_ENABLED`, for the span flush): a
   native sidecar is SIGTERMed only after the app container exits (stream grace + uvicorn +
   up to 12 s for turns still closing their CLI).
 
@@ -459,14 +473,15 @@ await admission.drain(grace_sec)  # stop all turns, wait for cleanup; returns fo
 
 ### `sidecar/claude_runner.py` / `codex_runner.py` — `run_turn()`
 ```python
-async for event in run_turn(
-    prompt=..., cwd=..., system_prompt=...,
-    resume_session_id=..., mcp_config_path=...,
-):
+spec = TurnSpec(prompt=..., system_prompt=..., resume_session_id=..., mcp_config_path=...,
+                mcp_server_url=..., mcp_server_name=..., turn_token=..., ephemeral=...)
+async for event in run_turn(spec, cwd=workspace, policy=ClaudePolicy(...)):  # or CodexPolicy
     # event: SessionEvent | TextEvent | ToolUseEvent | ToolResultEvent | DoneEvent
 ```
-The events and the `Runner` protocol (the common keyword arguments) live in
-`sidecar/events.py`.
+`TurnSpec` (what the request asked for), the events and the `Runner` protocol
+(`run_turn(spec, *, cwd)` with the provider's policy already bound) live in
+`sidecar/events.py`. `ClaudePolicy` / `CodexPolicy` (the operator's agent policy, built
+from `Settings` in `_get_runner()`) live next to their runner.
 Runners have no timeout of their own; the caller bounds the turn by cancelling the
 task that iterates the generator **once**, and each runner closes its CLI on the way
 out (`contextlib.aclosing` at every level).
@@ -484,21 +499,21 @@ turn.stop("cancelled")               # first call wins; queues TurnStopped, canc
 ```python
 workspace_for(session_key, root=settings.workspace_root)  # → Path (deterministic SHA-256 shard)
 
-with stateless_workspace(parent=settings.workspace_root / ".stateless") as ws:
-    ...  # tempdir, auto-deleted on exit
+async with stateless_workspace(parent=settings.workspace_root / ".stateless") as ws:
+    ...  # tempdir, removed (in a thread) on exit
 ```
 
 ---
 
 ## Adding a New Provider
 
-1. Create `sidecar/<name>_runner.py` implementing async `run_turn()` that satisfies the
-   `Runner` protocol in `sidecar/events.py` (the common keyword arguments) and yields its
+1. Create `sidecar/<name>_runner.py` implementing async `run_turn(spec: TurnSpec, *, cwd,
+   policy)` that satisfies the `Runner` protocol in `sidecar/events.py` and yields its
    `RunnerEvent` types.
    Do not add a timeout: the turn cancels the task iterating the generator once, and the
    runner must close its CLI on the way out (`contextlib.aclosing` around every inner
-   generator). Provider-specific options are bound in `_get_runner()` with
-   `functools.partial`.
+   generator). Provider-specific options are a frozen `<Name>Policy` dataclass next to the
+   runner, built from `Settings` and bound in `_get_runner()` with `functools.partial`.
 2. Add the provider name to `PROVIDER` docs in `config.py`.
 3. Extend `_readyz_checks()` in `sidecar/routes/health.py`.
 4. Wire the runner in `sidecar/routes/converse.py` (`_get_runner()`).

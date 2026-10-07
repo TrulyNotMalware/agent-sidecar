@@ -48,22 +48,31 @@ class DoneEvent:
 RunnerEvent = SessionEvent | TextEvent | ToolUseEvent | ToolResultEvent | DoneEvent
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TurnSpec:
+    """One turn as the request describes it, the same for every provider.
+
+    The workspace (`cwd`) is not part of it: sidecar.turn.Turn enters the workspace
+    after admission and hands it to the runner separately.
+    """
+
+    prompt: str
+    system_prompt: str | None = None
+    resume_session_id: str | None = None
+    # The operator's static MCP servers (claude-only; codex reads its own config.toml).
+    mcp_config_path: Path | None = None
+    # The per-turn streamable-HTTP MCP server and the token that scopes it.
+    mcp_server_url: str | None = None
+    mcp_server_name: str = "domain-tools"
+    turn_token: str | None = None
+    # mode=stateless: the workspace is temporary and the session cannot be resumed.
+    ephemeral: bool = False
+
+
 class Runner(Protocol):
-    """`run_turn` with its provider-specific options already bound (functools.partial).
+    """A provider's `run_turn` with its policy already bound (functools.partial).
 
     A generator, not just an iterator: closing it (aclose) must close the CLI.
     """
 
-    def __call__(
-        self,
-        *,
-        prompt: str,
-        cwd: Path,
-        system_prompt: str | None,
-        resume_session_id: str | None,
-        mcp_config_path: Path | None,
-        mcp_server_url: str | None,
-        mcp_server_name: str,
-        turn_token: str | None,
-        ephemeral: bool,
-    ) -> AsyncGenerator[RunnerEvent, None]: ...
+    def __call__(self, spec: TurnSpec, *, cwd: Path) -> AsyncGenerator[RunnerEvent, None]: ...

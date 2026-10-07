@@ -1,112 +1,86 @@
 import json
+from pathlib import Path
 
-from sidecar.mcp import build_mcp_servers
+import pytest
+
+from sidecar.mcp import per_turn_mcp_servers, static_mcp_servers
+
+PER_TURN = {
+    "type": "http",
+    "url": "https://app.example/mcp",
+    "headers": {"Authorization": "Bearer tok-abc"},
+}
 
 
-def test_url_unset_passes_static_path_through_as_str(tmp_path):
+def _merged(
+    static: dict[str, object], *, server_url: str | None, turn_token: str | None
+) -> dict[str, object] | None:
+    return per_turn_mcp_servers(
+        static, server_name="domain-tools", server_url=server_url, turn_token=turn_token
+    )
+
+
+def test_url_unset_means_nothing_to_merge(tmp_path: Path) -> None:
     static = tmp_path / "mcp.json"
-    static.write_text('{"mcpServers": {}}')
+    static.write_text('{"mcpServers": {"other": {}}}')
 
-    result = build_mcp_servers(
-        static_config_path=static,
-        server_name="domain-tools",
-        server_url=None,
-        turn_token="tok-1",
-    )
-
-    assert result == str(static)
+    # The runner then passes the static mcp.json to the CLI as a path, unchanged.
+    assert _merged(static_mcp_servers(static), server_url=None, turn_token="tok-1") is None
 
 
-def test_all_unset_returns_none():
-    result = build_mcp_servers(
-        static_config_path=None,
-        server_name="domain-tools",
-        server_url=None,
-        turn_token=None,
-    )
-
-    assert result is None
+def test_all_unset_means_nothing_to_merge() -> None:
+    assert _merged(static_mcp_servers(None), server_url=None, turn_token=None) is None
 
 
-def test_url_and_token_without_static_builds_bearer_entry():
-    result = build_mcp_servers(
-        static_config_path=None,
-        server_name="domain-tools",
-        server_url="https://app.example/mcp",
-        turn_token="tok-abc",
-    )
+def test_url_and_token_without_static_builds_bearer_entry() -> None:
+    result = _merged({}, server_url="https://app.example/mcp", turn_token="tok-abc")
 
-    assert result == {
-        "domain-tools": {
-            "type": "http",
-            "url": "https://app.example/mcp",
-            "headers": {"Authorization": "Bearer tok-abc"},
-        }
-    }
+    assert result == {"domain-tools": PER_TURN}
 
 
-def test_static_file_merge_keeps_other_servers(tmp_path):
+def test_static_file_merge_keeps_other_servers(tmp_path: Path) -> None:
     static = tmp_path / "mcp.json"
     static.write_text(
         json.dumps({"mcpServers": {"other": {"type": "sse", "url": "http://other/mcp"}}})
     )
 
-    result = build_mcp_servers(
-        static_config_path=static,
-        server_name="domain-tools",
-        server_url="https://app.example/mcp",
-        turn_token="tok-abc",
+    result = _merged(
+        static_mcp_servers(static), server_url="https://app.example/mcp", turn_token="tok-abc"
     )
 
-    assert result["other"] == {"type": "sse", "url": "http://other/mcp"}
-    assert result["domain-tools"]["url"] == "https://app.example/mcp"
+    assert result == {"other": {"type": "sse", "url": "http://other/mcp"}, "domain-tools": PER_TURN}
 
 
-def test_name_collision_prefers_per_turn_entry(tmp_path):
+def test_name_collision_prefers_per_turn_entry(tmp_path: Path) -> None:
     static = tmp_path / "mcp.json"
     static.write_text(
         json.dumps({"mcpServers": {"domain-tools": {"type": "sse", "url": "http://stale/mcp"}}})
     )
+    servers = static_mcp_servers(static)
 
-    result = build_mcp_servers(
-        static_config_path=static,
-        server_name="domain-tools",
-        server_url="https://app.example/mcp",
-        turn_token="tok-abc",
-    )
+    result = _merged(servers, server_url="https://app.example/mcp", turn_token="tok-abc")
 
-    assert result["domain-tools"] == {
-        "type": "http",
-        "url": "https://app.example/mcp",
-        "headers": {"Authorization": "Bearer tok-abc"},
-    }
+    assert result == {"domain-tools": PER_TURN}
+    assert servers["domain-tools"]["url"] == "http://stale/mcp"  # the input is not mutated
 
 
-def test_unparseable_static_file_still_returns_per_turn_entry(tmp_path):
+def test_unparseable_static_file_still_returns_per_turn_entry(tmp_path: Path) -> None:
     static = tmp_path / "mcp.json"
     static.write_text("{ not valid json")
 
-    result = build_mcp_servers(
-        static_config_path=static,
-        server_name="domain-tools",
-        server_url="https://app.example/mcp",
-        turn_token="tok-abc",
+    assert static_mcp_servers(static) == {}
+    result = _merged(
+        static_mcp_servers(static), server_url="https://app.example/mcp", turn_token="tok-abc"
     )
 
-    assert result == {
-        "domain-tools": {
-            "type": "http",
-            "url": "https://app.example/mcp",
-            "headers": {"Authorization": "Bearer tok-abc"},
-        }
-    }
+    assert result == {"domain-tools": PER_TURN}
 
 
-def test_private_mcp_config_is_owner_only_and_removed_on_exit():
+async def test_private_mcp_config_is_owner_only_and_removed_on_exit() -> None:
     from sidecar.mcp import private_mcp_config
 
     servers = {"domain-tools": {"type": "http", "url": "u", "headers": {"Authorization": "t"}}}
-    with private_mcp_config(servers) as path:
+    async with private_mcp_config(servers) as path:
         assert json.loads(path.read_text()) == {"mcpServers": servers}
         assert path.stat().st_mode & 0o777 == 0o600
         assert path.parent.stat().st_mode & 0o777 == 0o700
@@ -114,17 +88,16 @@ def test_private_mcp_config_is_owner_only_and_removed_on_exit():
     assert not path.parent.exists()
 
 
-def test_private_mcp_config_is_removed_when_the_turn_fails():
-    import pytest
-
+async def test_private_mcp_config_is_removed_when_the_turn_fails() -> None:
     from sidecar.mcp import private_mcp_config
 
-    with pytest.raises(RuntimeError), private_mcp_config({"s": {}}) as path:
-        raise RuntimeError("turn failed")
+    with pytest.raises(RuntimeError):
+        async with private_mcp_config({"s": {}}) as path:
+            raise RuntimeError("turn failed")
     assert not path.parent.exists()
 
 
-def test_tool_prefix_uses_the_cli_normalization():
+def test_tool_prefix_uses_the_cli_normalization() -> None:
     from sidecar.mcp import mcp_tool_prefix
 
     assert mcp_tool_prefix("domain-tools") == "mcp__domain-tools"
@@ -133,7 +106,7 @@ def test_tool_prefix_uses_the_cli_normalization():
     assert mcp_tool_prefix("has space") == "mcp__has_space"
 
 
-def test_static_server_names_tolerate_bad_files(tmp_path):
+def test_static_server_names_tolerate_bad_files(tmp_path: Path) -> None:
     from sidecar.mcp import static_mcp_server_names
 
     bad_json = tmp_path / "bad.json"

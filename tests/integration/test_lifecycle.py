@@ -15,6 +15,7 @@ import pytest
 
 from .harness import (
     BackgroundConverse,
+    StartSidecar,
     converse,
     pid_alive,
     precondition,
@@ -24,7 +25,7 @@ from .harness import (
 pytestmark = pytest.mark.integration
 
 
-def test_normal_turn_streams_session_text_done(start_sidecar):
+def test_normal_turn_streams_session_text_done(start_sidecar: StartSidecar) -> None:
     srv = start_sidecar(mode="normal")
 
     r = converse(srv.port, "k-normal")
@@ -36,7 +37,7 @@ def test_normal_turn_streams_session_text_done(start_sidecar):
     assert r.terminated
 
 
-def test_turn_timeout_emits_timeout_frame(start_sidecar):
+def test_turn_timeout_emits_timeout_frame(start_sidecar: StartSidecar) -> None:
     srv = start_sidecar(mode="hang", TURN_TIMEOUT_SEC="2")
 
     r = converse(srv.port, "k-timeout")
@@ -47,7 +48,7 @@ def test_turn_timeout_emits_timeout_frame(start_sidecar):
 
 
 # A10: the timeout frame must not wait for the CLI to be closed.
-def test_turn_timeout_is_reported_promptly(start_sidecar):
+def test_turn_timeout_is_reported_promptly(start_sidecar: StartSidecar) -> None:
     srv = start_sidecar(mode="hang", TURN_TIMEOUT_SEC="2")
 
     r = converse(srv.port, "k-timeout-prompt")
@@ -57,7 +58,7 @@ def test_turn_timeout_is_reported_promptly(start_sidecar):
 
 
 # A6: a CLI failure after the result must not add a second terminal frame.
-def test_failure_after_result_keeps_a_single_terminal_frame(start_sidecar):
+def test_failure_after_result_keeps_a_single_terminal_frame(start_sidecar: StartSidecar) -> None:
     srv = start_sidecar(mode="result_then_fail")
 
     r = converse(srv.port, "k-result-then-fail")
@@ -67,7 +68,7 @@ def test_failure_after_result_keeps_a_single_terminal_frame(start_sidecar):
 
 
 # A6: a runner that ends without a result still gets a terminal frame.
-def test_exit_without_result_emits_error_terminal(start_sidecar):
+def test_exit_without_result_emits_error_terminal(start_sidecar: StartSidecar) -> None:
     srv = start_sidecar(mode="no_result")
 
     r = converse(srv.port, "k-no-result")
@@ -78,7 +79,7 @@ def test_exit_without_result_emits_error_terminal(start_sidecar):
 
 
 # A2/A3: cancel is honoured while the turn is silent, with a clean end of stream.
-def test_cancel_of_silent_turn_emits_cancelled_frame(start_sidecar):
+def test_cancel_of_silent_turn_emits_cancelled_frame(start_sidecar: StartSidecar) -> None:
     srv = start_sidecar(mode="hang")
     bg = BackgroundConverse(srv.port, "k-cancel")
     bg.wait_first_event(10)
@@ -97,7 +98,9 @@ def test_cancel_of_silent_turn_emits_cancelled_frame(start_sidecar):
 
 
 # A4: an abandoned CLI is terminated, and its sessionKey stays busy until then.
-def test_client_disconnect_terminates_cli_before_releasing_session(start_sidecar):
+def test_client_disconnect_terminates_cli_before_releasing_session(
+    start_sidecar: StartSidecar,
+) -> None:
     srv = start_sidecar(mode="hang")
 
     first = converse(srv.port, "k-disconnect", disconnect_after=1)
@@ -116,7 +119,7 @@ def test_client_disconnect_terminates_cli_before_releasing_session(start_sidecar
 
 
 # A1: SIGTERM lets a turn finish within SHUTDOWN_GRACE_SEC.
-def test_sigterm_mid_turn_ends_stream_with_terminal_frame(start_sidecar):
+def test_sigterm_mid_turn_ends_stream_with_terminal_frame(start_sidecar: StartSidecar) -> None:
     srv = start_sidecar(mode="slow", FAKE_SLEEP="2", SHUTDOWN_GRACE_SEC="8")
     bg = BackgroundConverse(srv.port, "k-sigterm")
     bg.wait_first_event(10)
@@ -132,7 +135,7 @@ def test_sigterm_mid_turn_ends_stream_with_terminal_frame(start_sidecar):
 
 
 # A7: a workspace failure is reported as an error frame.
-def test_workspace_failure_emits_error_frame(start_sidecar, tmp_path):
+def test_workspace_failure_emits_error_frame(start_sidecar: StartSidecar, tmp_path: Path) -> None:
     srv = start_sidecar(mode="normal")
     # Replace the (valid at startup) workspace root with a regular file.
     [root] = tmp_path.glob("server-*/ws")
@@ -146,7 +149,7 @@ def test_workspace_failure_emits_error_frame(start_sidecar, tmp_path):
 
 
 # A1: past SHUTDOWN_GRACE_SEC the stream still ends with a frame, and the CLI is closed.
-def test_sigterm_past_grace_sends_cancelled_and_closes_cli(start_sidecar):
+def test_sigterm_past_grace_sends_cancelled_and_closes_cli(start_sidecar: StartSidecar) -> None:
     srv = start_sidecar(mode="hang", SHUTDOWN_GRACE_SEC="3")
     bg = BackgroundConverse(srv.port, "k-sigterm-grace")
     bg.wait_first_event(10)
@@ -169,7 +172,9 @@ def test_sigterm_past_grace_sends_cancelled_and_closes_cli(start_sidecar):
     ("mode", "terminal"),
     [("result_then_linger", "done"), ("error_result_then_linger", "error")],
 )
-def test_end_of_stream_means_the_session_key_is_free(start_sidecar, mode, terminal):
+def test_end_of_stream_means_the_session_key_is_free(
+    start_sidecar: StartSidecar, mode: str, terminal: str
+) -> None:
     srv = start_sidecar(mode=mode, FAKE_SLEEP="1.5")
 
     first = converse(srv.port, "k-chain")
@@ -182,7 +187,9 @@ def test_end_of_stream_means_the_session_key_is_free(start_sidecar, mode, termin
     assert second.status == 200
 
 
-def test_stateless_workspace_lives_under_workspace_root_and_is_removed(start_sidecar, tmp_path):
+def test_stateless_workspace_lives_under_workspace_root_and_is_removed(
+    start_sidecar: StartSidecar, tmp_path: Path
+) -> None:
     srv = start_sidecar(mode="normal")
 
     r = converse(srv.port, "k-stateless", mode="stateless")

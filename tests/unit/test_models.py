@@ -4,15 +4,15 @@ from pydantic import ValidationError
 from sidecar.models import ConverseRequest
 
 
-def test_minimum_request():
+def test_minimum_request() -> None:
     req = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi"})
     assert req.session_key == "k"
     assert req.prompt == "hi"
     assert req.mode == "session"
 
 
-def test_camelcase_aliases_round_trip():
-    payload = {
+def test_camelcase_aliases_round_trip() -> None:
+    payload: dict[str, object] = {
         "sessionKey": "k",
         "prompt": "hi",
         "sessionId": "01a0ec1c-14d2-7d12-aaa7-47100d58f161",
@@ -26,17 +26,17 @@ def test_camelcase_aliases_round_trip():
     assert req.mode == "session"
 
 
-def test_extra_fields_rejected():
+def test_extra_fields_rejected() -> None:
     with pytest.raises(ValidationError):
         ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "junk": 1})
 
 
-def test_empty_prompt_rejected():
+def test_empty_prompt_rejected() -> None:
     with pytest.raises(ValidationError):
         ConverseRequest.model_validate({"sessionKey": "k", "prompt": ""})
 
 
-def test_empty_session_key_rejected():
+def test_empty_session_key_rejected() -> None:
     with pytest.raises(ValidationError):
         ConverseRequest.model_validate({"sessionKey": "", "prompt": "hi"})
 
@@ -45,7 +45,7 @@ def test_empty_session_key_rejected():
     "session_id",
     ["01a0ec1c-14d2-7d12-aaa7-47100d58f161", "3F2504E0-4F89-11D3-9A0C-0305E82C3301"],
 )
-def test_session_id_accepts_real_ids(session_id):
+def test_session_id_accepts_real_ids(session_id: str) -> None:
     req = ConverseRequest.model_validate(
         {"sessionKey": "k", "prompt": "hi", "sessionId": session_id}
     )
@@ -63,24 +63,22 @@ def test_session_id_accepts_real_ids(session_id):
         "has space",
     ],
 )
-def test_session_id_rejects_values_a_cli_could_parse_as_flags(session_id):
+def test_session_id_rejects_values_a_cli_could_parse_as_flags(session_id: str) -> None:
     with pytest.raises(ValidationError):
-        ConverseRequest.model_validate(
-            {"sessionKey": "k", "prompt": "hi", "sessionId": session_id}
-        )
+        ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": session_id})
 
 
-def test_empty_session_id_means_start_fresh():
+def test_empty_session_id_means_start_fresh() -> None:
     req = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": ""})
     assert req.session_id is None
 
 
-def test_null_session_id_means_start_fresh():
+def test_null_session_id_means_start_fresh() -> None:
     req = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": None})
     assert req.session_id is None
 
 
-def test_stateless_turns_cannot_resume():
+def test_stateless_turns_cannot_resume() -> None:
     with pytest.raises(ValidationError, match="stateless"):
         ConverseRequest.model_validate(
             {
@@ -93,8 +91,8 @@ def test_stateless_turns_cannot_resume():
 
 
 @pytest.mark.parametrize("field", ["prompt", "systemPrompt", "appendSystemPrompt", "sessionKey"])
-def test_text_that_cannot_be_encoded_is_a_validation_error(field):
-    body = {"sessionKey": "k", "prompt": "hi", field: "bad \ud800 text"}
+def test_text_that_cannot_be_encoded_is_a_validation_error(field: str) -> None:
+    body: dict[str, object] = {"sessionKey": "k", "prompt": "hi", field: "bad \ud800 text"}
 
     # (pydantic itself refuses them in the length-constrained fields)
     with pytest.raises(ValidationError):
