@@ -25,7 +25,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
-    "ruff>=0.7",
+    "ruff>=0.16",  # the formatter and rule semantics the project is checked with
     "mypy>=2.3",
     # tests/integration/fake_mcp_server.py (the SDK allows mcp>=1.23,<3)
     "mcp>=2",
@@ -41,6 +41,9 @@ packages = ["sidecar"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# ruff >= 0.16 also formats Python code blocks in Markdown; the snippets in AGENTS.md
+# are illustrative (placeholders, trailing comments) and are left as written.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = [
