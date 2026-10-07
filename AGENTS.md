@@ -288,7 +288,9 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 > names, apply Prometheus relabeling rules to cap cardinality.
 
 ### Structured Logging (structlog)
-- JSON output by default.
+- JSON output, one object per line — for the sidecar's structlog lines and, through the
+  same processor chain, for uvicorn's and the Agent SDK's plain `logging` records
+  (`__main__` starts uvicorn with `log_config=None`, so they reach the root handler).
 - When `LOG_PROMPTS=false` (default), these keys are redacted to `"<redacted>"`:
   `prompt`, `system_prompt`, `append_system_prompt`, `delta`, `final_text`, `text`, `args`, `tool_args`.
 - Empty / `None` values are **not** redacted.

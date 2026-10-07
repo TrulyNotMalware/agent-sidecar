@@ -1,7 +1,7 @@
 import logging
 
 import structlog
-from structlog.typing import EventDict, FilteringBoundLogger, WrappedLogger
+from structlog.typing import EventDict, FilteringBoundLogger, Processor, WrappedLogger
 
 from .redaction import scrub_secrets
 
@@ -102,15 +102,47 @@ class _DropSdkLinesQuotingCliOutput(logging.Filter):
         return not record.getMessage().startswith(self._PREFIXES)
 
 
-_configured = False
+# What every line carries, whether it came from structlog or from plain logging.
+_SHARED_PROCESSORS: tuple[Processor, ...] = (
+    structlog.contextvars.merge_contextvars,
+    structlog.processors.add_log_level,
+    structlog.processors.TimeStamper(fmt="iso"),
+)
+
+
+def _render_processors(*, redact: bool) -> list[Processor]:
+    processors: list[Processor] = [_redact_processor] if redact else []
+    processors += [_scrub_processor, structlog.processors.JSONRenderer()]
+    return processors
+
+
+def stdlib_formatter(*, redact: bool = True) -> logging.Formatter:
+    """Render plain `logging` records (uvicorn, the Agent SDK) like structlog's lines.
+
+    One JSON object per record: the message as `event`, level, timestamp, the bound
+    context (turn_id), and a scrubbed traceback under `exception`.
+    """
+    return structlog.stdlib.ProcessorFormatter(
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.format_exc_info,
+            *_render_processors(redact=redact),
+        ],
+        foreign_pre_chain=list(_SHARED_PROCESSORS),
+    )
 
 
 def configure_logging(*, level: str = "INFO", redact: bool = True) -> None:
-    global _configured
-    if _configured:
+    """Configure structlog and plain logging once: every line is one JSON object.
+
+    The first configuration wins: tests build several apps in one process.
+    """
+    if structlog.is_configured():
         return
 
-    logging.basicConfig(format="%(message)s", level=level)
+    handler = logging.StreamHandler()
+    handler.setFormatter(stdlib_formatter(redact=redact))
+    logging.basicConfig(handlers=[handler], level=level)
     _install_stdlib_scrubbing()
     if redact:
         for name in (
@@ -119,23 +151,15 @@ def configure_logging(*, level: str = "INFO", redact: bool = True) -> None:
         ):
             logging.getLogger(name).addFilter(_DropSdkLinesQuotingCliOutput())
 
-    processors: list[structlog.typing.Processor] = [
-        structlog.contextvars.merge_contextvars,
-        structlog.processors.add_log_level,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.format_exc_info,
-    ]
-    if redact:
-        processors.append(_redact_processor)
-    processors.append(_scrub_processor)
-    processors.append(structlog.processors.JSONRenderer())
-
     structlog.configure(
-        processors=processors,
+        processors=[
+            *_SHARED_PROCESSORS,
+            structlog.processors.format_exc_info,
+            *_render_processors(redact=redact),
+        ],
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level)),
         cache_logger_on_first_use=True,
     )
-    _configured = True
 
 
 def get_logger(name: str | None = None) -> FilteringBoundLogger:
