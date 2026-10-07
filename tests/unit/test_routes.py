@@ -1,9 +1,25 @@
 import dataclasses
+import functools
+from collections.abc import AsyncGenerator
+from pathlib import Path
+from typing import NoReturn
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from sidecar.config import Settings
+from sidecar.events import Runner, RunnerEvent, TurnSpec
+from sidecar.turn import Turn, TurnEnded, TurnStopped
 
 
-def _install_recording_runner(monkeypatch):
+def _settings(**overrides: object) -> Settings:
+    # Raw env-style values (plain str for a SecretStr, unknown literals) are what these
+    # tests feed through pydantic-settings' validation, so they are untyped on purpose.
+    return Settings(_env_file=None, **overrides)  # type: ignore[arg-type]  # raw values under test
+
+
+def _install_recording_runner(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     """Swap the runner accessor for a fake async generator that records kwargs.
 
     The fake yields a single terminal DoneEvent so the SSE stream closes and the
@@ -12,10 +28,10 @@ def _install_recording_runner(monkeypatch):
     from sidecar.events import DoneEvent
     from sidecar.routes import converse as converse_mod
 
-    recorded: dict = {}
+    recorded: dict[str, object] = {}
 
-    def fake_get_runner(settings):
-        async def fake_run_turn(spec, *, cwd):
+    def fake_get_runner(settings: Settings) -> Runner:
+        async def fake_run_turn(spec: TurnSpec, *, cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
             recorded.update(dataclasses.asdict(spec), cwd=cwd)
             yield DoneEvent(
                 final_text="ok",
@@ -31,7 +47,9 @@ def _install_recording_runner(monkeypatch):
     return recorded
 
 
-def test_x_turn_token_header_reaches_runner(client, monkeypatch):
+def test_x_turn_token_header_reaches_runner(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     recorded = _install_recording_runner(monkeypatch)
 
     r = client.post(
@@ -44,7 +62,9 @@ def test_x_turn_token_header_reaches_runner(client, monkeypatch):
     assert recorded["turn_token"] == "turn-abc"
 
 
-def test_absent_turn_token_reaches_runner_as_none(client, monkeypatch):
+def test_absent_turn_token_reaches_runner_as_none(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     recorded = _install_recording_runner(monkeypatch)
 
     r = client.post(
@@ -57,7 +77,7 @@ def test_absent_turn_token_reaches_runner_as_none(client, monkeypatch):
     assert recorded["turn_token"] is None
 
 
-def test_converse_requires_bearer(client):
+def test_converse_requires_bearer(client: TestClient) -> None:
     r = client.post("/v1/converse", json={"sessionKey": "k", "prompt": "hi"})
     assert r.status_code == 401
     # Same {"code", "message"} shape as every other error (openapi `Error`).
@@ -65,7 +85,7 @@ def test_converse_requires_bearer(client):
     assert r.headers["www-authenticate"] == "Bearer"
 
 
-def test_converse_rejects_wrong_bearer(client):
+def test_converse_rejects_wrong_bearer(client: TestClient) -> None:
     r = client.post(
         "/v1/converse",
         json={"sessionKey": "k", "prompt": "hi"},
@@ -74,7 +94,7 @@ def test_converse_rejects_wrong_bearer(client):
     assert r.status_code == 401
 
 
-def test_cancel_unknown_session_returns_404(client):
+def test_cancel_unknown_session_returns_404(client: TestClient) -> None:
     r = client.post(
         "/v1/sessions/some-key/cancel",
         headers={"Authorization": "Bearer test-secret"},
@@ -82,7 +102,7 @@ def test_cancel_unknown_session_returns_404(client):
     assert r.status_code == 404
 
 
-def test_invalid_body_returns_400_with_error_schema(client):
+def test_invalid_body_returns_400_with_error_schema(client: TestClient) -> None:
     r = client.post(
         "/v1/converse",
         json={"sessionKey": "", "prompt": ""},  # both empty -> validation fail
@@ -94,7 +114,7 @@ def test_invalid_body_returns_400_with_error_schema(client):
     assert "sessionKey" in body["message"] or "prompt" in body["message"]
 
 
-def test_unknown_field_returns_400(client):
+def test_unknown_field_returns_400(client: TestClient) -> None:
     r = client.post(
         "/v1/converse",
         json={"sessionKey": "k", "prompt": "hi", "unknownField": 1},
@@ -109,17 +129,15 @@ def test_unknown_field_returns_400(client):
 # in-flight state on the live app.state objects and hit the route.
 
 
-def _hold(app, session_key: str, user_id: str | None = None):
+def _hold(app: FastAPI, session_key: str, user_id: str | None = None) -> Turn:
     """Reserve admission slots as if another turn were running (never started)."""
-    from sidecar.turn import Turn
-
     admission = app.state.admission
     turn = Turn(session_key=session_key, user_id=user_id, admission=admission, timeout_sec=5)
     admission.reserve(turn)
     return turn
 
 
-def test_converse_busy_same_session_key_returns_429(client, app):
+def test_converse_busy_same_session_key_returns_429(client: TestClient, app: FastAPI) -> None:
     held = _hold(app, "dup-key")
     try:
         r = client.post(
@@ -137,7 +155,9 @@ def test_converse_busy_same_session_key_returns_429(client, app):
 
 
 @pytest.mark.parametrize("mode", ["session", "stateless"])
-def test_converse_busy_same_session_key_in_either_mode(client, app, mode):
+def test_converse_busy_same_session_key_in_either_mode(
+    client: TestClient, app: FastAPI, mode: str
+) -> None:
     # /cancel addresses a turn by its sessionKey, so stateless turns hold it too.
     held = _hold(app, "dup-key", None)
     try:
@@ -152,7 +172,7 @@ def test_converse_busy_same_session_key_in_either_mode(client, app, mode):
     assert r.status_code == 429
 
 
-def test_converse_busy_same_user_returns_429(client, app):
+def test_converse_busy_same_user_returns_429(client: TestClient, app: FastAPI) -> None:
     held = _hold(app, "held-key", "u1")
     try:
         r = client.post(
@@ -168,7 +188,9 @@ def test_converse_busy_same_user_returns_429(client, app):
     assert "u1" in r.json()["message"]
 
 
-def test_finished_turn_releases_its_reservation(client, app, monkeypatch):
+def test_finished_turn_releases_its_reservation(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _install_recording_runner(monkeypatch)
     for _ in range(2):  # the second turn is only accepted if the first released
         r = client.post(
@@ -181,14 +203,16 @@ def test_finished_turn_releases_its_reservation(client, app, monkeypatch):
     assert app.state.admission.inflight == 0
 
 
-def test_a_failure_building_the_response_reserves_nothing(client, app, monkeypatch):
+def test_a_failure_building_the_response_reserves_nothing(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The reservation is the handler's last step, so nothing can leave a turn running
     # (and its sessionKey busy until the timeout) without a response to stop it.
     from sidecar.routes import converse as converse_mod
 
     _install_recording_runner(monkeypatch)
 
-    def broken_response(*_args, **_kwargs):
+    def broken_response(*_args: object, **_kwargs: object) -> NoReturn:
         raise RuntimeError("response could not be built")
 
     monkeypatch.setattr(converse_mod, "EventSourceResponse", broken_response)
@@ -202,7 +226,7 @@ def test_a_failure_building_the_response_reserves_nothing(client, app, monkeypat
     assert app.state.admission.inflight == 0
 
 
-def test_flag_like_session_id_is_rejected_before_streaming(client):
+def test_flag_like_session_id_is_rejected_before_streaming(client: TestClient) -> None:
     r = client.post(
         "/v1/converse",
         json={"sessionKey": "k", "prompt": "hi", "sessionId": "--last"},
@@ -213,7 +237,9 @@ def test_flag_like_session_id_is_rejected_before_streaming(client):
     assert "sessionId" in r.json()["message"]
 
 
-def test_bearer_scheme_is_case_insensitive(client, monkeypatch):
+def test_bearer_scheme_is_case_insensitive(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _install_recording_runner(monkeypatch)
 
     r = client.post(
@@ -225,7 +251,7 @@ def test_bearer_scheme_is_case_insensitive(client, monkeypatch):
     assert r.status_code == 200
 
 
-def test_empty_bearer_token_is_rejected(client):
+def test_empty_bearer_token_is_rejected(client: TestClient) -> None:
     r = client.post(
         "/v1/converse",
         json={"sessionKey": "k", "prompt": "hi"},
@@ -234,23 +260,20 @@ def test_empty_bearer_token_is_rejected(client):
     assert r.status_code == 401
 
 
-def test_claude_runner_withholds_codex_passthrough_names():
-    from sidecar.config import Settings
+def test_claude_runner_withholds_codex_passthrough_names() -> None:
     from sidecar.routes.converse import _get_runner
 
-    runner = _get_runner(
-        Settings(_env_file=None, bearer_secret="x", codex_env_passthrough="AZURE_OPENAI_KEY")
-    )
+    runner = _get_runner(_settings(bearer_secret="x", codex_env_passthrough="AZURE_OPENAI_KEY"))
 
+    assert isinstance(runner, functools.partial)
     assert runner.keywords["policy"].withheld_env == ("AZURE_OPENAI_KEY",)
 
 
-def test_terminal_error_mapping():
+def test_terminal_error_mapping() -> None:
     from sidecar.errors import ApiError, ErrorCode
     from sidecar.routes.converse import _terminal_error
-    from sidecar.turn import TurnEnded, TurnStopped
 
-    def mapped(item):
+    def mapped(item: TurnStopped | TurnEnded) -> tuple[str, str]:
         return _terminal_error(item, 90, "t1")
 
     assert mapped(TurnStopped("timeout")) == ("timeout", "turn exceeded 90s")
@@ -270,7 +293,7 @@ def test_terminal_error_mapping():
     )
 
 
-def test_stream_carries_the_turn_id(client, monkeypatch):
+def test_stream_carries_the_turn_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _install_recording_runner(monkeypatch)
 
     r = client.post(
@@ -283,13 +306,11 @@ def test_stream_carries_the_turn_id(client, monkeypatch):
     assert len(r.headers["x-turn-id"]) == 32
 
 
-def test_codex_runner_gets_sandbox_and_passthrough_bound():
-    from sidecar.config import Settings
+def test_codex_runner_gets_sandbox_and_passthrough_bound() -> None:
     from sidecar.routes.converse import _get_runner
 
     runner = _get_runner(
-        Settings(
-            _env_file=None,
+        _settings(
             bearer_secret="x",
             provider="codex",
             codex_sandbox="workspace-write",
@@ -299,18 +320,17 @@ def test_codex_runner_gets_sandbox_and_passthrough_bound():
 
     from sidecar.codex_runner import CodexPolicy
 
+    assert isinstance(runner, functools.partial)
     assert runner.keywords == {
         "policy": CodexPolicy(sandbox="workspace-write", env_passthrough=("AZURE_OPENAI_KEY",))
     }
 
 
-def test_claude_runner_gets_the_agent_policy_bound():
-    from sidecar.config import Settings
+def test_claude_runner_gets_the_agent_policy_bound() -> None:
     from sidecar.routes.converse import _get_runner
 
     runner = _get_runner(
-        Settings(
-            _env_file=None,
+        _settings(
             bearer_secret="x",
             claude_tools="",
             claude_allowed_tools="WebFetch, Bash(git status:*)",
@@ -319,6 +339,7 @@ def test_claude_runner_gets_the_agent_policy_bound():
         )
     )
 
+    assert isinstance(runner, functools.partial)
     policy = runner.keywords["policy"]
     assert policy.tools == ()
     assert policy.allowed_tools == ("WebFetch", "Bash(git status:*)")
@@ -326,27 +347,26 @@ def test_claude_runner_gets_the_agent_policy_bound():
     assert policy.setting_sources == ("project",)
 
 
-def test_claude_policy_defaults():
-    from sidecar.config import Settings
+def test_claude_policy_defaults() -> None:
     from sidecar.routes.converse import _get_runner
 
-    runner = _get_runner(Settings(_env_file=None, bearer_secret="x"))
+    runner = _get_runner(_settings(bearer_secret="x"))
 
+    assert isinstance(runner, functools.partial)
     policy = runner.keywords["policy"]
     assert policy.tools is None  # CLI default toolset unless CLAUDE_TOOLS is set
     assert policy.permission_mode == "dontAsk"
     assert policy.setting_sources == ()
 
 
-async def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path):
-    from sidecar.config import Settings
+async def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path: Path) -> None:
     from sidecar.models import ConverseRequest
     from sidecar.routes.converse import _preflight_resume
     from sidecar.session import remember_session_id
 
     sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
-    codex = Settings(_env_file=None, bearer_secret="x", provider="codex", workspace_root=tmp_path)
-    claude = Settings(_env_file=None, bearer_secret="x", workspace_root=tmp_path)
+    codex = _settings(bearer_secret="x", provider="codex", workspace_root=tmp_path)
+    claude = _settings(bearer_secret="x", workspace_root=tmp_path)
     body = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": sid})
 
     rejected = await _preflight_resume(body, codex)
@@ -357,16 +377,15 @@ async def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path):
     assert await _preflight_resume(body, codex) is None
 
 
-async def test_an_unreadable_session_record_is_a_json_500(tmp_path):
+async def test_an_unreadable_session_record_is_a_json_500(tmp_path: Path) -> None:
     import hashlib
 
-    from sidecar.config import Settings
     from sidecar.models import ConverseRequest
     from sidecar.routes.converse import _preflight_resume
 
     record = tmp_path / ".session-ids" / hashlib.sha256(b"k").hexdigest()
     record.mkdir(parents=True)  # reading it raises IsADirectoryError
-    codex = Settings(_env_file=None, bearer_secret="x", provider="codex", workspace_root=tmp_path)
+    codex = _settings(bearer_secret="x", provider="codex", workspace_root=tmp_path)
     sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
     body = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": sid})
 
@@ -377,7 +396,9 @@ async def test_an_unreadable_session_record_is_a_json_500(tmp_path):
 
 
 @pytest.mark.parametrize(("header", "limit"), [("X-User-Id", 256), ("X-Turn-Token", 4096)])
-def test_header_length_limits_from_the_contract_are_enforced(client, header, limit):
+def test_header_length_limits_from_the_contract_are_enforced(
+    client: TestClient, header: str, limit: int
+) -> None:
     r = client.post(
         "/v1/converse",
         json={"sessionKey": "k", "prompt": "hi"},
@@ -387,7 +408,7 @@ def test_header_length_limits_from_the_contract_are_enforced(client, header, lim
     assert r.json()["code"] == "bad_request"
 
 
-def test_system_prompt_replaces_claude_md_without_reading_it(tmp_path):
+def test_system_prompt_replaces_claude_md_without_reading_it(tmp_path: Path) -> None:
     from sidecar.routes.converse import _merge_system_prompt
 
     unreadable = tmp_path / "CLAUDE.md"
@@ -401,7 +422,7 @@ def test_system_prompt_replaces_claude_md_without_reading_it(tmp_path):
     )
 
 
-def test_append_system_prompt_follows_the_documented_join(tmp_path):
+def test_append_system_prompt_follows_the_documented_join(tmp_path: Path) -> None:
     from sidecar.routes.converse import _merge_system_prompt
 
     base = tmp_path / "CLAUDE.md"
@@ -424,14 +445,14 @@ def test_append_system_prompt_follows_the_documented_join(tmp_path):
     )
 
 
-def test_wrong_bearer_on_cancel_gets_the_same_401_shape(client):
+def test_wrong_bearer_on_cancel_gets_the_same_401_shape(client: TestClient) -> None:
     r = client.post("/v1/sessions/k/cancel", headers={"Authorization": "Bearer nope"})
     assert r.status_code == 401
     assert r.json() == {"code": "unauthorized", "message": "invalid bearer token"}
     assert r.headers["www-authenticate"] == "Bearer"
 
 
-def test_auth_is_checked_before_header_validation(client):
+def test_auth_is_checked_before_header_validation(client: TestClient) -> None:
     r = client.post(
         "/v1/converse",
         json={"sessionKey": "k", "prompt": "hi"},
@@ -440,7 +461,9 @@ def test_auth_is_checked_before_header_validation(client):
     assert r.status_code == 401
 
 
-def test_stateless_turn_asks_the_runner_not_to_persist(client, monkeypatch):
+def test_stateless_turn_asks_the_runner_not_to_persist(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     recorded = _install_recording_runner(monkeypatch)
 
     r = client.post(
@@ -453,7 +476,7 @@ def test_stateless_turn_asks_the_runner_not_to_persist(client, monkeypatch):
     assert recorded["ephemeral"] is True
 
 
-def test_prompt_size_is_bounded(client):
+def test_prompt_size_is_bounded(client: TestClient) -> None:
     r = client.post(
         "/v1/converse",
         json={"sessionKey": "k", "prompt": "x" * 1_000_001},

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import uvicorn
 from mcp.server.mcpserver import MCPServer
+from starlette.types import Receive, Scope, Send
 
 PORT, AUTH_LOG = int(sys.argv[1]), sys.argv[2]
 
@@ -26,7 +27,7 @@ def echo(text: str) -> str:
 mcp_app = server.streamable_http_app(stateless_http=True, json_response=True)
 
 
-async def app(scope, receive, send):
+async def app(scope: Scope, receive: Receive, send: Send) -> None:
     if scope["type"] == "http":
         auth = dict(scope["headers"]).get(b"authorization", b"").decode()
         with Path(AUTH_LOG).open("a", encoding="utf-8") as f:

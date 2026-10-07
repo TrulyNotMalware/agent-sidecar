@@ -7,7 +7,7 @@ import structlog
 from sidecar.observability.logging import REDACTED, _redact_processor, stdlib_formatter
 
 
-def test_redact_processor_redacts_known_keys():
+def test_redact_processor_redacts_known_keys() -> None:
     event = {
         "event": "converse.start",
         "prompt": "secret content",
@@ -22,14 +22,14 @@ def test_redact_processor_redacts_known_keys():
     assert out["session_key"] == "ok-to-keep"
 
 
-def test_redact_processor_keeps_empty_values():
+def test_redact_processor_keeps_empty_values() -> None:
     event = {"prompt": "", "delta": None, "session_key": "k"}
     out = _redact_processor(None, "info", event.copy())
     assert out["prompt"] == ""
     assert out["delta"] is None
 
 
-def test_plain_logging_records_render_like_structlog_lines():
+def test_plain_logging_records_render_like_structlog_lines() -> None:
     # uvicorn's and the SDK's records: JSON with the bound context and a scrubbed traceback.
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)

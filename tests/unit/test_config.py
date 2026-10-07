@@ -4,62 +4,67 @@ from pydantic import ValidationError
 from sidecar.config import Settings
 
 
-def test_missing_bearer_secret_fails_at_startup(monkeypatch):
+def _settings(**overrides: object) -> Settings:
+    # Raw env-style values (plain str for a SecretStr, unknown literals) are what these
+    # tests feed through pydantic-settings' validation, so they are untyped on purpose.
+    return Settings(_env_file=None, **overrides)  # type: ignore[arg-type]  # raw values under test
+
+
+def test_missing_bearer_secret_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BEARER_SECRET", raising=False)
 
     with pytest.raises(ValidationError, match="bearer_secret"):
         Settings(_env_file=None)
 
 
-def test_empty_bearer_secret_fails_at_startup(monkeypatch):
+def test_empty_bearer_secret_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BEARER_SECRET", "")
 
     with pytest.raises(ValidationError, match="bearer_secret"):
         Settings(_env_file=None)
 
 
-def test_bearer_secret_is_not_exposed_in_repr():
-    s = Settings(_env_file=None, bearer_secret="super-secret-value")
+def test_bearer_secret_is_not_exposed_in_repr() -> None:
+    s = _settings(bearer_secret="super-secret-value")
 
     assert "super-secret-value" not in repr(s)
     assert s.bearer_secret.get_secret_value() == "super-secret-value"
 
 
-def test_codex_defaults_to_read_only_sandbox_and_parses_passthrough():
-    s = Settings(_env_file=None, bearer_secret="x", codex_env_passthrough=" AZURE_KEY, ,FOO ")
+def test_codex_defaults_to_read_only_sandbox_and_parses_passthrough() -> None:
+    s = _settings(bearer_secret="x", codex_env_passthrough=" AZURE_KEY, ,FOO ")
 
     assert s.codex_sandbox == "read-only"
     assert s.codex_env_passthrough_names == ("AZURE_KEY", "FOO")
 
 
-def test_codex_sandbox_rejects_unknown_modes():
+def test_codex_sandbox_rejects_unknown_modes() -> None:
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, bearer_secret="x", codex_sandbox="yolo")
+        _settings(bearer_secret="x", codex_sandbox="yolo")
 
 
-def test_shutdown_grace_must_leave_room_for_a_frame():
+def test_shutdown_grace_must_leave_room_for_a_frame() -> None:
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, bearer_secret="x", shutdown_grace_sec=0)
+        _settings(bearer_secret="x", shutdown_grace_sec=0)
 
 
-def test_bearer_secret_trailing_newline_is_stripped():
-    s = Settings(_env_file=None, bearer_secret="from-a-k8s-secret\n")
+def test_bearer_secret_trailing_newline_is_stripped() -> None:
+    s = _settings(bearer_secret="from-a-k8s-secret\n")
     assert s.bearer_secret.get_secret_value() == "from-a-k8s-secret"
 
 
-def test_whitespace_only_bearer_secret_is_rejected():
+def test_whitespace_only_bearer_secret_is_rejected() -> None:
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, bearer_secret=" \n ")
+        _settings(bearer_secret=" \n ")
 
 
-def test_anthropic_api_key_is_not_exposed_in_repr():
-    s = Settings(_env_file=None, bearer_secret="x", anthropic_api_key="sk-ant-secret")
+def test_anthropic_api_key_is_not_exposed_in_repr() -> None:
+    s = _settings(bearer_secret="x", anthropic_api_key="sk-ant-secret")
     assert "sk-ant-secret" not in repr(s)
 
 
-def test_allowed_tool_rules_keep_commas_inside_parentheses():
-    s = Settings(
-        _env_file=None,
+def test_allowed_tool_rules_keep_commas_inside_parentheses() -> None:
+    s = _settings(
         bearer_secret="x",
         claude_allowed_tools="Bash(git log --format=a,b:*), Read ,WebFetch",
         claude_disallowed_tools="mcp__domain-tools__delete_all",
@@ -69,22 +74,22 @@ def test_allowed_tool_rules_keep_commas_inside_parentheses():
     assert s.claude_disallowed_tools_names == ("mcp__domain-tools__delete_all",)
 
 
-def test_unknown_setting_source_fails_at_startup():
+def test_unknown_setting_source_fails_at_startup() -> None:
     with pytest.raises(ValidationError, match="bogus"):
-        Settings(_env_file=None, bearer_secret="x", claude_setting_sources="user,bogus")
+        _settings(bearer_secret="x", claude_setting_sources="user,bogus")
 
 
 @pytest.mark.parametrize("given", ["info", "Info", "INFO"])
-def test_log_level_is_case_insensitive(given):
-    assert Settings(_env_file=None, bearer_secret="x", log_level=given).log_level == "INFO"
+def test_log_level_is_case_insensitive(given: str) -> None:
+    assert _settings(bearer_secret="x", log_level=given).log_level == "INFO"
 
 
-def test_unknown_log_level_fails_at_startup():
+def test_unknown_log_level_fails_at_startup() -> None:
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, bearer_secret="x", log_level="verbose")
+        _settings(bearer_secret="x", log_level="verbose")
 
 
-def test_mcp_server_name_default_is_neutral_and_validated():
-    assert Settings(_env_file=None, bearer_secret="x").mcp_server_name == "domain-tools"
+def test_mcp_server_name_default_is_neutral_and_validated() -> None:
+    assert _settings(bearer_secret="x").mcp_server_name == "domain-tools"
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, bearer_secret="x", mcp_server_name="a.b")  # TOML key path
+        _settings(bearer_secret="x", mcp_server_name="a.b")  # TOML key path

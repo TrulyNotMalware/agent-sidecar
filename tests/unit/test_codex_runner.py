@@ -2,6 +2,7 @@ import asyncio
 import json
 import signal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -10,6 +11,7 @@ from sidecar.codex_runner import CodexPolicy, ensure_codex_auth, run_turn
 from sidecar.errors import ApiError, ErrorCode
 from sidecar.events import (
     DoneEvent,
+    RunnerEvent,
     SessionEvent,
     TextEvent,
     ToolResultEvent,
@@ -24,7 +26,9 @@ class _Pipe:
     """A readable pipe: returns the given chunks, then EOF — or blocks, like a quiet
     process, when `hang` is set (until the process is signalled)."""
 
-    def __init__(self, chunks: list[bytes], *, hang: bool = False, proc=None) -> None:
+    def __init__(
+        self, chunks: list[bytes], *, hang: bool = False, proc: "FakeProc | None" = None
+    ) -> None:
         self._chunks = list(chunks)
         self._hang = hang
         self._proc = proc
@@ -107,10 +111,10 @@ class FakeProc:
         return self.returncode
 
 
-def _install(monkeypatch, proc: FakeProc) -> dict:
-    calls: dict = {}
+def _install(monkeypatch: pytest.MonkeyPatch, proc: FakeProc) -> dict[str, Any]:
+    calls: dict[str, Any] = {}
 
-    async def fake_exec(*cmd, **kwargs):
+    async def fake_exec(*cmd: str, **kwargs: object) -> FakeProc:
         calls["cmd"] = list(cmd)
         calls["kwargs"] = kwargs
         return proc
@@ -121,19 +125,21 @@ def _install(monkeypatch, proc: FakeProc) -> dict:
     return calls
 
 
-def _line(obj: dict) -> bytes:
+def _line(obj: dict[str, object]) -> bytes:
     return (json.dumps(obj) + "\n").encode()
 
 
 COMPLETED = _line({"type": "turn.completed", "usage": {}})
 
 
-async def _collect(spec: TurnSpec | None = None, *, policy: CodexPolicy | None = None) -> list:
+async def _collect(
+    spec: TurnSpec | None = None, *, policy: CodexPolicy | None = None
+) -> list[RunnerEvent]:
     spec = TurnSpec(prompt="hi") if spec is None else spec
     return [ev async for ev in run_turn(spec, cwd=Path("/tmp"), policy=policy)]
 
 
-async def test_maps_full_event_sequence(monkeypatch):
+async def test_maps_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     # The shapes codex 0.159 emits (recorded against a fake model API).
     tool_call = {
         "id": "item_1",
@@ -189,14 +195,14 @@ async def test_maps_full_event_sequence(monkeypatch):
     ]
 
 
-def test_mcp_tool_names_are_normalized_like_the_claude_cli():
+def test_mcp_tool_names_are_normalized_like_the_claude_cli() -> None:
     from sidecar.codex_runner import _mcp_name
 
     assert _mcp_name({"server": "v1.2 tools", "tool": "do.it"}) == "mcp__v1_2_tools__do_it"
     assert _mcp_name({"tool": "bare"}) == "bare"  # no server reported
 
 
-async def test_prompt_goes_through_stdin_never_argv(monkeypatch):
+async def test_prompt_goes_through_stdin_never_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     proc = FakeProc([COMPLETED])
     calls = _install(monkeypatch, proc)
     big = "x" * 200_000  # past the old 100 KB argv guard
@@ -208,7 +214,9 @@ async def test_prompt_goes_through_stdin_never_argv(monkeypatch):
     assert proc.stdin.closed  # EOF, or codex waits for "additional input"
 
 
-async def test_system_prompt_is_the_new_sessions_developer_instructions(monkeypatch):
+async def test_system_prompt_is_the_new_sessions_developer_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import tomllib
 
     proc = FakeProc([COMPLETED])
@@ -223,7 +231,7 @@ async def test_system_prompt_is_the_new_sessions_developer_instructions(monkeypa
     assert proc.stdin.data == b"hi"  # the prompt alone
 
 
-async def test_resume_passes_the_system_prompt_again(monkeypatch):
+async def test_resume_passes_the_system_prompt_again(monkeypatch: pytest.MonkeyPatch) -> None:
     # codex keeps the thread's developer message on resume (no duplicate), but rebuilds
     # the history from the value passed in when it auto-compacts.
     proc = FakeProc([COMPLETED])
@@ -237,7 +245,9 @@ async def test_resume_passes_the_system_prompt_again(monkeypatch):
     assert proc.stdin.data == b"hi"
 
 
-async def test_a_too_long_system_prompt_is_not_repeated_on_resume(monkeypatch):
+async def test_a_too_long_system_prompt_is_not_repeated_on_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(codex_runner, "_MAX_ARG_BYTES", 64)
     proc = FakeProc([COMPLETED])
     calls = _install(monkeypatch, proc)
@@ -248,7 +258,9 @@ async def test_a_too_long_system_prompt_is_not_repeated_on_resume(monkeypatch):
     assert proc.stdin.data == b"hi"  # the first turn's copy is in the thread already
 
 
-async def test_a_system_prompt_too_long_for_argv_goes_with_the_prompt(monkeypatch):
+async def test_a_system_prompt_too_long_for_argv_goes_with_the_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(codex_runner, "_MAX_ARG_BYTES", 64)
     proc = FakeProc([COMPLETED])
     calls = _install(monkeypatch, proc)
@@ -259,7 +271,7 @@ async def test_a_system_prompt_too_long_for_argv_goes_with_the_prompt(monkeypatc
     assert proc.stdin.data == b"S" * 100 + b"\n\nhi"
 
 
-async def test_resume_session_id_extends_argv(monkeypatch):
+async def test_resume_session_id_extends_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
     await _collect(TurnSpec(prompt="hi", resume_session_id="sess-9"))
@@ -267,7 +279,9 @@ async def test_resume_session_id_extends_argv(monkeypatch):
     assert calls["cmd"] == [*BASE_CMD, "resume", "--", "sess-9", "-"]
 
 
-async def test_flag_like_prompts_and_ids_are_not_parsed_as_flags(monkeypatch):
+async def test_flag_like_prompts_and_ids_are_not_parsed_as_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proc = FakeProc([COMPLETED])
     calls = _install(monkeypatch, proc)
 
@@ -277,7 +291,7 @@ async def test_flag_like_prompts_and_ids_are_not_parsed_as_flags(monkeypatch):
     assert proc.stdin.data == b"--last"
 
 
-async def test_ephemeral_for_stateless_turns(monkeypatch):
+async def test_ephemeral_for_stateless_turns(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
     await _collect(TurnSpec(prompt="hi", ephemeral=True))
@@ -286,7 +300,7 @@ async def test_ephemeral_for_stateless_turns(monkeypatch):
     assert calls["cmd"].index("--ephemeral") < calls["cmd"].index("--")
 
 
-async def test_command_execution_maps_to_shell_events(monkeypatch):
+async def test_command_execution_maps_to_shell_events(monkeypatch: pytest.MonkeyPatch) -> None:
     lines = [
         _line(
             {
@@ -310,7 +324,7 @@ async def test_command_execution_maps_to_shell_events(monkeypatch):
     assert events[1] == ToolResultEvent(name="shell", ok=False, tool_use_id="c-1")
 
 
-async def test_malformed_json_lines_are_skipped(monkeypatch):
+async def test_malformed_json_lines_are_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     _install(monkeypatch, FakeProc([b"not json\n", b"\n", COMPLETED]))
 
     events = await _collect()
@@ -326,7 +340,9 @@ async def test_malformed_json_lines_are_skipped(monkeypatch):
     ]
 
 
-async def test_event_lines_split_across_reads_are_reassembled(monkeypatch):
+async def test_event_lines_split_across_reads_are_reassembled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     whole = _line({"type": "item.completed", "item": {"type": "agent_message", "text": "Hi"}})
     _install(monkeypatch, FakeProc([whole[:10], whole[10:], COMPLETED]))
 
@@ -335,7 +351,7 @@ async def test_event_lines_split_across_reads_are_reassembled(monkeypatch):
     assert events[0] == TextEvent(delta="Hi")
 
 
-async def test_oversized_event_line_is_skipped_not_fatal(monkeypatch):
+async def test_oversized_event_line_is_skipped_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(codex_runner, "_MAX_EVENT_LINE_BYTES", 64)
     huge = _line({"type": "item.completed", "item": {"type": "x", "output": "y" * 500}})
     _install(monkeypatch, FakeProc([huge[:100], huge[100:], COMPLETED]))
@@ -345,7 +361,9 @@ async def test_oversized_event_line_is_skipped_not_fatal(monkeypatch):
     assert isinstance(events[-1], DoneEvent)
 
 
-async def test_turn_failed_raises_sdk_error_and_reaps_process(monkeypatch):
+async def test_turn_failed_raises_sdk_error_and_reaps_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proc = FakeProc([_line({"type": "turn.failed", "error": {"message": "quota exhausted"}})])
     _install(monkeypatch, proc)
 
@@ -357,7 +375,7 @@ async def test_turn_failed_raises_sdk_error_and_reaps_process(monkeypatch):
     assert proc.killed
 
 
-async def test_transient_error_events_do_not_end_the_turn(monkeypatch):
+async def test_transient_error_events_do_not_end_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     # codex reports "Reconnecting... n/5" as type=error while falling back to HTTPS.
     reconnect = _line({"type": "error", "message": "Reconnecting... 2/5"})
     _install(monkeypatch, FakeProc([reconnect, COMPLETED]))
@@ -367,7 +385,9 @@ async def test_transient_error_events_do_not_end_the_turn(monkeypatch):
     assert isinstance(events[-1], DoneEvent)
 
 
-async def test_error_event_is_reported_when_the_turn_never_completes(monkeypatch):
+async def test_error_event_is_reported_when_the_turn_never_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _install(monkeypatch, FakeProc([_line({"type": "error", "message": "boom"})]))
 
     with pytest.raises(ApiError) as exc_info:
@@ -377,7 +397,9 @@ async def test_error_event_is_reported_when_the_turn_never_completes(monkeypatch
     assert "boom" in exc_info.value.message
 
 
-async def test_exit_zero_without_turn_completed_is_an_error(monkeypatch):
+async def test_exit_zero_without_turn_completed_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # e.g. codex printed help text instead of running a turn
     _install(monkeypatch, FakeProc([b"Usage: codex exec ...\n"]))
 
@@ -385,7 +407,7 @@ async def test_exit_zero_without_turn_completed_is_an_error(monkeypatch):
         await _collect()
 
 
-async def test_nonzero_exit_surfaces_the_end_of_stderr(monkeypatch):
+async def test_nonzero_exit_surfaces_the_end_of_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
     noise = [f"log line {i}\n".encode() for i in range(300)]
     proc = FakeProc([], returncode=3, stderr_lines=[*noise, b"fatal: no auth\n"])
     _install(monkeypatch, proc)
@@ -396,10 +418,13 @@ async def test_nonzero_exit_surfaces_the_end_of_stderr(monkeypatch):
     error = exc_info.value
     assert error.code is ErrorCode.SDK_ERROR
     assert error.message == "codex exited with code 3"  # stderr never goes on the wire
+    assert error.detail is not None
     assert error.detail.endswith("fatal: no auth\n")  # the log gets the end, not the start
 
 
-async def test_turn_failed_with_a_bare_string_error_keeps_the_cause(monkeypatch):
+async def test_turn_failed_with_a_bare_string_error_keeps_the_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _install(monkeypatch, FakeProc([_line({"type": "turn.failed", "error": "rate limited"})]))
 
     with pytest.raises(ApiError) as exc_info:
@@ -408,8 +433,10 @@ async def test_turn_failed_with_a_bare_string_error_keeps_the_cause(monkeypatch)
     assert exc_info.value.message == "rate limited"
 
 
-async def test_codex_that_cannot_be_started_is_an_sdk_error(monkeypatch):
-    async def missing(*_cmd, **_kwargs):
+async def test_codex_that_cannot_be_started_is_an_sdk_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def missing(*_cmd: str, **_kwargs: object) -> FakeProc:
         raise FileNotFoundError(2, "No such file or directory", "codex")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
@@ -421,7 +448,7 @@ async def test_codex_that_cannot_be_started_is_an_sdk_error(monkeypatch):
     assert exc_info.value.message == "codex could not be started (FileNotFoundError)"
 
 
-async def test_nonzero_exit_carries_what_codex_reported(monkeypatch):
+async def test_nonzero_exit_carries_what_codex_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     lines = [_line({"type": "error", "message": "stream disconnected: 503"})]
     _install(monkeypatch, FakeProc(lines, returncode=1, stderr_lines=[b"internal trace\n"]))
 
@@ -431,8 +458,13 @@ async def test_nonzero_exit_carries_what_codex_reported(monkeypatch):
     assert exc_info.value.message == "codex exited with code 1: stream disconnected: 503"
 
 
-async def test_provider_messages_are_scrubbed_of_credentials(monkeypatch):
-    failed = {"type": "turn.failed", "error": {"message": "401: bad key sk-proj-abcdef123456"}}
+async def test_provider_messages_are_scrubbed_of_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed: dict[str, object] = {
+        "type": "turn.failed",
+        "error": {"message": "401: bad key sk-proj-abcdef123456"},
+    }
     _install(monkeypatch, FakeProc([_line(failed)]))
 
     with pytest.raises(ApiError) as exc_info:
@@ -442,9 +474,11 @@ async def test_provider_messages_are_scrubbed_of_credentials(monkeypatch):
     assert exc_info.value.message == "401: bad key sk-<redacted>"
 
 
-async def test_stderr_reader_failure_does_not_skip_the_kill(monkeypatch):
+async def test_stderr_reader_failure_does_not_skip_the_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proc = FakeProc([], hang=True)
-    proc.stderr = _BrokenPipe()
+    proc.stderr = _BrokenPipe()  # type: ignore[assignment]  # stands in for the pipe
     _install(monkeypatch, proc)
 
     with pytest.raises(TimeoutError):
@@ -454,7 +488,9 @@ async def test_stderr_reader_failure_does_not_skip_the_kill(monkeypatch):
     assert proc.killed
 
 
-async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
+async def test_mcp_override_adds_config_flags_and_token_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
     events = await _collect(
@@ -473,7 +509,7 @@ async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
     assert calls["kwargs"]["env"]["SIDECAR_MCP_TURN_TOKEN"] == "tok-xyz"
 
 
-async def test_mcp_url_is_quoted_as_a_toml_string(monkeypatch):
+async def test_mcp_url_is_quoted_as_a_toml_string(monkeypatch: pytest.MonkeyPatch) -> None:
     import tomllib
 
     url = 'https://app.example/mcp?q="x"\\y'
@@ -487,7 +523,9 @@ async def test_mcp_url_is_quoted_as_a_toml_string(monkeypatch):
     assert tomllib.loads(override)["mcp_servers"]["domain-tools"]["url"] == url
 
 
-async def test_without_mcp_override_no_config_flags_and_no_token_env(monkeypatch):
+async def test_without_mcp_override_no_config_flags_and_no_token_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("SIDECAR_MCP_TURN_TOKEN", "stale-from-parent")
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
@@ -497,7 +535,7 @@ async def test_without_mcp_override_no_config_flags_and_no_token_env(monkeypatch
     assert "SIDECAR_MCP_TURN_TOKEN" not in calls["kwargs"]["env"]
 
 
-async def test_sandbox_is_always_explicit(monkeypatch):
+async def test_sandbox_is_always_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
     await _collect(
@@ -511,7 +549,7 @@ async def test_sandbox_is_always_explicit(monkeypatch):
     assert cmd.index("--sandbox") < cmd.index("resume")
 
 
-async def test_child_env_withholds_sidecar_secrets(monkeypatch):
+async def test_child_env_withholds_sidecar_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in {
         "BEARER_SECRET": "sidecar-secret",
         "OPENAI_API_KEY": "sk-openai",
@@ -540,7 +578,9 @@ async def test_child_env_withholds_sidecar_secrets(monkeypatch):
     assert env["CUSTOM_PROVIDER_KEY"] == "k"
 
 
-async def test_cancelling_the_turn_terminates_the_process_group(monkeypatch):
+async def test_cancelling_the_turn_terminates_the_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The caller (sidecar.turn.Turn) bounds a turn by cancelling the task that
     # iterates the runner; the runner must then stop codex and its children.
     proc = FakeProc([], hang=True)
@@ -554,7 +594,7 @@ async def test_cancelling_the_turn_terminates_the_process_group(monkeypatch):
     assert proc.signals == [signal.SIGTERM, signal.SIGKILL]
 
 
-async def test_group_is_killed_when_sigterm_is_ignored(monkeypatch):
+async def test_group_is_killed_when_sigterm_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(codex_runner, "_TERM_GRACE_SEC", 0.05)
     proc = FakeProc([], hang=True, ignore_sigterm=True)
     _install(monkeypatch, proc)
@@ -566,7 +606,9 @@ async def test_group_is_killed_when_sigterm_is_ignored(monkeypatch):
     assert proc.signals == [signal.SIGTERM, signal.SIGKILL]
 
 
-async def test_closing_the_runner_early_terminates_the_process(monkeypatch):
+async def test_closing_the_runner_early_terminates_the_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proc = FakeProc([_line({"type": "thread.started", "thread_id": "t-1"})], hang=True)
     _install(monkeypatch, proc)
 
@@ -583,18 +625,20 @@ class _FakeLoginProc:
         self._auth_path = auth_path
         self.stdin_payload: bytes | None = None
 
-    async def communicate(self, payload: bytes | None = None):
+    async def communicate(self, payload: bytes | None = None) -> tuple[bytes, bytes]:
         self.stdin_payload = payload
         if self.returncode == 0 and self._auth_path is not None:
             self._auth_path.write_text("{}")
         return b"", b""
 
 
-async def test_ensure_codex_auth_noop_when_auth_file_exists(monkeypatch, tmp_path):
+async def test_ensure_codex_auth_noop_when_auth_file_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     auth = tmp_path / "auth.json"
     auth.write_text("{}")
 
-    async def unexpected_exec(*cmd, **kwargs):
+    async def unexpected_exec(*cmd: str, **kwargs: object) -> _FakeLoginProc:
         raise AssertionError("login must not be spawned when auth.json exists")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_exec)
@@ -602,19 +646,23 @@ async def test_ensure_codex_auth_noop_when_auth_file_exists(monkeypatch, tmp_pat
     assert await ensure_codex_auth(auth) is True
 
 
-async def test_ensure_codex_auth_false_without_key(monkeypatch, tmp_path):
+async def test_ensure_codex_auth_false_without_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     assert await ensure_codex_auth(tmp_path / "auth.json") is False
 
 
-async def test_ensure_codex_auth_registers_key_via_login(monkeypatch, tmp_path):
+async def test_ensure_codex_auth_registers_key_via_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     auth = tmp_path / "auth.json"
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     proc = _FakeLoginProc(returncode=0, auth_path=auth)
-    calls: dict = {}
+    calls: dict[str, Any] = {}
 
-    async def fake_exec(*cmd, **kwargs):
+    async def fake_exec(*cmd: str, **kwargs: object) -> _FakeLoginProc:
         calls["cmd"] = list(cmd)
         return proc
 
@@ -625,11 +673,13 @@ async def test_ensure_codex_auth_registers_key_via_login(monkeypatch, tmp_path):
     assert proc.stdin_payload == b"sk-test"
 
 
-async def test_ensure_codex_auth_false_when_login_fails(monkeypatch, tmp_path):
+async def test_ensure_codex_auth_false_when_login_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     proc = _FakeLoginProc(returncode=1)
 
-    async def fake_exec(*cmd, **kwargs):
+    async def fake_exec(*cmd: str, **kwargs: object) -> _FakeLoginProc:
         return proc
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
@@ -637,10 +687,12 @@ async def test_ensure_codex_auth_false_when_login_fails(monkeypatch, tmp_path):
     assert await ensure_codex_auth(tmp_path / "auth.json") is False
 
 
-async def test_ensure_codex_auth_false_when_codex_is_missing(monkeypatch, tmp_path):
+async def test_ensure_codex_auth_false_when_codex_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
-    async def missing(*cmd, **kwargs):
+    async def missing(*cmd: str, **kwargs: object) -> _FakeLoginProc:
         raise FileNotFoundError("codex")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
@@ -648,7 +700,7 @@ async def test_ensure_codex_auth_false_when_codex_is_missing(monkeypatch, tmp_pa
     assert await ensure_codex_auth(tmp_path / "auth.json") is False
 
 
-async def test_group_is_swept_after_codex_exits_on_its_own(monkeypatch):
+async def test_group_is_swept_after_codex_exits_on_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
     # A shell command or MCP server codex started may outlive it.
     proc = FakeProc([COMPLETED])
     _install(monkeypatch, proc)
@@ -658,7 +710,9 @@ async def test_group_is_swept_after_codex_exits_on_its_own(monkeypatch):
     assert proc.signals and set(proc.signals) == {signal.SIGKILL}
 
 
-async def test_finished_turn_does_not_hang_when_wait_is_stuck(monkeypatch):
+async def test_finished_turn_does_not_hang_when_wait_is_stuck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Python 3.12: a leftover holding a pipe keeps wait() from returning after exit.
     monkeypatch.setattr(codex_runner, "_EXIT_WAIT_SEC", 0.05)
     _install(monkeypatch, FakeProc([COMPLETED], wait_stuck=True))

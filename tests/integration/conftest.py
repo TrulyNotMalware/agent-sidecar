@@ -3,12 +3,12 @@ import socket
 import subprocess
 import sys
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from .harness import BEARER, HERE, ROOT, SidecarServer, wait_until
+from .harness import BEARER, HERE, ROOT, SidecarServer, StartSidecar, wait_until
 
 # Only these are inherited from the developer's shell; everything else (real
 # credentials, PROVIDER, MCP_*, OTEL_*, a .env in the repo) is kept out.
@@ -21,7 +21,8 @@ _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        port: int = s.getsockname()[1]
+        return port
 
 
 def _fake_cli_wrapper(directory: Path, name: str, script: str) -> Path:
@@ -33,7 +34,7 @@ def _fake_cli_wrapper(directory: Path, name: str, script: str) -> Path:
 
 
 @pytest.fixture
-def start_sidecar(tmp_path: Path) -> Iterator[Callable[..., SidecarServer]]:
+def start_sidecar(tmp_path: Path) -> Iterator[StartSidecar]:
     """Factory: start_sidecar(mode=..., provider=..., **ENV) -> a running SidecarServer.
 
     provider="claude" points the real SDK at fake_claude.py; provider="codex" puts a

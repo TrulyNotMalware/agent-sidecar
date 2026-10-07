@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import AsyncGenerator
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -6,7 +7,7 @@ import pytest
 
 from sidecar.admission import Admission
 from sidecar.errors import ApiError, ErrorCode
-from sidecar.events import SessionEvent
+from sidecar.events import RunnerEvent, SessionEvent
 from sidecar.observability.metrics import INFLIGHT
 from sidecar.turn import Turn, TurnEnded, TurnStopped
 
@@ -22,7 +23,7 @@ def _busy(admission: Admission, turn: Turn) -> str:
     return exc.value.message
 
 
-def test_one_turn_per_session_key_and_per_user():
+def test_one_turn_per_session_key_and_per_user() -> None:
     a = Admission(max_concurrent=10)
     held = _turn(a, "k", "u1")
     a.reserve(held)
@@ -36,14 +37,14 @@ def test_one_turn_per_session_key_and_per_user():
     assert a.inflight == 3
 
 
-def test_global_cap():
+def test_global_cap() -> None:
     a = Admission(max_concurrent=1)
     a.reserve(_turn(a, "a"))
 
     assert "cap" in _busy(a, _turn(a, "b"))
 
 
-def test_a_rejected_reservation_takes_nothing():
+def test_a_rejected_reservation_takes_nothing() -> None:
     a = Admission(max_concurrent=1)
     first = _turn(a, "a", "u1")
     a.reserve(first)
@@ -53,7 +54,7 @@ def test_a_rejected_reservation_takes_nothing():
     a.reserve(_turn(a, "b", "u2"))
 
 
-def test_release_frees_every_slot_and_ignores_a_turn_it_does_not_hold():
+def test_release_frees_every_slot_and_ignores_a_turn_it_does_not_hold() -> None:
     a = Admission(max_concurrent=4)
     held = _turn(a, "k", "u")
     a.reserve(held)
@@ -68,7 +69,7 @@ def test_release_frees_every_slot_and_ignores_a_turn_it_does_not_hold():
     a.reserve(_turn(a, "k", "u"))
 
 
-def test_inflight_gauge_follows_reservations():
+def test_inflight_gauge_follows_reservations() -> None:
     a = Admission(max_concurrent=4)
     t = _turn(a)
     a.reserve(t)
@@ -80,15 +81,15 @@ def test_inflight_gauge_follows_reservations():
     assert INFLIGHT._value.get() == 0
 
 
-async def test_drain_with_nothing_in_flight():
+async def test_drain_with_nothing_in_flight() -> None:
     assert await Admission(max_concurrent=4).drain(grace_sec=0.1) == 0
 
 
-async def test_drain_stops_each_turn_once_and_waits_for_its_cleanup():
+async def test_drain_stops_each_turn_once_and_waits_for_its_cleanup() -> None:
     a = Admission(max_concurrent=4)
     cleaned = asyncio.Event()
 
-    async def runner(_cwd):
+    async def runner(_cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
         try:
             yield SessionEvent(session_id="s")
             await asyncio.Event().wait()
@@ -111,10 +112,10 @@ async def test_drain_stops_each_turn_once_and_waits_for_its_cleanup():
     assert a.inflight == 0
 
 
-async def test_drain_force_cancels_a_turn_whose_cleanup_hangs():
+async def test_drain_force_cancels_a_turn_whose_cleanup_hangs() -> None:
     a = Admission(max_concurrent=4)
 
-    async def runner(_cwd):
+    async def runner(_cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
         try:
             yield SessionEvent(session_id="s")
             await asyncio.Event().wait()
@@ -128,6 +129,7 @@ async def test_drain_force_cancels_a_turn_whose_cleanup_hangs():
     forced = await a.drain(grace_sec=0.1)
 
     assert forced == 1
+    assert turn.task is not None
     await asyncio.wait({turn.task}, timeout=1)
     assert turn.task.done()
     assert a.inflight == 0  # released on the way out, even when forced

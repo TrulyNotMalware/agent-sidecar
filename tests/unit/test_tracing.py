@@ -5,7 +5,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from sidecar.observability.tracing import shutdown_tracing
 
 
-def test_shutdown_tracing_exports_the_pending_batch():
+def test_shutdown_tracing_exports_the_pending_batch() -> None:
     # The batch processor exports on a timer; at shutdown the last batch must not wait
     # for it (and the SDK's own atexit flush does not run on SIGTERM).
     exporter = InMemorySpanExporter()

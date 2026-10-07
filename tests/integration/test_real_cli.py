@@ -13,11 +13,13 @@ import socket
 import subprocess
 import sys
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, Protocol, TypedDict
 
 import pytest
 
-from .harness import HERE, converse, precondition, wait_until
+from .harness import HERE, SidecarServer, StartSidecar, converse, precondition, wait_until
 
 pytestmark = pytest.mark.integration
 
@@ -25,13 +27,31 @@ TURN_TOKEN = "turn-token-for-the-mcp-server"
 SYSTEM_MARK = "SYSTEM-PROMPT-MARKER"
 
 
+class FakeServers(TypedDict):
+    """What one call of the fakes fixture started."""
+
+    api: str  # base URL of the fake model API
+    mcp: str  # URL of the fake MCP server
+    record: Path  # one NN.json per main-loop request the model API received
+    auth_log: Path  # the Authorization header of every MCP request
+
+
+class StartFakes(Protocol):
+    """The fakes fixture: start the fake `kind` model API and the fake MCP server."""
+
+    def __call__(self, kind: str, **env: str) -> FakeServers: ...
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        port: int = s.getsockname()[1]
+        return port
 
 
-def _serve(args: list[str], port: int, log: Path, env: dict[str, str] | None = None):
+def _serve(
+    args: list[str], port: int, log: Path, env: dict[str, str] | None = None
+) -> subprocess.Popen[bytes]:
     with log.open("wb") as out:
         proc = subprocess.Popen(
             [sys.executable, *args],
@@ -57,10 +77,10 @@ def _serve(args: list[str], port: int, log: Path, env: dict[str, str] | None = N
 
 
 @pytest.fixture
-def fakes(tmp_path):
-    procs = []
+def fakes(tmp_path: Path) -> Iterator[StartFakes]:
+    procs: list[subprocess.Popen[bytes]] = []
 
-    def start(kind: str, **env: str) -> dict:
+    def start(kind: str, **env: str) -> FakeServers:
         api_port, mcp_port = _free_port(), _free_port()
         record = tmp_path / f"{kind}-requests"
         auth_log = tmp_path / "mcp-auth.log"
@@ -93,11 +113,13 @@ def fakes(tmp_path):
         p.wait()
 
 
-def _requests(record: Path) -> list[dict]:
+def _requests(record: Path) -> list[dict[str, Any]]:
     return [json.loads(p.read_text()) for p in sorted(record.glob("*.json"))]
 
 
-def _claude(start_sidecar, fakes, **env):
+def _claude(
+    start_sidecar: StartSidecar, fakes: StartFakes, **env: str
+) -> tuple[SidecarServer, FakeServers]:
     f = fakes("anthropic", **env)
     srv = start_sidecar(
         real_cli=True,
@@ -109,7 +131,9 @@ def _claude(start_sidecar, fakes, **env):
     return srv, f
 
 
-def test_claude_turn_reaches_the_per_turn_mcp_server(start_sidecar, fakes):
+def test_claude_turn_reaches_the_per_turn_mcp_server(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
     srv, f = _claude(start_sidecar, fakes)
 
     r = converse(
@@ -135,7 +159,9 @@ def test_claude_turn_reaches_the_per_turn_mcp_server(start_sidecar, fakes):
     assert SYSTEM_MARK in json.dumps(first["system"])
 
 
-def test_claude_api_error_is_the_terminal_frame_scrubbed(start_sidecar, fakes):
+def test_claude_api_error_is_the_terminal_frame_scrubbed(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
     srv, _f = _claude(start_sidecar, fakes, FAKE_API_ERROR="400")
 
     r = converse(srv.port, "real-claude-err", read_timeout=60)
@@ -150,7 +176,9 @@ def test_claude_api_error_is_the_terminal_frame_scrubbed(start_sidecar, fakes):
 requires_codex = pytest.mark.skipif(shutil.which("codex") is None, reason="codex not on PATH")
 
 
-def _codex(start_sidecar, fakes, tmp_path, config: str = "", **env):
+def _codex(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path, config: str = "", **env: str
+) -> tuple[SidecarServer, FakeServers]:
     f = fakes("openai", **env)
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
@@ -183,7 +211,9 @@ def _codex(start_sidecar, fakes, tmp_path, config: str = "", **env):
 
 
 @requires_codex
-def test_codex_turn_reaches_the_per_turn_mcp_server(start_sidecar, fakes, tmp_path):
+def test_codex_turn_reaches_the_per_turn_mcp_server(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
     srv, f = _codex(start_sidecar, fakes, tmp_path, FAKE_OPENAI_CALL_ECHO="1")
 
     r = converse(
@@ -209,7 +239,9 @@ def test_codex_turn_reaches_the_per_turn_mcp_server(start_sidecar, fakes, tmp_pa
 
 
 @requires_codex
-def test_codex_resume_does_not_repeat_the_system_prompt(start_sidecar, fakes, tmp_path):
+def test_codex_resume_does_not_repeat_the_system_prompt(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
     srv, f = _codex(start_sidecar, fakes, tmp_path)
 
     first = converse(srv.port, "real-codex-resume", body={"systemPrompt": SYSTEM_MARK})
@@ -224,7 +256,9 @@ def test_codex_resume_does_not_repeat_the_system_prompt(start_sidecar, fakes, tm
 
 
 @requires_codex
-def test_codex_system_prompt_survives_compaction_on_a_resumed_turn(start_sidecar, fakes, tmp_path):
+def test_codex_system_prompt_survives_compaction_on_a_resumed_turn(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
     # On auto-compaction codex rebuilds the thread from the developer instructions it
     # was started with *this* time — so a resume must pass them again.
     srv, f = _codex(
@@ -253,7 +287,9 @@ def test_codex_system_prompt_survives_compaction_on_a_resumed_turn(start_sidecar
 
 
 @requires_codex
-def test_codex_api_error_is_the_terminal_frame_scrubbed(start_sidecar, fakes, tmp_path):
+def test_codex_api_error_is_the_terminal_frame_scrubbed(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
     srv, _f = _codex(start_sidecar, fakes, tmp_path, FAKE_API_ERROR="400")
 
     r = converse(srv.port, "real-codex-err")

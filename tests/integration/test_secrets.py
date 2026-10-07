@@ -5,18 +5,20 @@ from pathlib import Path
 
 import pytest
 
-from .harness import converse, precondition, wait_until
+from .harness import SidecarServer, StartSidecar, converse, precondition, wait_until
 
 pytestmark = pytest.mark.integration
 
 TOKEN = "turn-token-9f8e7d6c"
 
 
-def _fake_messages(srv) -> list[str]:
+def _fake_messages(srv: SidecarServer) -> list[str]:
     return [msg for _pid, msg in srv.fake_log_lines()]
 
 
-def test_turn_token_reaches_the_cli_only_through_a_private_file(start_sidecar):
+def test_turn_token_reaches_the_cli_only_through_a_private_file(
+    start_sidecar: StartSidecar,
+) -> None:
     srv = start_sidecar(
         mode="normal", MCP_SERVER_URL="http://127.0.0.1:9/mcp", MCP_SERVER_NAME="tools"
     )
@@ -33,7 +35,7 @@ def test_turn_token_reaches_the_cli_only_through_a_private_file(start_sidecar):
     assert wait_until(lambda: not Path(config["path"]).exists(), timeout=5)
 
 
-def test_cli_environment_does_not_carry_sidecar_secrets(start_sidecar):
+def test_cli_environment_does_not_carry_sidecar_secrets(start_sidecar: StartSidecar) -> None:
     srv = start_sidecar(mode="normal", OPENAI_API_KEY="sk-openai-for-codex-only")
 
     r = converse(srv.port, "k-env")

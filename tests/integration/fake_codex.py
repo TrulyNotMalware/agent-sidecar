@@ -29,7 +29,7 @@ def log(msg: str) -> None:
         f.write(f"{time.time():.3f} pid={os.getpid()} {msg}\n")
 
 
-def out(obj: dict) -> None:
+def out(obj: dict[str, object]) -> None:
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
 

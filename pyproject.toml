@@ -54,7 +54,7 @@ ignore = ["TRY003"]  # the message belongs where the exception is raised
 "examples/**" = ["T201"]
 # Test set-up does blocking file I/O inside async tests on purpose, and raising inside
 # a try block is how a test fakes a failure with a traceback.
-"tests/**" = ["ASYNC230", "ASYNC240", "TRY301", "ANN"]
+"tests/**" = ["ASYNC230", "ASYNC240", "TRY301"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -62,7 +62,7 @@ strict = true
 warn_unreachable = true
 enable_error_code = ["ignore-without-code"]
 plugins = ["pydantic.mypy"]
-files = ["sidecar"]
+files = ["sidecar", "tests", "scripts", "examples"]
 
 [tool.pydantic-mypy]
 init_typed = true

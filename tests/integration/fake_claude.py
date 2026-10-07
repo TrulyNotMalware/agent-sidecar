@@ -29,7 +29,7 @@ def log(msg: str) -> None:
         f.write(f"{time.time():.3f} pid={os.getpid()} {msg}\n")
 
 
-def out(obj: dict) -> None:
+def out(obj: dict[str, object]) -> None:
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
 
@@ -60,7 +60,7 @@ def result(*, is_error: bool = False) -> None:
     )
 
 
-def _on_term(*_args) -> None:
+def _on_term(*_args: object) -> None:
     if os.environ.get("FAKE_IGNORE_TERM") == "1":
         log("got SIGTERM (ignored)")
         return

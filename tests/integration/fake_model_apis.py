@@ -58,14 +58,14 @@ def _record(raw: bytes) -> None:
         (RECORD / f"{next(_counter):02d}.json").write_bytes(raw)
 
 
-def _sse(name: str, data: dict) -> str:
+def _sse(name: str, data: dict[str, Any]) -> str:
     return f"event: {name}\ndata: {json.dumps({'type': name, **data})}\n\n"
 
 
 # --- anthropic (Messages API) --------------------------------------------------------
 
 
-def _anthropic_blocks(body: dict) -> tuple[list[dict], str]:
+def _anthropic_blocks(body: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     tools = [t.get("name", "") for t in body.get("tools", [])]
     answered = any(
         isinstance(m.get("content"), list)
@@ -81,7 +81,9 @@ def _anthropic_blocks(body: dict) -> tuple[list[dict], str]:
     ], "tool_use"
 
 
-def _anthropic_message(body: dict, blocks: list[dict], stop: str | None, usage: dict) -> dict:
+def _anthropic_message(
+    body: dict[str, Any], blocks: list[dict[str, Any]], stop: str | None, usage: dict[str, int]
+) -> dict[str, Any]:
     return {
         "id": "msg_1",
         "type": "message",
@@ -94,12 +96,14 @@ def _anthropic_message(body: dict, blocks: list[dict], stop: str | None, usage: 
     }
 
 
-def _anthropic_stream(body: dict, blocks: list[dict], stop: str, usage: dict) -> bytes:
+def _anthropic_stream(
+    body: dict[str, Any], blocks: list[dict[str, Any]], stop: str, usage: dict[str, int]
+) -> bytes:
     start = _anthropic_message(body, [], None, {**usage, "output_tokens": 1})
     out = [_sse("message_start", {"message": start})]
     for i, block in enumerate(blocks):
         if block["type"] == "text":
-            opening = {"type": "text", "text": ""}
+            opening: dict[str, Any] = {"type": "text", "text": ""}
             delta = {"type": "text_delta", "text": block["text"]}
         else:
             opening = {**block, "input": {}}
@@ -123,10 +127,10 @@ def _anthropic_stream(body: dict, blocks: list[dict], stop: str, usage: dict) ->
 # --- openai (Responses API, as codex calls it) ----------------------------------------
 
 
-def _openai_items(body: dict) -> tuple[list[dict], dict]:
+def _openai_items(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, object]]:
     global _compacted
 
-    def message(text: str, i: int) -> dict:
+    def message(text: str, i: int) -> dict[str, Any]:
         return {
             "type": "message",
             "id": f"msg_{i}",
@@ -135,7 +139,7 @@ def _openai_items(body: dict) -> tuple[list[dict], dict]:
             "content": [{"type": "output_text", "text": text, "annotations": []}],
         }
 
-    def code_call(code: str) -> dict:
+    def code_call(code: str) -> dict[str, Any]:
         # codex exposes its tools (MCP ones too) through its `functions.exec` code tool.
         return {
             "type": "custom_tool_call",
@@ -169,7 +173,7 @@ def _openai_items(body: dict) -> tuple[list[dict], dict]:
     ], USAGE_OPENAI
 
 
-def _openai_stream(body: dict) -> bytes:
+def _openai_stream(body: dict[str, Any]) -> bytes:
     items, usage = _openai_items(body)
     out = [_sse("response.created", {"response": {"id": "resp_1"}})]
     for idx, item in enumerate(items):
@@ -193,7 +197,7 @@ def _openai_stream(body: dict) -> bytes:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, *_args) -> None:
+    def log_message(self, *_args: object) -> None:
         pass
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
@@ -203,10 +207,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _error(self) -> None:
+    def _error(self, status: str) -> None:
         error = {"type": "invalid_request_error", "message": ERROR_MESSAGE}
         payload = {"type": "error", "error": error} if KIND == "anthropic" else {"error": error}
-        self._send(int(ERROR_STATUS), json.dumps(payload).encode(), "application/json")
+        self._send(int(status), json.dumps(payload).encode(), "application/json")
 
     def do_GET(self) -> None:
         self._send(404, b"", "text/plain")
@@ -226,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
         if body.get("tools"):  # the agent loop (side requests, e.g. a title, have none)
             _record(raw)
             if ERROR_STATUS:
-                self._error()
+                self._error(ERROR_STATUS)
                 return
             blocks, stop = _anthropic_blocks(body)
             usage = USAGE_ANTHROPIC
@@ -243,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
     def _openai(self, raw: bytes, body: dict[str, Any]) -> None:
         _record(raw)
         if ERROR_STATUS:
-            self._error()
+            self._error(ERROR_STATUS)
         else:
             self._send(200, _openai_stream(body), "text/event-stream")
 

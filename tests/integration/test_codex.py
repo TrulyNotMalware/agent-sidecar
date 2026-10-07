@@ -1,18 +1,25 @@
 """The codex runner against real processes: stdin prompt, process-group kill, resume binding."""
 
 import json
-import re
 
 import pytest
 
-from .harness import converse, pid_alive, precondition, wait_until
+from .harness import (
+    SidecarServer,
+    StartSidecar,
+    StreamResult,
+    converse,
+    pid_alive,
+    precondition,
+    wait_until,
+)
 
 pytestmark = pytest.mark.integration
 
 THREAD_ID = "01a0ec52-3a8c-7d43-871b-149bbb8c0acf"  # what fake_codex.py always reports
 
 
-def _converse_resume(srv, session_key: str, session_id: str):
+def _converse_resume(srv: SidecarServer, session_key: str, session_id: str) -> int:
     import socket
 
     from .harness import BEARER
@@ -29,11 +36,13 @@ def _converse_resume(srv, session_key: str, session_id: str):
     return int(head.split()[1])
 
 
-def _codex_lines(srv) -> list[tuple[int, str]]:
+def _codex_lines(srv: SidecarServer) -> list[tuple[int, str]]:
     return [(pid, msg) for pid, msg in srv.fake_log_lines() if not msg.startswith("start mode")]
 
 
-def test_prompt_reaches_codex_on_stdin_and_transient_errors_are_tolerated(start_sidecar):
+def test_prompt_reaches_codex_on_stdin_and_transient_errors_are_tolerated(
+    start_sidecar: StartSidecar,
+) -> None:
     srv = start_sidecar(provider="codex")
 
     r = converse(srv.port, "k-codex", prompt="--last hello")
@@ -48,7 +57,9 @@ def test_prompt_reaches_codex_on_stdin_and_transient_errors_are_tolerated(start_
     assert 'prompt="--last hello"' in messages
 
 
-def test_timeout_kills_codex_and_the_rest_of_its_process_group(start_sidecar):
+def test_timeout_kills_codex_and_the_rest_of_its_process_group(
+    start_sidecar: StartSidecar,
+) -> None:
     srv = start_sidecar(mode="hang_with_child", provider="codex", TURN_TIMEOUT_SEC="2")
 
     r = converse(srv.port, "k-codex-timeout")
@@ -58,11 +69,13 @@ def test_timeout_kills_codex_and_the_rest_of_its_process_group(start_sidecar):
     messages = [msg for _pid, msg in _codex_lines(srv)]
     [codex_pid] = srv.cli_pids()
     [child] = [m for m in messages if m.startswith("child pid=")]
-    child_pid = int(re.search(r"\d+", child).group())
+    child_pid = int(child.removeprefix("child pid="))
     assert wait_until(lambda: not pid_alive(codex_pid) and not pid_alive(child_pid), timeout=10)
 
 
-def test_resume_is_limited_to_ids_issued_for_the_session_key(start_sidecar):
+def test_resume_is_limited_to_ids_issued_for_the_session_key(
+    start_sidecar: StartSidecar,
+) -> None:
     srv = start_sidecar(provider="codex")
     first = converse(srv.port, "k-owner")
     precondition(first.events[0] == ("session", {"sessionId": THREAD_ID}), f"{first.events}")
@@ -79,7 +92,9 @@ def test_resume_is_limited_to_ids_issued_for_the_session_key(start_sidecar):
 
 
 @pytest.mark.parametrize("resume", ["fork", "same"])
-def test_resume_chain_follows_whatever_id_codex_reports(start_sidecar, resume):
+def test_resume_chain_follows_whatever_id_codex_reports(
+    start_sidecar: StartSidecar, resume: str
+) -> None:
     # codex may report a new (forked) or the same thread id on resume; the latest one
     # must stay resumable by the same sessionKey, turn after turn.
     srv = start_sidecar(provider="codex", FAKE_CODEX_RESUME=resume)
@@ -93,10 +108,10 @@ def test_resume_chain_follows_whatever_id_codex_reports(start_sidecar, resume):
     assert [r.terminal_events for r in (first, second, third)] == [["done"]] * 3
 
 
-def _resume(srv, session_key: str, session_id: str):
+def _resume(srv: SidecarServer, session_key: str, session_id: str) -> StreamResult:
     import socket
 
-    from .harness import BEARER, StreamResult, parse_sse_frames
+    from .harness import BEARER, parse_sse_frames
 
     body = json.dumps({"sessionKey": session_key, "prompt": "more", "sessionId": session_id})
     request = (

@@ -92,10 +92,9 @@ def _apply_auth_mode() -> str | None:
 
 
 async def main() -> int:
-    if PROVIDER == "codex":
-        from sidecar.codex_runner import run_turn
-    else:
-        from sidecar.claude_runner import run_turn
+    from sidecar import claude_runner, codex_runner
+
+    run_turn: Runner = codex_runner.run_turn if PROVIDER == "codex" else claude_runner.run_turn
 
     auth_error = _apply_auth_mode()
     if auth_error is not None:

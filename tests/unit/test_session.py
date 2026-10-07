@@ -3,20 +3,20 @@ from pathlib import Path
 from sidecar.session import stateless_workspace, workspace_for
 
 
-def test_workspace_for_is_deterministic(tmp_path: Path):
+def test_workspace_for_is_deterministic(tmp_path: Path) -> None:
     assert workspace_for("k1", root=tmp_path) == workspace_for("k1", root=tmp_path)
 
 
-def test_workspace_for_distinguishes_keys(tmp_path: Path):
+def test_workspace_for_distinguishes_keys(tmp_path: Path) -> None:
     assert workspace_for("k1", root=tmp_path) != workspace_for("k2", root=tmp_path)
 
 
-def test_workspace_for_creates_directory(tmp_path: Path):
+def test_workspace_for_creates_directory(tmp_path: Path) -> None:
     p = workspace_for("hello", root=tmp_path)
     assert p.is_dir()
 
 
-async def test_stateless_workspace_creates_and_cleans_up(tmp_path: Path):
+async def test_stateless_workspace_creates_and_cleans_up(tmp_path: Path) -> None:
     captured: Path
     async with stateless_workspace(parent=tmp_path) as ws:
         assert ws.is_dir()
@@ -25,7 +25,7 @@ async def test_stateless_workspace_creates_and_cleans_up(tmp_path: Path):
     assert not captured.exists()
 
 
-async def test_stateless_workspace_unique_per_call(tmp_path: Path):
+async def test_stateless_workspace_unique_per_call(tmp_path: Path) -> None:
     seen: list[Path] = []
     async with (
         stateless_workspace(parent=tmp_path) as a,
@@ -37,7 +37,7 @@ async def test_stateless_workspace_unique_per_call(tmp_path: Path):
         assert not p.exists()
 
 
-def test_session_ids_are_remembered_per_session_key(tmp_path: Path):
+def test_session_ids_are_remembered_per_session_key(tmp_path: Path) -> None:
     from sidecar.session import known_session_ids, remember_session_id
 
     remember_session_id("k1", "AAAA-1", root=tmp_path)
@@ -48,7 +48,7 @@ def test_session_ids_are_remembered_per_session_key(tmp_path: Path):
     assert known_session_ids("k2", root=tmp_path) == set()
 
 
-def test_session_id_record_lives_outside_the_workspace(tmp_path: Path):
+def test_session_id_record_lives_outside_the_workspace(tmp_path: Path) -> None:
     # The agent can write inside its workspace; the record must not be forgeable there.
     from sidecar.session import remember_session_id
 

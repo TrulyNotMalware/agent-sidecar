@@ -1,42 +1,53 @@
+from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 
 from sidecar import claude_runner
 from sidecar.claude_runner import ClaudePolicy
 from sidecar.errors import ApiError, ErrorCode
-from sidecar.events import TurnSpec
+from sidecar.events import RunnerEvent, TurnSpec
 
 
-def _install_fake_query(monkeypatch) -> dict:
+def _install_fake_query(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Replace claude_agent_sdk.query; record the options the runner built."""
     import claude_agent_sdk
 
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
-    async def fake_query(*, prompt, options):
+    async def fake_query(
+        *, prompt: str, options: ClaudeAgentOptions
+    ) -> AsyncGenerator[Message, None]:
         seen["options"] = options
         mcp = options.mcp_servers
         if isinstance(mcp, str) and Path(mcp).is_file():
             seen["mcp_file_content"] = Path(mcp).read_text()
             seen["mcp_file_mode"] = Path(mcp).stat().st_mode & 0o777
         system = options.system_prompt
-        if isinstance(system, dict) and Path(system["path"]).is_file():
-            seen["system_file_content"] = Path(system["path"]).read_text()
-            seen["system_file_mode"] = Path(system["path"]).stat().st_mode & 0o777
+        if isinstance(system, dict):
+            system_file = Path(cast("dict[str, str]", system)["path"])
+            if system_file.is_file():
+                seen["system_file_content"] = system_file.read_text()
+                seen["system_file_mode"] = system_file.stat().st_mode & 0o777
         return
-        yield  # unreachable; makes this an async generator like the real query()
+        yield  # type: ignore[unreachable]  # makes this an async generator like the real query()
 
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
     return seen
 
 
-async def _run(spec: TurnSpec | None = None, *, policy: ClaudePolicy | None = None) -> list:
+async def _run(
+    spec: TurnSpec | None = None, *, policy: ClaudePolicy | None = None
+) -> list[RunnerEvent]:
     spec = TurnSpec(prompt="hi") if spec is None else spec
     return [ev async for ev in claude_runner.run_turn(spec, cwd=Path("/tmp"), policy=policy)]
 
 
-async def test_turn_token_goes_to_a_private_file_not_inline_json(monkeypatch):
+async def test_turn_token_goes_to_a_private_file_not_inline_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     seen = _install_fake_query(monkeypatch)
 
     await _run(
@@ -58,7 +69,9 @@ async def test_turn_token_goes_to_a_private_file_not_inline_json(monkeypatch):
     assert seen["options"].allowed_tools == ["mcp__tools"]
 
 
-async def test_static_config_path_is_passed_through_unchanged(monkeypatch, tmp_path):
+async def test_static_config_path_is_passed_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     static = tmp_path / "mcp.json"
     static.write_text('{"mcpServers": {}}')
     seen = _install_fake_query(monkeypatch)
@@ -69,7 +82,7 @@ async def test_static_config_path_is_passed_through_unchanged(monkeypatch, tmp_p
     assert static.exists()
 
 
-async def test_sidecar_secrets_are_blanked_in_the_cli_env(monkeypatch):
+async def test_sidecar_secrets_are_blanked_in_the_cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _install_fake_query(monkeypatch)
 
     await _run()
@@ -78,7 +91,7 @@ async def test_sidecar_secrets_are_blanked_in_the_cli_env(monkeypatch):
     assert seen["options"].env["OPENAI_API_KEY"] == ""
 
 
-async def test_extra_withheld_names_are_blanked_too(monkeypatch):
+async def test_extra_withheld_names_are_blanked_too(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _install_fake_query(monkeypatch)
 
     await _run(policy=ClaudePolicy(withheld_env=("AZURE_OPENAI_KEY",)))
@@ -87,7 +100,7 @@ async def test_extra_withheld_names_are_blanked_too(monkeypatch):
     assert seen["options"].env["BEARER_SECRET"] == ""
 
 
-async def test_default_policy_is_explicit_and_hermetic(monkeypatch):
+async def test_default_policy_is_explicit_and_hermetic(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _install_fake_query(monkeypatch)
 
     await _run()
@@ -99,7 +112,9 @@ async def test_default_policy_is_explicit_and_hermetic(monkeypatch):
     assert options.tools is None  # CLI default built-in toolset (operator choice)
 
 
-async def test_configured_mcp_servers_are_pre_approved(monkeypatch, tmp_path):
+async def test_configured_mcp_servers_are_pre_approved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     static = tmp_path / "mcp.json"
     static.write_text('{"mcpServers": {"domain-tools": {}, "search.v2": {}, "tools": {}}}')
     seen = _install_fake_query(monkeypatch)
@@ -123,7 +138,7 @@ async def test_configured_mcp_servers_are_pre_approved(monkeypatch, tmp_path):
     ]
 
 
-async def test_tools_can_be_restricted_or_disabled(monkeypatch):
+async def test_tools_can_be_restricted_or_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _install_fake_query(monkeypatch)
 
     await _run(policy=ClaudePolicy(tools=()))
@@ -139,7 +154,7 @@ async def test_tools_can_be_restricted_or_disabled(monkeypatch):
     assert seen["options"].setting_sources == ["project"]
 
 
-async def test_disallowed_tools_are_passed_through(monkeypatch):
+async def test_disallowed_tools_are_passed_through(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _install_fake_query(monkeypatch)
 
     await _run(policy=ClaudePolicy(disallowed_tools=("mcp__domain-tools__delete_all", "WebFetch")))
@@ -147,7 +162,7 @@ async def test_disallowed_tools_are_passed_through(monkeypatch):
     assert seen["options"].disallowed_tools == ["mcp__domain-tools__delete_all", "WebFetch"]
 
 
-async def test_restricted_mode_is_opt_in(monkeypatch):
+async def test_restricted_mode_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _install_fake_query(monkeypatch)
 
     await _run()
@@ -157,11 +172,19 @@ async def test_restricted_mode_is_opt_in(monkeypatch):
     assert "restricted" in seen["options"].extra_args
 
 
-def _install_failing_query(monkeypatch, exc: Exception, *messages, stderr=()) -> None:
+def _install_failing_query(
+    monkeypatch: pytest.MonkeyPatch,
+    exc: Exception,
+    *messages: Message,
+    stderr: Sequence[str] = (),
+) -> None:
     import claude_agent_sdk
 
-    async def fake_query(*, prompt, options):
+    async def fake_query(
+        *, prompt: str, options: ClaudeAgentOptions
+    ) -> AsyncGenerator[Message, None]:
         for line in stderr:
+            assert options.stderr is not None
             options.stderr(line)  # what the SDK does with each line the CLI writes
         for m in messages:
             yield m
@@ -170,21 +193,21 @@ def _install_failing_query(monkeypatch, exc: Exception, *messages, stderr=()) ->
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
 
 
-def _error_result(**fields):
-    from claude_agent_sdk import ResultMessage
-
+def _error_result(subtype: str = "success", errors: list[str] | None = None) -> ResultMessage:
     return ResultMessage(
-        subtype=fields.pop("subtype", "success"),
+        subtype=subtype,
         duration_ms=1,
         duration_api_ms=1,
         is_error=True,
         num_turns=1,
         session_id="s",
-        **fields,
+        errors=errors,
     )
 
 
-async def test_error_result_raised_by_the_sdk_is_the_clients_to_see(monkeypatch):
+async def test_error_result_raised_by_the_sdk_is_the_clients_to_see(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from claude_agent_sdk import ResultError
 
     data = {"subtype": "success", "result": "Prompt is too long", "is_error": True}
@@ -200,7 +223,9 @@ async def test_error_result_raised_by_the_sdk_is_the_clients_to_see(monkeypatch)
     assert exc_info.value.detail is None
 
 
-async def test_error_result_message_wins_over_the_sdk_restating_it(monkeypatch):
+async def test_error_result_message_wins_over_the_sdk_restating_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from claude_agent_sdk import ResultError
 
     result = _error_result(subtype="error_max_turns", errors=["Reached max turns (3)"])
@@ -212,7 +237,9 @@ async def test_error_result_message_wins_over_the_sdk_restating_it(monkeypatch):
     assert exc_info.value.message == "Reached max turns (3)"
 
 
-async def test_cli_failure_keeps_stderr_and_output_off_the_wire(monkeypatch):
+async def test_cli_failure_keeps_stderr_and_output_off_the_wire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from claude_agent_sdk import CLIJSONDecodeError, ProcessError
 
     _install_failing_query(
@@ -223,6 +250,7 @@ async def test_cli_failure_keeps_stderr_and_output_off_the_wire(monkeypatch):
     with pytest.raises(ApiError) as exc_info:
         await _run()
     assert exc_info.value.message == "claude CLI failed (ProcessError, exit code 2)"
+    assert exc_info.value.detail is not None
     assert exc_info.value.detail.endswith("stderr: starting\nfatal: cannot reach the API")
 
     bad_line = '{"type":"assistant","text":"the user\'s private words'
@@ -230,10 +258,13 @@ async def test_cli_failure_keeps_stderr_and_output_off_the_wire(monkeypatch):
     with pytest.raises(ApiError) as exc_info:
         await _run()
     assert exc_info.value.message == "claude CLI failed (CLIJSONDecodeError)"
+    assert exc_info.value.detail is not None
     assert "private words" not in exc_info.value.detail  # conversation content
 
 
-async def test_system_prompt_goes_to_a_private_file_not_argv(monkeypatch):
+async def test_system_prompt_goes_to_a_private_file_not_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     seen = _install_fake_query(monkeypatch)
 
     await _run(TurnSpec(prompt="hi", system_prompt="Answer tersely."))
@@ -245,7 +276,7 @@ async def test_system_prompt_goes_to_a_private_file_not_argv(monkeypatch):
     assert not Path(system["path"]).exists()  # removed once the turn ends
 
 
-async def test_settings_api_key_reaches_the_cli(monkeypatch):
+async def test_settings_api_key_reaches_the_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     # Settings may read it from .env, which the CLI's inherited environment lacks.
     seen = _install_fake_query(monkeypatch)
 
@@ -254,7 +285,7 @@ async def test_settings_api_key_reaches_the_cli(monkeypatch):
     assert seen["options"].env["ANTHROPIC_API_KEY"] == "sk-ant-from-dotenv"
 
 
-async def test_api_error_prose_is_not_streamed_as_text(monkeypatch):
+async def test_api_error_prose_is_not_streamed_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
     # The CLI reports an API failure as a synthetic assistant message, then an error
     # result: only the (scrubbed) terminal frame should carry it.
     from claude_agent_sdk import AssistantMessage, ResultError, TextBlock
@@ -267,7 +298,7 @@ async def test_api_error_prose_is_not_streamed_as_text(monkeypatch):
     data = {"subtype": "success", "result": "API Error: 401 invalid x-api-key"}
     _install_failing_query(monkeypatch, ResultError("…", data, exit_code=1), synthetic)
 
-    events = []
+    events: list[RunnerEvent] = []
     with pytest.raises(ApiError) as exc_info:
         async for ev in claude_runner.run_turn(TurnSpec(prompt="hi"), cwd=Path("/tmp")):
             events.append(ev)  # noqa: PERF401 — the raise lands mid-stream; what came before matters
@@ -276,13 +307,15 @@ async def test_api_error_prose_is_not_streamed_as_text(monkeypatch):
     assert exc_info.value.message == "API Error: 401 invalid x-api-key"
 
 
-async def test_stderr_lines_are_capped_in_length_and_number(monkeypatch):
+async def test_stderr_lines_are_capped_in_length_and_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from claude_agent_sdk import ProcessError
 
-    logged: list[tuple[str, dict]] = []
+    logged: list[tuple[str, dict[str, object]]] = []
 
     class Recorder:
-        def info(self, event, **kw):
+        def info(self, event: str, **kw: object) -> None:
             logged.append((event, kw))
 
         warning = info
@@ -296,7 +329,7 @@ async def test_stderr_lines_are_capped_in_length_and_number(monkeypatch):
     with pytest.raises(ApiError):
         await _run()
 
-    lines = [kw["line"] for event, kw in logged if event == "claude.stderr"]
+    lines = [str(kw["line"]) for event, kw in logged if event == "claude.stderr"]
     assert len(lines) == count
     assert {len(line) for line in lines} == {cap}
     assert [event for event, _ in logged].count("claude.stderr_not_logged") == 1

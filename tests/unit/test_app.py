@@ -1,8 +1,17 @@
-def test_startup_creates_cli_state_dirs_hidden_by_a_volume(monkeypatch, tmp_path):
+from pathlib import Path
+from typing import NoReturn
+
+import pytest
+from fastapi.testclient import TestClient
+
+from sidecar.config import Settings
+
+
+def test_startup_creates_cli_state_dirs_hidden_by_a_volume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     # A volume mounted over the image's state dir starts empty; codex refuses a
     # CODEX_HOME that does not exist, so startup must create it.
-    from fastapi.testclient import TestClient
-
     from sidecar.app import create_app
 
     codex_home = tmp_path / "state" / "codex"
@@ -17,10 +26,10 @@ def test_startup_creates_cli_state_dirs_hidden_by_a_volume(monkeypatch, tmp_path
     assert claude_dir.is_dir()
 
 
-def test_codex_warns_that_static_mcp_servers_are_ignored(monkeypatch, tmp_path, capsys):
+def test_codex_warns_that_static_mcp_servers_are_ignored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     # MCP_CONFIG_PATH servers are claude-only; codex reads its own config.toml.
-    from fastapi.testclient import TestClient
-
     from sidecar.app import create_app
     from sidecar.config import get_settings
 
@@ -40,7 +49,7 @@ def test_codex_warns_that_static_mcp_servers_are_ignored(monkeypatch, tmp_path, 
     assert '"mcp.static_config_ignored"' in capsys.readouterr().out
 
 
-def test_router_errors_have_the_error_schema_shape(client):
+def test_router_errors_have_the_error_schema_shape(client: TestClient) -> None:
     # Unknown path and wrong method are raised by Starlette's router, outside any route.
     r = client.get("/no/such/path")
     assert r.status_code == 404
@@ -52,13 +61,13 @@ def test_router_errors_have_the_error_schema_shape(client):
     assert "POST" in r.headers["allow"]
 
 
-def test_an_unhandled_exception_is_a_json_500_without_the_exception_text(monkeypatch):
-    from fastapi.testclient import TestClient
-
+def test_an_unhandled_exception_is_a_json_500_without_the_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from sidecar.app import create_app
     from sidecar.routes import health
 
-    def boom(_settings):
+    def boom(_settings: Settings) -> NoReturn:
         raise RuntimeError("private detail sk-proj-abcdef123456")
 
     monkeypatch.setattr(health, "_readyz_checks", boom)
