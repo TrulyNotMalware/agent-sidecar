@@ -1,7 +1,7 @@
 import logging
-from typing import Any
 
 import structlog
+from structlog.typing import EventDict, FilteringBoundLogger, WrappedLogger
 
 from .redaction import scrub_secrets
 
@@ -21,14 +21,14 @@ REDACT_KEYS = frozenset(
 REDACTED = "<redacted>"
 
 
-def _redact_processor(_logger, _method, event_dict: dict[str, Any]) -> dict[str, Any]:
+def _redact_processor(_logger: WrappedLogger, _method: str, event_dict: EventDict) -> EventDict:
     for key in event_dict:
         if key in REDACT_KEYS and event_dict[key] not in (None, ""):
             event_dict[key] = REDACTED
     return event_dict
 
 
-def _scrub(value: Any) -> Any:
+def _scrub(value: object) -> object:
     if isinstance(value, str):
         return scrub_secrets(value)
     if isinstance(value, dict):
@@ -38,13 +38,13 @@ def _scrub(value: Any) -> Any:
     return value
 
 
-def _scrub_processor(_logger, _method, event_dict: dict[str, Any]) -> dict[str, Any]:
+def _scrub_processor(_logger: WrappedLogger, _method: str, event_dict: EventDict) -> EventDict:
     # Always on, LOG_PROMPTS or not: CLI stderr, provider errors and exception text are
     # logged for diagnosis and must not carry credentials.
     return {k: _scrub(v) for k, v in event_dict.items()}
 
 
-def _scrub_arg(value: Any) -> Any:
+def _scrub_arg(value: object) -> object:
     if isinstance(value, str):
         return scrub_secrets(value)
     if isinstance(value, BaseException):
@@ -69,7 +69,7 @@ def _install_stdlib_scrubbing() -> None:
         elif isinstance(record.args, dict):
             record.args = {k: _scrub_arg(v) for k, v in record.args.items()}
 
-    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+    def factory(*args: object, **kwargs: object) -> logging.LogRecord:
         record = make_record(*args, **kwargs)
         if record.name == "uvicorn.access":
             scrub_args(record)
@@ -119,7 +119,7 @@ def configure_logging(*, level: str = "INFO", redact: bool = True) -> None:
         ):
             logging.getLogger(name).addFilter(_DropSdkLinesQuotingCliOutput())
 
-    processors: list[Any] = [
+    processors: list[structlog.typing.Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
@@ -138,5 +138,6 @@ def configure_logging(*, level: str = "INFO", redact: bool = True) -> None:
     _configured = True
 
 
-def get_logger(name: str | None = None):
-    return structlog.get_logger(name)
+def get_logger(name: str | None = None) -> FilteringBoundLogger:
+    logger: FilteringBoundLogger = structlog.get_logger(name)
+    return logger

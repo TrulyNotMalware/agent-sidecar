@@ -54,6 +54,9 @@ jobs:
           ruff format --check .
           ruff check .
 
+      - name: Types
+        run: mypy
+
       - name: Unit tests
         run: pytest tests/ -m "not integration" -q
 

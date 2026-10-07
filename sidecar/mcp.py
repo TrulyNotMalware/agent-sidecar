@@ -50,7 +50,7 @@ def build_mcp_servers(
     server_name: str,
     server_url: str | None,
     turn_token: str | None,
-) -> dict | str | None:
+) -> dict[str, Any] | str | None:
     """Resolve the `mcp_servers` value handed to the Claude Agent SDK.
 
     Without a per-turn scoped token (or a configured server url) this preserves

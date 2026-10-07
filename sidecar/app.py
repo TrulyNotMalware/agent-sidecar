@@ -1,4 +1,5 @@
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -56,7 +57,7 @@ def create_app() -> FastAPI:
     )
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Fail at startup, not on the first request, if the workspace root is unusable.
         settings.workspace_root.mkdir(parents=True, exist_ok=True)
         # A volume mounted over the image's state dir hides the directories the image
@@ -92,7 +93,7 @@ def create_app() -> FastAPI:
     # Every error body on the wire is {"code", "message"} (openapi `Error`), whether it
     # comes from a dependency (auth), a route (cancel 404) or validation (400).
     @app.exception_handler(ApiError)
-    async def _api_error_handler(_request: Request, exc: ApiError):
+    async def _api_error_handler(_request: Request, exc: ApiError) -> JSONResponse:
         headers = {"WWW-Authenticate": "Bearer"} if exc.code is ErrorCode.UNAUTHORIZED else None
         return JSONResponse(
             status_code=exc.status_code,
@@ -101,7 +102,7 @@ def create_app() -> FastAPI:
         )
 
     @app.exception_handler(RequestValidationError)
-    async def _validation_handler(_request: Request, exc: RequestValidationError):
+    async def _validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
         msg = "; ".join(
             f"{'.'.join(str(p) for p in err.get('loc', ()))}: {err.get('msg', '')}"
             for err in exc.errors()

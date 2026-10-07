@@ -1,6 +1,6 @@
 import collections
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +59,7 @@ async def run_turn(
     # $CLAUDE_CONFIG_DIR/projects (default ~/.claude/projects; --no-session-persistence
     # is --print-only, not SDK mode).
     ephemeral: bool = False,
-) -> AsyncIterator[RunnerEvent]:
+) -> AsyncGenerator[RunnerEvent, None]:
     """Drive one Claude turn via the Agent SDK and yield internal events.
 
     No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
@@ -120,7 +120,7 @@ async def run_turn(
                 yield ev
 
 
-async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[RunnerEvent]:
+async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncGenerator[RunnerEvent, None]:
     # Lazy import keeps the rest of the app usable without the SDK (e.g. auth/health tests).
     from claude_agent_sdk import (
         AssistantMessage,
@@ -162,8 +162,12 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncIterator[
 
     try:
         # aclosing: closing this generator must close the SDK's query() (and so
-        # the CLI) right away, in this task — not whenever the GC gets to it.
-        async with contextlib.aclosing(query(prompt=prompt, options=options)) as messages:
+        # the CLI) right away, in this task — not whenever the GC gets to it. The
+        # SDK types query() as an AsyncIterator; it must really be a generator.
+        stream = query(prompt=prompt, options=options)
+        if not isinstance(stream, AsyncGenerator):
+            raise TypeError("claude_agent_sdk.query() no longer returns an async generator")
+        async with contextlib.aclosing(stream) as messages:
             async for message in messages:
                 if result_error is not None:
                     continue
@@ -251,17 +255,15 @@ def _cli_failure(exc: Exception, stderr: str) -> ApiError:
     )
 
 
-def _extract_session_id(message: Any) -> str | None:
+def _extract_session_id(message: object) -> str | None:
     sid = getattr(message, "session_id", None)
-    if sid:
-        return sid
-    data = getattr(message, "data", None)
-    if isinstance(data, dict):
-        return data.get("session_id")
-    return None
+    if not sid:
+        data = getattr(message, "data", None)
+        sid = data.get("session_id") if isinstance(data, dict) else None
+    return sid if isinstance(sid, str) and sid else None
 
 
-def _extract_usage(message: Any) -> dict[str, Any]:
+def _extract_usage(message: object) -> dict[str, Any]:
     usage = getattr(message, "usage", None)
     if isinstance(usage, dict):
         return usage

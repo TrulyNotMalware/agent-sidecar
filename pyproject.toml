@@ -26,6 +26,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
     "ruff>=0.7",
+    "mypy>=2.3",
     # tests/integration/fake_mcp_server.py (the SDK allows mcp>=1.23,<3)
     "mcp>=2",
 ]
@@ -43,6 +44,19 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code"]
+plugins = ["pydantic.mypy"]
+files = ["sidecar"]
+
+[tool.pydantic-mypy]
+init_typed = true
+init_forbid_extra = true
+warn_required_dynamic_aliases = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -3,8 +3,9 @@ import contextlib
 import json
 import os
 import signal
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from pathlib import Path
+from typing import Any
 
 from .errors import ApiError, ErrorCode, provider_message
 from .events import (
@@ -152,7 +153,7 @@ async def run_turn(
     sandbox: str = "read-only",
     env_passthrough: Iterable[str] = (),
     ephemeral: bool = False,
-) -> AsyncIterator[RunnerEvent]:
+) -> AsyncGenerator[RunnerEvent, None]:
     """Drive one `codex exec` turn and yield internal events.
 
     No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
@@ -173,8 +174,9 @@ async def run_turn(
     # the env var from model-run shell commands, so the model can read its own turn
     # token. Acceptable: the token is short-TTL and the model already holds the same
     # tool-call authority the token grants.
-    mcp_scoped = mcp_server_url is not None and turn_token is not None
-    if mcp_scoped:
+    turn_env_extra: dict[str, str] = {}
+    if mcp_server_url is not None and turn_token is not None:
+        turn_env_extra[_MCP_TOKEN_ENV_VAR] = turn_token
         # The name is validated as a bare TOML key ([A-Za-z0-9_-]+); values are quoted.
         server = f"mcp_servers.{mcp_server_name}"
         cmd += [
@@ -212,9 +214,9 @@ async def run_turn(
     else:
         cmd += ["--", "-"]
 
-    turn_env = _child_env(env_passthrough, {_MCP_TOKEN_ENV_VAR: turn_token} if mcp_scoped else {})
+    turn_env = _child_env(env_passthrough, turn_env_extra)
 
-    async def _stream() -> AsyncIterator[RunnerEvent]:
+    async def _stream() -> AsyncGenerator[RunnerEvent, None]:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -233,11 +235,13 @@ async def run_turn(
                 f"codex could not be started ({type(exc).__name__})",
                 detail=f"{type(exc).__name__}: {exc}",
             ) from exc
+        # PIPE was requested for all three, so none is None.
+        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
         stderr_tail = _Tail(_STDERR_TAIL_BYTES)
         stderr_task = asyncio.create_task(_drain(proc.stderr, stderr_tail))
         # Written concurrently with reading stdout: if codex ever produced a pipe's worth
         # of output before reading stdin, a sequential write would deadlock both sides.
-        stdin_task = asyncio.create_task(_send_prompt(proc, stdin_prompt))
+        stdin_task = asyncio.create_task(_send_prompt(proc.stdin, stdin_prompt))
         # finalText is the last agent message, as claude's result is its last message;
         # earlier ones (e.g. before a tool call) were streamed as `text`.
         last_message = ""
@@ -344,7 +348,7 @@ async def run_turn(
             yield ev
 
 
-def _failure_text(event: dict) -> str:
+def _failure_text(event: dict[str, Any]) -> str:
     """turn.failed carries {"error": {"message": ...}}; tolerate a bare string too."""
     error = event.get("error")
     message = error.get("message") if isinstance(error, dict) else error
@@ -360,18 +364,17 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
-async def _send_prompt(proc, prompt: str) -> None:
-    assert proc.stdin is not None
+async def _send_prompt(stdin: asyncio.StreamWriter, prompt: str) -> None:
     try:
-        proc.stdin.write(prompt.encode())
-        await proc.stdin.drain()
+        stdin.write(prompt.encode())
+        await stdin.drain()
     except (BrokenPipeError, ConnectionResetError):
         pass  # codex exited early; its exit code / stderr tell the story
     finally:
-        proc.stdin.close()
+        stdin.close()
 
 
-async def _ndjson_lines(reader) -> AsyncIterator[bytes]:
+async def _ndjson_lines(reader: asyncio.StreamReader) -> AsyncIterator[bytes]:
     buf = bytearray()
     skipping = False
     while chunk := await reader.read(65536):
@@ -409,12 +412,12 @@ class _Tail:
         return self._buf.decode(errors="replace")[-chars:]
 
 
-async def _drain(reader, tail: _Tail) -> None:
+async def _drain(reader: asyncio.StreamReader, tail: _Tail) -> None:
     while chunk := await reader.read(65536):
         tail.append(chunk)
 
 
-async def _finish(task: asyncio.Task) -> None:
+async def _finish(task: asyncio.Task[None]) -> None:
     """Wait (bounded) for a helper task; its failure never reaches the caller's cleanup.
 
     asyncio.wait never raises the task's exception, but does let a cancellation of the
@@ -434,7 +437,7 @@ def _signal_group(pid: int, sig: int) -> None:
         os.killpg(pid, sig)
 
 
-async def _terminate(proc) -> None:
+async def _terminate(proc: asyncio.subprocess.Process) -> None:
     """Stop codex's process group with bounded waits (never raises).
 
     The group holds the npm node wrapper, the native codex binary and anything else
@@ -455,7 +458,7 @@ async def _terminate(proc) -> None:
             await asyncio.wait_for(asyncio.shield(proc.wait()), _KILL_WAIT_SEC)
 
 
-def _tool_use_from_item(item: dict) -> list[RunnerEvent]:
+def _tool_use_from_item(item: dict[str, Any]) -> list[RunnerEvent]:
     item_type = item.get("type")
     tool_id = item.get("id")
 
@@ -478,7 +481,7 @@ def _tool_use_from_item(item: dict) -> list[RunnerEvent]:
     return []
 
 
-def _tool_result_from_item(item: dict) -> RunnerEvent | None:
+def _tool_result_from_item(item: dict[str, Any]) -> RunnerEvent | None:
     item_type = item.get("type")
     tool_id = item.get("id")
 
@@ -492,7 +495,7 @@ def _tool_result_from_item(item: dict) -> RunnerEvent | None:
     return None
 
 
-def _mcp_name(item: dict) -> str:
+def _mcp_name(item: dict[str, Any]) -> str:
     """`mcp__<server>__<tool>`, the name claude reports for the same tool."""
     tool = item.get("tool") or "unknown"
     server = item.get("server")

@@ -3,7 +3,7 @@ import contextlib
 import functools
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +14,7 @@ import structlog
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
+from starlette.types import Message
 
 from .. import claude_runner, codex_runner
 from ..admission import Admission
@@ -40,7 +41,7 @@ from ..session import (
     workspace_for,
 )
 from ..sse import sse_event
-from ..turn import StopReason, Turn, TurnEnded, TurnStopped
+from ..turn import StopReason, Turn, TurnEnded, TurnItem, TurnStopped
 
 router = APIRouter()
 log = get_logger("sidecar.converse")
@@ -123,7 +124,7 @@ async def converse(
 
     state = _StreamState()
 
-    async def on_client_close(_message) -> None:
+    async def on_client_close(_message: Message) -> None:
         # After `done` the client leaving is expected; let the CLI wind down on its own.
         if not state.done_delivered:
             turn.stop("disconnected")
@@ -198,7 +199,7 @@ async def _event_stream(
     settings: Settings,
     session_key: str,
     state: "_StreamState",
-):
+) -> AsyncIterator[dict[str, str]]:
     """Relay the turn's queue as SSE: session → events → exactly one `done` | `error`.
 
     Runs inside sse-starlette's task group, so it never awaits cleanup: every exit
@@ -209,7 +210,7 @@ async def _event_stream(
     drain_budget = max(0.0, settings.shutdown_grace_sec - 1.0)
     drain_deadline: float | None = None
     shutdown_wait = asyncio.ensure_future(shutdown.wait())
-    get: asyncio.Future | None = None
+    get: asyncio.Future[TurnItem] | None = None
     outcome: str | None = None  # "ok" or the error code of the terminal frame sent
     # After `done` the stream stays open, sending nothing, until TurnEnded: the CLI has
     # exited and the sessionKey / user slot are free again. End of stream therefore
@@ -288,6 +289,7 @@ def _terminal_error(
     if reason is not None:
         code, template = _STOP_ERRORS[reason]
         return code.value, template.format(timeout=timeout_sec)
+    assert isinstance(item, TurnEnded)  # a TurnStopped always carries a reason
     error = item.error  # TurnEnded without a stop: the runner finished or failed
     # Details withheld from the wire (CLI stderr, exception text) are in the log.
     see_log = f" (details in the sidecar log, turn {turn_id})"

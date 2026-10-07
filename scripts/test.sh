@@ -11,5 +11,9 @@ echo "=== lint ==="
 "$VENV/ruff" check .
 
 echo ""
+echo "=== types ==="
+"$VENV/mypy"
+
+echo ""
 echo "=== tests ==="
 "$VENV/python" -m pytest tests/ -v "$@"

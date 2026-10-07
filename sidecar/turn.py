@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace import Span, Status, StatusCode
 
 from .admission import Admission
 from .errors import ApiError
@@ -79,12 +79,12 @@ class Turn:
         self._admission = admission
         self._timeout_sec = timeout_sec
         self._span_attributes = span_attributes or {}
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
         self._started = False  # _main began executing (its finally will end the turn)
         self._stop_reason: StopReason | None = None
 
     @property
-    def task(self) -> asyncio.Task | None:
+    def task(self) -> asyncio.Task[None] | None:
         return self._task
 
     def start(
@@ -183,7 +183,7 @@ class Turn:
         self,
         open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],
         workspace: Callable[[], AbstractContextManager[Path]],
-        span,
+        span: Span,
     ) -> None:
         with workspace() as cwd:
             # aclosing: the runner (and the CLI it drives) is fully closed before the
@@ -194,7 +194,7 @@ class Turn:
                     self.events.put_nowait(ev)
 
 
-def _instrument(ev: RunnerEvent, span) -> None:
+def _instrument(ev: RunnerEvent, span: Span) -> None:
     if isinstance(ev, ToolUseEvent):
         TOOL_CALLS.labels(tool_name=ev.name, outcome="started").inc()
         log.info("converse.tool_use", tool_name=ev.name, args=ev.args)
