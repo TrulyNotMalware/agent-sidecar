@@ -30,6 +30,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from sidecar.events import TurnSpec
+
 _ROOT = Path(__file__).parent.parent
 
 
@@ -124,13 +126,7 @@ async def _smoke(run_turn) -> int:
     with tempfile.TemporaryDirectory(prefix="sidecar-smoke-") as td:
         try:
             async with asyncio.timeout(60):
-                async for ev in run_turn(
-                    prompt=PROMPT,
-                    cwd=Path(td),
-                    system_prompt=None,
-                    resume_session_id=None,
-                    mcp_config_path=None,
-                ):
+                async for ev in run_turn(TurnSpec(prompt=PROMPT), cwd=Path(td)):
                     print(f"{type(ev).__name__:>16s}  {ev}")
                     done = done or type(ev).__name__ == "DoneEvent"
         except Exception as exc:

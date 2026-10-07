@@ -29,6 +29,7 @@ from ..events import (
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
+    TurnSpec,
 )
 from ..models import ConverseRequest
 from ..observability.logging import get_logger
@@ -97,9 +98,8 @@ async def converse(
     run_turn = _get_runner(settings)
 
     def open_runner(cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
-        events = run_turn(
+        spec = TurnSpec(
             prompt=body.prompt,
-            cwd=cwd,
             system_prompt=_merge_system_prompt(
                 base_path=settings.claude_md_path,
                 system_prompt=body.system_prompt,
@@ -112,6 +112,7 @@ async def converse(
             turn_token=x_turn_token,
             ephemeral=body.mode == "stateless",
         )
+        events = run_turn(spec, cwd=cwd)
         if body.mode == "stateless" or settings.provider != "codex":
             return events  # only codex resumes are bound to recorded ids
         return _remembering_session_ids(events, body.session_key, settings.workspace_root)
@@ -319,26 +320,27 @@ def _merge_system_prompt(
 
 
 def _get_runner(settings: Settings) -> Runner:
+    """The provider's run_turn with the operator's policy (from Settings) bound."""
     if settings.provider == "codex":
-        return functools.partial(
-            codex_runner.run_turn,
+        codex_policy = codex_runner.CodexPolicy(
             sandbox=settings.codex_sandbox,
             env_passthrough=settings.codex_env_passthrough_names,
         )
-    return functools.partial(
-        claude_runner.run_turn,
-        # Anything the operator routed to codex is none of the claude agent's business.
-        withheld_env=settings.codex_env_passthrough_names,
-        tools=settings.claude_tools_list,
+        return functools.partial(codex_runner.run_turn, policy=codex_policy)
+    claude_policy = claude_runner.ClaudePolicy(
+        tools=settings.claude_tools_names,
         allowed_tools=settings.claude_allowed_tools_names,
         disallowed_tools=settings.claude_disallowed_tools_names,
         permission_mode=settings.claude_permission_mode,
         setting_sources=settings.claude_setting_sources_names,
         restricted=settings.claude_restricted,
+        # Anything the operator routed to codex is none of the claude agent's business.
+        withheld_env=settings.codex_env_passthrough_names,
         anthropic_api_key=(
             settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None
         ),
     )
+    return functools.partial(claude_runner.run_turn, policy=claude_policy)
 
 
 def _to_sse(ev: RunnerEvent) -> dict[str, str]:

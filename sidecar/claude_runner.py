@@ -1,9 +1,11 @@
 import collections
 import contextlib
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .config import PermissionMode
 from .errors import ApiError, ErrorCode, provider_message
 from .events import (
     DoneEvent,
@@ -12,6 +14,7 @@ from .events import (
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
+    TurnSpec,
 )
 from .mcp import (
     build_mcp_servers,
@@ -24,8 +27,8 @@ from .observability.logging import get_logger
 
 # The SDK launches the CLI with the sidecar's full environment and only lets options
 # add or override keys. Blank the secrets that are the sidecar's own business so the
-# agent's tools cannot read them from its environment. Callers can add more names
-# (e.g. CODEX_ENV_PASSTHROUGH values) via `withheld_env`.
+# agent's tools cannot read them from its environment. ClaudePolicy.withheld_env adds
+# more names (e.g. the CODEX_ENV_PASSTHROUGH values).
 _WITHHELD_FROM_CLI = ("BEARER_SECRET", "OPENAI_API_KEY")
 _STDERR_TAIL_LINES = 40
 _STDERR_LINE_CHARS = 2000  # the SDK hands over lines of up to ~1 MB
@@ -35,87 +38,94 @@ _STDERR_DETAIL_CHARS = 2000  # of the stderr tail quoted in error_detail
 log = get_logger("sidecar.claude")
 
 
-async def run_turn(
-    *,
-    prompt: str,
-    cwd: Path,
-    system_prompt: str | None,
-    resume_session_id: str | None,
-    mcp_config_path: Path | None,
-    mcp_server_url: str | None = None,
-    mcp_server_name: str = "domain-tools",
-    turn_token: str | None = None,
-    withheld_env: tuple[str, ...] = (),
-    tools: list[str] | None = None,
-    allowed_tools: tuple[str, ...] = (),
-    disallowed_tools: tuple[str, ...] = (),
-    permission_mode: str = "dontAsk",
-    setting_sources: tuple[str, ...] = (),
-    restricted: bool = False,
-    # Settings' key (which may come from .env, not the environment the CLI inherits).
-    anthropic_api_key: str | None = None,
-    # Interface parity with codex. claude's transcript is keyed by the (deleted) temp
-    # cwd, so a stateless turn cannot be resumed; the file itself stays under
-    # $CLAUDE_CONFIG_DIR/projects (default ~/.claude/projects; --no-session-persistence
-    # is --print-only, not SDK mode).
-    ephemeral: bool = False,
-) -> AsyncGenerator[RunnerEvent, None]:
-    """Drive one Claude turn via the Agent SDK and yield internal events.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ClaudePolicy:
+    """The agent policy for claude turns, built once from Settings (see _get_runner).
 
-    No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
-    task that iterates this generator exactly once, so the SDK can close the CLI.
-
-    Agent policy is explicit rather than inherited from the CLI's defaults:
-    - tools: built-in toolset (None = the CLI's default set, [] = none).
+    Explicit rather than inherited from the CLI's defaults:
+    - tools: built-in toolset (None = the CLI's default set, () = none).
     - permission_mode "dontAsk": anything that would prompt is denied (headless),
       unless pre-approved via allowed_tools. MCP servers the operator configured are
       pre-approved automatically.
     - setting_sources () + --strict-mcp-config: no ~/.claude or project settings,
       hooks, plugins or MCP servers leak in from wherever the sidecar runs.
     """
+
+    tools: tuple[str, ...] | None = None
+    allowed_tools: tuple[str, ...] = ()
+    disallowed_tools: tuple[str, ...] = ()  # deny beats allow
+    permission_mode: PermissionMode = "dontAsk"
+    setting_sources: tuple[str, ...] = ()
+    restricted: bool = False
+    # Blanked in the CLI's environment on top of _WITHHELD_FROM_CLI.
+    withheld_env: tuple[str, ...] = ()
+    # Settings' key (which may come from .env, not the environment the CLI inherits).
+    anthropic_api_key: str | None = None
+
+
+async def run_turn(
+    spec: TurnSpec, *, cwd: Path, policy: ClaudePolicy | None = None
+) -> AsyncGenerator[RunnerEvent, None]:
+    """Drive one Claude turn via the Agent SDK and yield internal events.
+
+    No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
+    task that iterates this generator exactly once, so the SDK can close the CLI.
+
+    `spec.ephemeral` is interface parity with codex: claude's transcript is keyed by
+    the (deleted) temp cwd, so a stateless turn cannot be resumed anyway; the file
+    itself stays under $CLAUDE_CONFIG_DIR/projects (default ~/.claude/projects;
+    --no-session-persistence is --print-only, not SDK mode).
+    """
+    policy = ClaudePolicy() if policy is None else policy
     options_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
         "env": {
-            **dict.fromkeys((*_WITHHELD_FROM_CLI, *withheld_env), ""),
-            **({"ANTHROPIC_API_KEY": anthropic_api_key} if anthropic_api_key else {}),
+            **dict.fromkeys((*_WITHHELD_FROM_CLI, *policy.withheld_env), ""),
+            **({"ANTHROPIC_API_KEY": policy.anthropic_api_key} if policy.anthropic_api_key else {}),
         },
-        "permission_mode": permission_mode,
-        "setting_sources": list(setting_sources),
-        "extra_args": {"strict-mcp-config": None, **({"restricted": None} if restricted else {})},
+        "permission_mode": policy.permission_mode,
+        "setting_sources": list(policy.setting_sources),
+        "extra_args": {
+            "strict-mcp-config": None,
+            **({"restricted": None} if policy.restricted else {}),
+        },
     }
-    if tools is not None:
-        options_kwargs["tools"] = list(tools)
-    if disallowed_tools:
-        options_kwargs["disallowed_tools"] = list(disallowed_tools)  # deny beats allow
-    if resume_session_id:
-        options_kwargs["resume"] = resume_session_id
+    if policy.tools is not None:
+        options_kwargs["tools"] = list(policy.tools)
+    if policy.disallowed_tools:
+        options_kwargs["disallowed_tools"] = list(policy.disallowed_tools)
+    if spec.resume_session_id:
+        options_kwargs["resume"] = spec.resume_session_id
     mcp_servers = build_mcp_servers(
-        static_config_path=mcp_config_path,
-        server_name=mcp_server_name,
-        server_url=mcp_server_url,
-        turn_token=turn_token,
+        static_config_path=spec.mcp_config_path,
+        server_name=spec.mcp_server_name,
+        server_url=spec.mcp_server_url,
+        turn_token=spec.turn_token,
     )
     # Headless runs have nobody to approve tool prompts, so MCP servers the operator
     # configured must be pre-allowed ("mcp__<server>" covers every tool it exposes).
     # For the per-turn server, authorization is enforced server-side via the turn token.
-    approved = [*allowed_tools, *map(mcp_tool_prefix, static_mcp_server_names(mcp_config_path))]
-    if mcp_server_url is not None and turn_token is not None:
-        approved.append(mcp_tool_prefix(mcp_server_name))
+    approved = [
+        *policy.allowed_tools,
+        *map(mcp_tool_prefix, static_mcp_server_names(spec.mcp_config_path)),
+    ]
+    if spec.mcp_server_url is not None and spec.turn_token is not None:
+        approved.append(mcp_tool_prefix(spec.mcp_server_name))
     if approved:
         options_kwargs["allowed_tools"] = list(dict.fromkeys(approved))
 
     with contextlib.ExitStack() as cleanup:
-        if system_prompt is not None:
+        if spec.system_prompt is not None:
             # A file, not `--system-prompt <text>` on argv (visible via `ps`, capped at
             # 128 KiB per argument on Linux).
-            path = cleanup.enter_context(private_file("system-prompt.md", system_prompt))
+            path = cleanup.enter_context(private_file("system-prompt.md", spec.system_prompt))
             options_kwargs["system_prompt"] = {"type": "file", "path": str(path)}
         if isinstance(mcp_servers, dict):
             # Carries the turn token: pass a private file, never inline JSON on argv.
             mcp_servers = str(cleanup.enter_context(private_mcp_config(mcp_servers)))
         if mcp_servers is not None:
             options_kwargs["mcp_servers"] = mcp_servers
-        async with contextlib.aclosing(_run(options_kwargs, prompt=prompt)) as events:
+        async with contextlib.aclosing(_run(options_kwargs, prompt=spec.prompt)) as events:
             async for ev in events:
                 yield ev
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from sidecar import codex_runner
-from sidecar.codex_runner import ensure_codex_auth, run_turn
+from sidecar.codex_runner import CodexPolicy, ensure_codex_auth, run_turn
 from sidecar.errors import ApiError, ErrorCode
 from sidecar.events import (
     DoneEvent,
@@ -14,6 +14,7 @@ from sidecar.events import (
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
+    TurnSpec,
 )
 
 BASE_CMD = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]
@@ -127,24 +128,9 @@ def _line(obj: dict) -> bytes:
 COMPLETED = _line({"type": "turn.completed", "usage": {}})
 
 
-async def _collect(
-    *,
-    prompt: str = "hi",
-    system_prompt: str | None = None,
-    resume_session_id: str | None = None,
-    **kwargs,
-) -> list:
-    return [
-        ev
-        async for ev in run_turn(
-            prompt=prompt,
-            cwd=Path("/tmp"),
-            system_prompt=system_prompt,
-            resume_session_id=resume_session_id,
-            mcp_config_path=None,
-            **kwargs,
-        )
-    ]
+async def _collect(spec: TurnSpec | None = None, *, policy: CodexPolicy | None = None) -> list:
+    spec = TurnSpec(prompt="hi") if spec is None else spec
+    return [ev async for ev in run_turn(spec, cwd=Path("/tmp"), policy=policy)]
 
 
 async def test_maps_full_event_sequence(monkeypatch):
@@ -215,7 +201,7 @@ async def test_prompt_goes_through_stdin_never_argv(monkeypatch):
     calls = _install(monkeypatch, proc)
     big = "x" * 200_000  # past the old 100 KB argv guard
 
-    await _collect(prompt=big)
+    await _collect(TurnSpec(prompt=big))
 
     assert big not in calls["cmd"]
     assert proc.stdin.data == big.encode()
@@ -228,7 +214,7 @@ async def test_system_prompt_is_the_new_sessions_developer_instructions(monkeypa
     proc = FakeProc([COMPLETED])
     calls = _install(monkeypatch, proc)
 
-    await _collect(system_prompt='Be "brief".\nNo tables.')
+    await _collect(TurnSpec(prompt="hi", system_prompt='Be "brief".\nNo tables.'))
 
     cmd = calls["cmd"]
     override = cmd[cmd.index("-c") + 1]
@@ -243,7 +229,7 @@ async def test_resume_passes_the_system_prompt_again(monkeypatch):
     proc = FakeProc([COMPLETED])
     calls = _install(monkeypatch, proc)
 
-    await _collect(system_prompt="SYS", resume_session_id="sess-1")
+    await _collect(TurnSpec(prompt="hi", system_prompt="SYS", resume_session_id="sess-1"))
 
     cmd = calls["cmd"]
     assert cmd[cmd.index("-c") + 1] == 'developer_instructions="SYS"'
@@ -256,7 +242,7 @@ async def test_a_too_long_system_prompt_is_not_repeated_on_resume(monkeypatch):
     proc = FakeProc([COMPLETED])
     calls = _install(monkeypatch, proc)
 
-    await _collect(system_prompt="S" * 100, resume_session_id="sess-1")
+    await _collect(TurnSpec(prompt="hi", system_prompt="S" * 100, resume_session_id="sess-1"))
 
     assert "-c" not in calls["cmd"]
     assert proc.stdin.data == b"hi"  # the first turn's copy is in the thread already
@@ -267,7 +253,7 @@ async def test_a_system_prompt_too_long_for_argv_goes_with_the_prompt(monkeypatc
     proc = FakeProc([COMPLETED])
     calls = _install(monkeypatch, proc)
 
-    await _collect(system_prompt="S" * 100)
+    await _collect(TurnSpec(prompt="hi", system_prompt="S" * 100))
 
     assert "-c" not in calls["cmd"]
     assert proc.stdin.data == b"S" * 100 + b"\n\nhi"
@@ -276,7 +262,7 @@ async def test_a_system_prompt_too_long_for_argv_goes_with_the_prompt(monkeypatc
 async def test_resume_session_id_extends_argv(monkeypatch):
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
-    await _collect(resume_session_id="sess-9")
+    await _collect(TurnSpec(prompt="hi", resume_session_id="sess-9"))
 
     assert calls["cmd"] == [*BASE_CMD, "resume", "--", "sess-9", "-"]
 
@@ -285,7 +271,7 @@ async def test_flag_like_prompts_and_ids_are_not_parsed_as_flags(monkeypatch):
     proc = FakeProc([COMPLETED])
     calls = _install(monkeypatch, proc)
 
-    await _collect(prompt="--last", resume_session_id="-csandbox_mode=danger-full-access")
+    await _collect(TurnSpec(prompt="--last", resume_session_id="-csandbox_mode=danger-full-access"))
 
     assert calls["cmd"][-4:] == ["resume", "--", "-csandbox_mode=danger-full-access", "-"]
     assert proc.stdin.data == b"--last"
@@ -294,7 +280,7 @@ async def test_flag_like_prompts_and_ids_are_not_parsed_as_flags(monkeypatch):
 async def test_ephemeral_for_stateless_turns(monkeypatch):
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
-    await _collect(ephemeral=True)
+    await _collect(TurnSpec(prompt="hi", ephemeral=True))
 
     assert "--ephemeral" in calls["cmd"]
     assert calls["cmd"].index("--ephemeral") < calls["cmd"].index("--")
@@ -472,9 +458,12 @@ async def test_mcp_override_adds_config_flags_and_token_env(monkeypatch):
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
     events = await _collect(
-        mcp_server_url="https://app.example/mcp",
-        mcp_server_name="domain-tools",
-        turn_token="tok-xyz",
+        TurnSpec(
+            prompt="hi",
+            mcp_server_url="https://app.example/mcp",
+            mcp_server_name="domain-tools",
+            turn_token="tok-xyz",
+        )
     )
 
     assert events[-1].__class__ is DoneEvent
@@ -490,7 +479,9 @@ async def test_mcp_url_is_quoted_as_a_toml_string(monkeypatch):
     url = 'https://app.example/mcp?q="x"\\y'
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
-    await _collect(mcp_server_url=url, mcp_server_name="domain-tools", turn_token="t")
+    await _collect(
+        TurnSpec(prompt="hi", mcp_server_url=url, mcp_server_name="domain-tools", turn_token="t")
+    )
 
     [override] = [a for a in calls["cmd"] if a.startswith("mcp_servers.domain-tools.url=")]
     assert tomllib.loads(override)["mcp_servers"]["domain-tools"]["url"] == url
@@ -509,7 +500,10 @@ async def test_without_mcp_override_no_config_flags_and_no_token_env(monkeypatch
 async def test_sandbox_is_always_explicit(monkeypatch):
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
-    await _collect(resume_session_id="sess-1", sandbox="workspace-write")
+    await _collect(
+        TurnSpec(prompt="hi", resume_session_id="sess-1"),
+        policy=CodexPolicy(sandbox="workspace-write"),
+    )
 
     cmd = calls["cmd"]
     # exec-level option: must come before the `resume` subcommand
@@ -533,7 +527,7 @@ async def test_child_env_withholds_sidecar_secrets(monkeypatch):
         monkeypatch.setenv(name, value)
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
-    await _collect(env_passthrough=("CUSTOM_PROVIDER_KEY",))
+    await _collect(policy=CodexPolicy(env_passthrough=("CUSTOM_PROVIDER_KEY",)))
 
     env = calls["kwargs"]["env"]
     for withheld in ("BEARER_SECRET", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "UNRELATED"):
@@ -576,13 +570,7 @@ async def test_closing_the_runner_early_terminates_the_process(monkeypatch):
     proc = FakeProc([_line({"type": "thread.started", "thread_id": "t-1"})], hang=True)
     _install(monkeypatch, proc)
 
-    agen = run_turn(
-        prompt="hi",
-        cwd=Path("/tmp"),
-        system_prompt=None,
-        resume_session_id=None,
-        mcp_config_path=None,
-    )
+    agen = run_turn(TurnSpec(prompt="hi"), cwd=Path("/tmp"))
     assert await anext(agen) == SessionEvent(session_id="t-1")
     await agen.aclose()
 

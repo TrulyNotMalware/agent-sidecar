@@ -3,10 +3,12 @@ import contextlib
 import json
 import os
 import signal
-from collections.abc import AsyncGenerator, AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .config import CodexSandbox
 from .errors import ApiError, ErrorCode, provider_message
 from .events import (
     DoneEvent,
@@ -15,6 +17,7 @@ from .events import (
     TextEvent,
     ToolResultEvent,
     ToolUseEvent,
+    TurnSpec,
 )
 from .mcp import mcp_tool_name
 from .observability.logging import get_logger
@@ -131,7 +134,7 @@ _ENV_ALLOWLIST = frozenset(
 _ENV_ALLOWLIST_PREFIXES = ("LC_",)
 
 
-def _child_env(passthrough: Iterable[str], extra: dict[str, str]) -> dict[str, str]:
+def _child_env(passthrough: tuple[str, ...], extra: dict[str, str]) -> dict[str, str]:
     allowed = _ENV_ALLOWLIST | set(passthrough)
     env = {
         k: v for k, v in os.environ.items() if k in allowed or k.startswith(_ENV_ALLOWLIST_PREFIXES)
@@ -140,30 +143,32 @@ def _child_env(passthrough: Iterable[str], extra: dict[str, str]) -> dict[str, s
     return env
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CodexPolicy:
+    """The operator's policy for codex turns, built once from Settings (see _get_runner)."""
+
+    # Always passed as `codex exec --sandbox`, so a config.toml cannot change the mode.
+    sandbox: CodexSandbox = "read-only"
+    # Env var names codex may inherit on top of _ENV_ALLOWLIST (a custom provider's key).
+    env_passthrough: tuple[str, ...] = ()
+
+
 async def run_turn(
-    *,
-    prompt: str,
-    cwd: Path,
-    system_prompt: str | None,
-    resume_session_id: str | None,
-    mcp_config_path: Path | None,  # interface parity only; static MCP servers are claude-only
-    mcp_server_url: str | None = None,
-    mcp_server_name: str = "domain-tools",
-    turn_token: str | None = None,
-    sandbox: str = "read-only",
-    env_passthrough: Iterable[str] = (),
-    ephemeral: bool = False,
+    spec: TurnSpec, *, cwd: Path, policy: CodexPolicy | None = None
 ) -> AsyncGenerator[RunnerEvent, None]:
     """Drive one `codex exec` turn and yield internal events.
 
     No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
     task iterating this generator once; the process group is then terminated.
+    `spec.mcp_config_path` is unused: static MCP servers are claude-only, codex reads
+    its own config.toml.
     """
+    policy = CodexPolicy() if policy is None else policy
     # Session workspaces are plain scratch dirs; without the flag `codex exec`
     # refuses to run outside a trusted git repository. --sandbox is always explicit
     # so a config.toml cannot change the sandbox mode.
-    cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", sandbox]
-    if ephemeral:
+    cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", policy.sandbox]
+    if spec.ephemeral:
         cmd.append("--ephemeral")  # stateless: no rollout that could be resumed later
 
     # Per-turn MCP scoping: inject a streamable-HTTP server via dotted `-c` TOML
@@ -175,13 +180,13 @@ async def run_turn(
     # token. Acceptable: the token is short-TTL and the model already holds the same
     # tool-call authority the token grants.
     turn_env_extra: dict[str, str] = {}
-    if mcp_server_url is not None and turn_token is not None:
-        turn_env_extra[_MCP_TOKEN_ENV_VAR] = turn_token
+    if spec.mcp_server_url is not None and spec.turn_token is not None:
+        turn_env_extra[_MCP_TOKEN_ENV_VAR] = spec.turn_token
         # The name is validated as a bare TOML key ([A-Za-z0-9_-]+); values are quoted.
-        server = f"mcp_servers.{mcp_server_name}"
+        server = f"mcp_servers.{spec.mcp_server_name}"
         cmd += [
             "-c",
-            f"{server}.url={_toml_string(mcp_server_url)}",
+            f"{server}.url={_toml_string(spec.mcp_server_url)}",
             "-c",
             f"{server}.bearer_token_env_var={_toml_string(_MCP_TOKEN_ENV_VAR)}",
             "-c",
@@ -195,26 +200,26 @@ async def run_turn(
     # from the value passed in — without it the system prompt would be gone from then
     # on (checked with codex 0.153 and 0.159). A changed CLAUDE.md or systemPrompt
     # therefore reaches new sessions, and resumed ones once codex compacts.
-    stdin_prompt = prompt
-    if system_prompt:
-        instructions = f"developer_instructions={_toml_string(system_prompt)}"
+    stdin_prompt = spec.prompt
+    if spec.system_prompt:
+        instructions = f"developer_instructions={_toml_string(spec.system_prompt)}"
         if len(instructions.encode()) <= _MAX_ARG_BYTES:
             cmd += ["-c", instructions]
-        elif not resume_session_id:
+        elif not spec.resume_session_id:
             # Too long for one argv string (Linux: 128 KiB): send it with the first
             # prompt. (It then survives compaction only as far as codex keeps that
             # user message.)
             log.warning("codex.system_prompt_in_prompt", bytes=len(instructions.encode()))
-            stdin_prompt = f"{system_prompt}\n\n{prompt}"
+            stdin_prompt = f"{spec.system_prompt}\n\n{spec.prompt}"
 
     # The prompt goes through stdin ("-"): no ARG_MAX limit and never visible in `ps`.
     # "--" ends option parsing, so a resume id can never be read as a flag either.
-    if resume_session_id:
-        cmd += ["resume", "--", resume_session_id, "-"]
+    if spec.resume_session_id:
+        cmd += ["resume", "--", spec.resume_session_id, "-"]
     else:
         cmd += ["--", "-"]
 
-    turn_env = _child_env(env_passthrough, turn_env_extra)
+    turn_env = _child_env(policy.env_passthrough, turn_env_extra)
 
     async def _stream() -> AsyncGenerator[RunnerEvent, None]:
         try:

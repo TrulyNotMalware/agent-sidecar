@@ -3,7 +3,9 @@ from pathlib import Path
 import pytest
 
 from sidecar import claude_runner
+from sidecar.claude_runner import ClaudePolicy
 from sidecar.errors import ApiError, ErrorCode
+from sidecar.events import TurnSpec
 
 
 def _install_fake_query(monkeypatch) -> dict:
@@ -29,25 +31,21 @@ def _install_fake_query(monkeypatch) -> dict:
     return seen
 
 
-async def _run(**overrides) -> list:
-    kwargs = {
-        "prompt": "hi",
-        "cwd": Path("/tmp"),
-        "system_prompt": None,
-        "resume_session_id": None,
-        "mcp_config_path": None,
-    }
-    kwargs.update(overrides)
-    return [ev async for ev in claude_runner.run_turn(**kwargs)]
+async def _run(spec: TurnSpec | None = None, *, policy: ClaudePolicy | None = None) -> list:
+    spec = TurnSpec(prompt="hi") if spec is None else spec
+    return [ev async for ev in claude_runner.run_turn(spec, cwd=Path("/tmp"), policy=policy)]
 
 
 async def test_turn_token_goes_to_a_private_file_not_inline_json(monkeypatch):
     seen = _install_fake_query(monkeypatch)
 
     await _run(
-        mcp_server_url="https://app.example/mcp",
-        mcp_server_name="tools",
-        turn_token="tok-secret",
+        TurnSpec(
+            prompt="hi",
+            mcp_server_url="https://app.example/mcp",
+            mcp_server_name="tools",
+            turn_token="tok-secret",
+        )
     )
 
     mcp = seen["options"].mcp_servers
@@ -65,7 +63,7 @@ async def test_static_config_path_is_passed_through_unchanged(monkeypatch, tmp_p
     static.write_text('{"mcpServers": {}}')
     seen = _install_fake_query(monkeypatch)
 
-    await _run(mcp_config_path=static)
+    await _run(TurnSpec(prompt="hi", mcp_config_path=static))
 
     assert seen["options"].mcp_servers == str(static)
     assert static.exists()
@@ -83,7 +81,7 @@ async def test_sidecar_secrets_are_blanked_in_the_cli_env(monkeypatch):
 async def test_extra_withheld_names_are_blanked_too(monkeypatch):
     seen = _install_fake_query(monkeypatch)
 
-    await _run(withheld_env=("AZURE_OPENAI_KEY",))
+    await _run(policy=ClaudePolicy(withheld_env=("AZURE_OPENAI_KEY",)))
 
     assert seen["options"].env["AZURE_OPENAI_KEY"] == ""
     assert seen["options"].env["BEARER_SECRET"] == ""
@@ -107,11 +105,14 @@ async def test_configured_mcp_servers_are_pre_approved(monkeypatch, tmp_path):
     seen = _install_fake_query(monkeypatch)
 
     await _run(
-        mcp_config_path=static,
-        mcp_server_url="https://app.example/mcp",
-        mcp_server_name="tools",
-        turn_token="tok",
-        allowed_tools=("WebFetch",),
+        TurnSpec(
+            prompt="hi",
+            mcp_config_path=static,
+            mcp_server_url="https://app.example/mcp",
+            mcp_server_name="tools",
+            turn_token="tok",
+        ),
+        policy=ClaudePolicy(allowed_tools=("WebFetch",)),
     )
 
     assert seen["options"].allowed_tools == [
@@ -125,10 +126,14 @@ async def test_configured_mcp_servers_are_pre_approved(monkeypatch, tmp_path):
 async def test_tools_can_be_restricted_or_disabled(monkeypatch):
     seen = _install_fake_query(monkeypatch)
 
-    await _run(tools=[])
+    await _run(policy=ClaudePolicy(tools=()))
     assert seen["options"].tools == []
 
-    await _run(tools=["Read", "Grep"], permission_mode="default", setting_sources=("project",))
+    await _run(
+        policy=ClaudePolicy(
+            tools=("Read", "Grep"), permission_mode="default", setting_sources=("project",)
+        )
+    )
     assert seen["options"].tools == ["Read", "Grep"]
     assert seen["options"].permission_mode == "default"
     assert seen["options"].setting_sources == ["project"]
@@ -137,7 +142,7 @@ async def test_tools_can_be_restricted_or_disabled(monkeypatch):
 async def test_disallowed_tools_are_passed_through(monkeypatch):
     seen = _install_fake_query(monkeypatch)
 
-    await _run(disallowed_tools=("mcp__domain-tools__delete_all", "WebFetch"))
+    await _run(policy=ClaudePolicy(disallowed_tools=("mcp__domain-tools__delete_all", "WebFetch")))
 
     assert seen["options"].disallowed_tools == ["mcp__domain-tools__delete_all", "WebFetch"]
 
@@ -148,7 +153,7 @@ async def test_restricted_mode_is_opt_in(monkeypatch):
     await _run()
     assert "restricted" not in seen["options"].extra_args
 
-    await _run(restricted=True)
+    await _run(policy=ClaudePolicy(restricted=True))
     assert "restricted" in seen["options"].extra_args
 
 
@@ -231,7 +236,7 @@ async def test_cli_failure_keeps_stderr_and_output_off_the_wire(monkeypatch):
 async def test_system_prompt_goes_to_a_private_file_not_argv(monkeypatch):
     seen = _install_fake_query(monkeypatch)
 
-    await _run(system_prompt="Answer tersely.")
+    await _run(TurnSpec(prompt="hi", system_prompt="Answer tersely."))
 
     system = seen["options"].system_prompt
     assert system["type"] == "file"  # --system-prompt-file, not --system-prompt <text>
@@ -244,7 +249,7 @@ async def test_settings_api_key_reaches_the_cli(monkeypatch):
     # Settings may read it from .env, which the CLI's inherited environment lacks.
     seen = _install_fake_query(monkeypatch)
 
-    await _run(anthropic_api_key="sk-ant-from-dotenv")
+    await _run(policy=ClaudePolicy(anthropic_api_key="sk-ant-from-dotenv"))
 
     assert seen["options"].env["ANTHROPIC_API_KEY"] == "sk-ant-from-dotenv"
 
@@ -264,13 +269,7 @@ async def test_api_error_prose_is_not_streamed_as_text(monkeypatch):
 
     events = []
     with pytest.raises(ApiError) as exc_info:
-        async for ev in claude_runner.run_turn(
-            prompt="hi",
-            cwd=Path("/tmp"),
-            system_prompt=None,
-            resume_session_id=None,
-            mcp_config_path=None,
-        ):
+        async for ev in claude_runner.run_turn(TurnSpec(prompt="hi"), cwd=Path("/tmp")):
             events.append(ev)
 
     assert events == []

@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 
@@ -13,8 +15,8 @@ def _install_recording_runner(monkeypatch):
     recorded: dict = {}
 
     def fake_get_runner(settings):
-        async def fake_run_turn(**kwargs):
-            recorded.update(kwargs)
+        async def fake_run_turn(spec, *, cwd):
+            recorded.update(dataclasses.asdict(spec), cwd=cwd)
             yield DoneEvent(
                 final_text="ok",
                 input_tokens=0,
@@ -240,7 +242,7 @@ def test_claude_runner_withholds_codex_passthrough_names():
         Settings(_env_file=None, bearer_secret="x", codex_env_passthrough="AZURE_OPENAI_KEY")
     )
 
-    assert runner.keywords["withheld_env"] == ("AZURE_OPENAI_KEY",)
+    assert runner.keywords["policy"].withheld_env == ("AZURE_OPENAI_KEY",)
 
 
 def test_terminal_error_mapping():
@@ -295,9 +297,10 @@ def test_codex_runner_gets_sandbox_and_passthrough_bound():
         )
     )
 
+    from sidecar.codex_runner import CodexPolicy
+
     assert runner.keywords == {
-        "sandbox": "workspace-write",
-        "env_passthrough": ("AZURE_OPENAI_KEY",),
+        "policy": CodexPolicy(sandbox="workspace-write", env_passthrough=("AZURE_OPENAI_KEY",))
     }
 
 
@@ -316,10 +319,11 @@ def test_claude_runner_gets_the_agent_policy_bound():
         )
     )
 
-    assert runner.keywords["tools"] == []
-    assert runner.keywords["allowed_tools"] == ("WebFetch", "Bash(git status:*)")
-    assert runner.keywords["permission_mode"] == "default"
-    assert runner.keywords["setting_sources"] == ("project",)
+    policy = runner.keywords["policy"]
+    assert policy.tools == ()
+    assert policy.allowed_tools == ("WebFetch", "Bash(git status:*)")
+    assert policy.permission_mode == "default"
+    assert policy.setting_sources == ("project",)
 
 
 def test_claude_policy_defaults():
@@ -328,9 +332,10 @@ def test_claude_policy_defaults():
 
     runner = _get_runner(Settings(_env_file=None, bearer_secret="x"))
 
-    assert runner.keywords["tools"] is None  # CLI default toolset unless CLAUDE_TOOLS is set
-    assert runner.keywords["permission_mode"] == "dontAsk"
-    assert runner.keywords["setting_sources"] == ()
+    policy = runner.keywords["policy"]
+    assert policy.tools is None  # CLI default toolset unless CLAUDE_TOOLS is set
+    assert policy.permission_mode == "dontAsk"
+    assert policy.setting_sources == ()
 
 
 def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path):

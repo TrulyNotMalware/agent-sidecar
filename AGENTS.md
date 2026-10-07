@@ -459,14 +459,15 @@ await admission.drain(grace_sec)  # stop all turns, wait for cleanup; returns fo
 
 ### `sidecar/claude_runner.py` / `codex_runner.py` — `run_turn()`
 ```python
-async for event in run_turn(
-    prompt=..., cwd=..., system_prompt=...,
-    resume_session_id=..., mcp_config_path=...,
-):
+spec = TurnSpec(prompt=..., system_prompt=..., resume_session_id=..., mcp_config_path=...,
+                mcp_server_url=..., mcp_server_name=..., turn_token=..., ephemeral=...)
+async for event in run_turn(spec, cwd=workspace, policy=ClaudePolicy(...)):  # or CodexPolicy
     # event: SessionEvent | TextEvent | ToolUseEvent | ToolResultEvent | DoneEvent
 ```
-The events and the `Runner` protocol (the common keyword arguments) live in
-`sidecar/events.py`.
+`TurnSpec` (what the request asked for), the events and the `Runner` protocol
+(`run_turn(spec, *, cwd)` with the provider's policy already bound) live in
+`sidecar/events.py`. `ClaudePolicy` / `CodexPolicy` (the operator's agent policy, built
+from `Settings` in `_get_runner()`) live next to their runner.
 Runners have no timeout of their own; the caller bounds the turn by cancelling the
 task that iterates the generator **once**, and each runner closes its CLI on the way
 out (`contextlib.aclosing` at every level).
@@ -492,13 +493,13 @@ with stateless_workspace(parent=settings.workspace_root / ".stateless") as ws:
 
 ## Adding a New Provider
 
-1. Create `sidecar/<name>_runner.py` implementing async `run_turn()` that satisfies the
-   `Runner` protocol in `sidecar/events.py` (the common keyword arguments) and yields its
+1. Create `sidecar/<name>_runner.py` implementing async `run_turn(spec: TurnSpec, *, cwd,
+   policy)` that satisfies the `Runner` protocol in `sidecar/events.py` and yields its
    `RunnerEvent` types.
    Do not add a timeout: the turn cancels the task iterating the generator once, and the
    runner must close its CLI on the way out (`contextlib.aclosing` around every inner
-   generator). Provider-specific options are bound in `_get_runner()` with
-   `functools.partial`.
+   generator). Provider-specific options are a frozen `<Name>Policy` dataclass next to the
+   runner, built from `Settings` and bound in `_get_runner()` with `functools.partial`.
 2. Add the provider name to `PROVIDER` docs in `config.py`.
 3. Extend `_readyz_checks()` in `sidecar/routes/health.py`.
 4. Wire the runner in `sidecar/routes/converse.py` (`_get_runner()`).
