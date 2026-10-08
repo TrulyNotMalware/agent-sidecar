@@ -25,6 +25,7 @@ pytestmark = pytest.mark.integration
 
 TURN_TOKEN = "turn-token-for-the-mcp-server"
 SYSTEM_MARK = "SYSTEM-PROMPT-MARKER"
+WORKSPACE_ID = "wrkspc_fake_integration"
 
 
 class FakeServers(TypedDict):
@@ -118,8 +119,13 @@ def _requests(record: Path) -> list[dict[str, Any]]:
 
 
 def _claude(
-    start_sidecar: StartSidecar, fakes: StartFakes, **env: str
+    start_sidecar: StartSidecar,
+    fakes: StartFakes,
+    *,
+    sidecar_env: dict[str, str] | None = None,
+    **env: str,
 ) -> tuple[SidecarServer, FakeServers]:
+    """`env` goes to the fake model API, `sidecar_env` to the sidecar."""
     f = fakes("anthropic", **env)
     srv = start_sidecar(
         real_cli=True,
@@ -127,6 +133,7 @@ def _claude(
         ANTHROPIC_API_KEY="sk-ant-fake-integration-key",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
         MCP_SERVER_URL=f["mcp"],
+        **(sidecar_env or {}),
     )
     return srv, f
 
@@ -157,6 +164,9 @@ def test_claude_turn_reaches_the_per_turn_mcp_server(
     assert f"Bearer {TURN_TOKEN}" in f["auth_log"].read_text()
     [first, *_] = _requests(f["record"])
     assert SYSTEM_MARK in json.dumps(first["system"])
+    # ANTHROPIC_WORKSPACE_ID unset: no workspace header on any request.
+    sent = (f["record"] / "workspace-ids.log").read_text(encoding="utf-8").splitlines()
+    assert set(sent) == {""}
 
 
 def test_claude_api_error_is_the_terminal_frame_scrubbed(
@@ -171,6 +181,24 @@ def test_claude_api_error_is_the_terminal_frame_scrubbed(
     assert error["code"] == "sdk_error"
     assert "model not available" in error["message"]
     assert "leakedkey" not in error["message"]
+
+
+def test_claude_sends_the_workspace_id_header(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
+    # An organization-scoped API key must name the workspace on every request; the
+    # CLI only sends it through ANTHROPIC_CUSTOM_HEADERS.
+    srv, f = _claude(start_sidecar, fakes, sidecar_env={"ANTHROPIC_WORKSPACE_ID": WORKSPACE_ID})
+
+    r = converse(srv.port, "real-claude-workspace", read_timeout=60)
+
+    assert r.event_names[-1] == "done"
+    main_loop = _requests(f["record"])
+    precondition(len(main_loop) > 0, "the CLI reached the fake model API")
+    # One line per /v1/messages request (main loop and side requests alike).
+    sent = (f["record"] / "workspace-ids.log").read_text(encoding="utf-8").splitlines()
+    assert len(sent) >= len(main_loop)
+    assert set(sent) == {WORKSPACE_ID}
 
 
 requires_codex = pytest.mark.skipif(shutil.which("codex") is None, reason="codex not on PATH")

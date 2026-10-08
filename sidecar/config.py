@@ -26,6 +26,9 @@ class Settings(BaseSettings):
 
     anthropic_mode: Literal["subscription", "api"] = "subscription"
     anthropic_api_key: SecretStr | None = None
+    # Needed with an organization-scoped API key (one not scoped to a workspace): sent
+    # as the anthropic-workspace-id header. The pattern keeps it to one header value.
+    anthropic_workspace_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]+$")
 
     workspace_root: Path = Path("/var/lib/claude-sidecar/sessions")
     claude_md_path: Path | None = None
@@ -77,6 +80,12 @@ class Settings(BaseSettings):
         # A k8s Secret made with `echo` / --from-file often ends in "\n"; the incoming
         # token is stripped, so an unstripped secret would 401 every request.
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("anthropic_workspace_id", mode="before")
+    @classmethod
+    def _blank_workspace_id_is_unset(cls, v: object) -> object:
+        # `ANTHROPIC_WORKSPACE_ID=` (a copied .env.example) means "not set", not "".
+        return (v.strip() or None) if isinstance(v, str) else v
 
     @field_validator("claude_setting_sources")
     @classmethod

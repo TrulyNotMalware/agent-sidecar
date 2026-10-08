@@ -269,6 +269,15 @@ def test_claude_runner_withholds_codex_passthrough_names() -> None:
     assert runner.keywords["policy"].withheld_env == ("AZURE_OPENAI_KEY",)
 
 
+def test_claude_runner_gets_the_workspace_id() -> None:
+    from sidecar.routes.converse import _get_runner
+
+    runner = _get_runner(_settings(bearer_secret="x", anthropic_workspace_id="wrkspc_01Ab"))
+
+    assert isinstance(runner, functools.partial)
+    assert runner.keywords["policy"].anthropic_workspace_id == "wrkspc_01Ab"
+
+
 def test_terminal_error_mapping() -> None:
     from sidecar.errors import ApiError, ErrorCode
     from sidecar.routes.converse import _terminal_error

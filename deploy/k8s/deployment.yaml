@@ -74,6 +74,11 @@ spec:
                 secretKeyRef:
                   name: anthropic-claude-auth
                   key: ANTHROPIC_API_KEY
+            # Only for an organization-scoped API key (not scoped to a workspace),
+            # which otherwise fails every turn with 400 "...must include the
+            # anthropic-workspace-id header". Not a secret.
+            # - name: ANTHROPIC_WORKSPACE_ID
+            #   value: "wrkspc_..."
             # ── Codex auth Option A: API key (uncomment when PROVIDER=codex) ─
             # - name: OPENAI_API_KEY
             #   valueFrom:

@@ -1,6 +1,8 @@
 import asyncio
 import collections
 import contextlib
+import os
+import re
 from collections.abc import AsyncGenerator, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +33,7 @@ from .observability.logging import get_logger
 # agent's tools cannot read them from its environment. ClaudePolicy.withheld_env adds
 # more names (e.g. the CODEX_ENV_PASSTHROUGH values).
 _WITHHELD_FROM_CLI = ("BEARER_SECRET", "OPENAI_API_KEY")
+_WORKSPACE_HEADER = "anthropic-workspace-id"
 _STDERR_TAIL_LINES = 40
 _STDERR_LINE_CHARS = 2000  # the SDK hands over lines of up to ~1 MB
 _STDERR_LOG_LINES = 200  # per turn; the tail still reaches error_detail
@@ -62,6 +65,8 @@ class ClaudePolicy:
     withheld_env: tuple[str, ...] = ()
     # Settings' key (which may come from .env, not the environment the CLI inherits).
     anthropic_api_key: str | None = field(default=None, repr=False)
+    # Sent as the anthropic-workspace-id header (organization-scoped API keys need it).
+    anthropic_workspace_id: str | None = None
 
 
 async def run_turn(
@@ -91,6 +96,15 @@ async def run_turn(
             **({"restricted": None} if policy.restricted else {}),
         },
     }
+    if policy.anthropic_workspace_id is not None:
+        env = options_kwargs["env"]
+        # A withheld (blanked) value stays withheld: only the workspace line goes out.
+        inherited = env.get(
+            "ANTHROPIC_CUSTOM_HEADERS", os.environ.get("ANTHROPIC_CUSTOM_HEADERS", "")
+        )
+        env["ANTHROPIC_CUSTOM_HEADERS"] = _with_workspace_header(
+            inherited, policy.anthropic_workspace_id
+        )
     if policy.tools is not None:
         options_kwargs["tools"] = list(policy.tools)
     if policy.disallowed_tools:
@@ -129,6 +143,23 @@ async def run_turn(
         async with contextlib.aclosing(_run(options_kwargs, prompt=spec.prompt)) as events:
             async for ev in events:
                 yield ev
+
+
+def _with_workspace_header(inherited: str, workspace_id: str) -> str:
+    """ANTHROPIC_CUSTOM_HEADERS (`Name: value` lines) carrying the workspace header.
+
+    With an API key the CLI never sends this header itself (its own
+    ANTHROPIC_WORKSPACE_ID only feeds workload-identity auth), but it sends these lines
+    on every request. Setting the variable replaces the inherited one, so the
+    operator's other headers are carried over; a workspace line among them is dropped
+    (header names are case-insensitive, the CLI would send both).
+    """
+    kept = [
+        line
+        for line in re.split(r"\r?\n", inherited)  # the CLI's own split
+        if line.strip() and line.partition(":")[0].strip().lower() != _WORKSPACE_HEADER
+    ]
+    return "\n".join([*kept, f"{_WORKSPACE_HEADER}: {workspace_id}"])
 
 
 @dataclass(slots=True)

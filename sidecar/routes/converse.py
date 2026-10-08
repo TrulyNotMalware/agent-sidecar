@@ -360,6 +360,7 @@ def _get_runner(settings: Settings) -> Runner:
         anthropic_api_key=(
             settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None
         ),
+        anthropic_workspace_id=settings.anthropic_workspace_id,
     )
     return functools.partial(claude_runner.run_turn, policy=claude_policy)
 

@@ -140,6 +140,7 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `CLAUDE_CODE_OAUTH_TOKEN` | — | Claude subscription auth — **local testing only** |
 | `ANTHROPIC_API_KEY` | — | Claude API auth — **production / general use** |
 | `ANTHROPIC_MODE` | `subscription` | Set `api` so `/readyz` requires `ANTHROPIC_API_KEY` specifically |
+| `ANTHROPIC_WORKSPACE_ID` | — | Workspace for an organization-scoped API key (`[A-Za-z0-9_-]+`); sent as `anthropic-workspace-id` |
 | `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth-file location (local dev) |
 | `OPENAI_API_KEY` | — | Codex provider auth (`PROVIDER=codex`) |
 | `CLAUDE_TOOLS` | unset | Built-in toolset: unset = CLI default, `""` = none, else comma list (`Read,Grep`) |
@@ -194,6 +195,16 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 - Auth: `ANTHROPIC_API_KEY` for production / general use (also when it comes from
   `.env`: the settings value is handed to the CLI). `CLAUDE_CODE_OAUTH_TOKEN`
   (subscription) and `~/.claude.json` are for local testing only.
+- An organization-scoped API key (not scoped to a workspace) gets `400 … must include
+  the anthropic-workspace-id header` on every turn unless `ANTHROPIC_WORKSPACE_ID` is
+  set. With an API key the CLI never sends that header itself (its own
+  `ANTHROPIC_WORKSPACE_ID` only feeds workload-identity auth), so the runner sets
+  `ANTHROPIC_CUSTOM_HEADERS` for the CLI: the inherited value's lines (split like the
+  CLI: `\n` / `\r\n`), minus any `anthropic-workspace-id` line, plus
+  `anthropic-workspace-id: <id>`; a withheld value stays withheld. Unset, the variable
+  is left alone. An ID the key cannot access comes back as the API's `404 Workspace …
+  not found`, which the CLI words as "There's an issue with the selected model …" —
+  that is the error frame's message.
 - The merged system prompt goes to the CLI as a `0600` file (`--system-prompt-file`),
   not on argv (visible via `ps`, 128 KiB per argument on Linux).
 - An API failure the CLI reports as a synthetic assistant message is not streamed as
