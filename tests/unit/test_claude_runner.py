@@ -285,6 +285,73 @@ async def test_settings_api_key_reaches_the_cli(monkeypatch: pytest.MonkeyPatch)
     assert seen["options"].env["ANTHROPIC_API_KEY"] == "sk-ant-from-dotenv"
 
 
+async def test_workspace_id_goes_out_as_a_custom_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With an API key the CLI never sends this header itself (an organization-scoped
+    # key needs it); it does send ANTHROPIC_CUSTOM_HEADERS lines.
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    seen = _install_fake_query(monkeypatch)
+
+    await _run(policy=ClaudePolicy(anthropic_workspace_id="wrkspc_01Ab"))
+
+    assert seen["options"].env["ANTHROPIC_CUSTOM_HEADERS"] == "anthropic-workspace-id: wrkspc_01Ab"
+
+
+async def test_workspace_header_is_merged_into_inherited_custom_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Setting the variable replaces the inherited one: the operator's headers must
+    # survive, and a workspace line of theirs must not make a second one.
+    monkeypatch.setenv(
+        "ANTHROPIC_CUSTOM_HEADERS", "X-Gateway-Route: eu\r\nAnthropic-Workspace-Id: wrkspc_stale\n"
+    )
+    seen = _install_fake_query(monkeypatch)
+
+    await _run(policy=ClaudePolicy(anthropic_workspace_id="wrkspc_01Ab"))
+
+    lines = seen["options"].env["ANTHROPIC_CUSTOM_HEADERS"].split("\n")
+    assert lines == ["X-Gateway-Route: eu", "anthropic-workspace-id: wrkspc_01Ab"]
+
+
+async def test_workspace_header_merge_splits_lines_like_the_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The CLI splits on \n and \r\n only; str.splitlines() would also cut a value at
+    # \x0c or \x85 and turn the rest into a line of its own.
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Trace: a\x0cb\nX-Route: eu\x85x")
+    seen = _install_fake_query(monkeypatch)
+
+    await _run(policy=ClaudePolicy(anthropic_workspace_id="wrkspc_01Ab"))
+
+    lines = seen["options"].env["ANTHROPIC_CUSTOM_HEADERS"].split("\n")
+    assert lines == ["X-Trace: a\x0cb", "X-Route: eu\x85x", "anthropic-workspace-id: wrkspc_01Ab"]
+
+
+async def test_withheld_custom_headers_are_not_brought_back_by_the_workspace_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Codex-Gateway: secret")
+    seen = _install_fake_query(monkeypatch)
+
+    await _run(
+        policy=ClaudePolicy(
+            withheld_env=("ANTHROPIC_CUSTOM_HEADERS",), anthropic_workspace_id="wrkspc_01Ab"
+        )
+    )
+
+    assert seen["options"].env["ANTHROPIC_CUSTOM_HEADERS"] == "anthropic-workspace-id: wrkspc_01Ab"
+
+
+async def test_custom_headers_are_left_alone_without_a_workspace_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Gateway-Route: eu")
+    seen = _install_fake_query(monkeypatch)
+
+    await _run()
+
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in seen["options"].env  # the CLI inherits it as is
+
+
 async def test_api_error_prose_is_not_streamed_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
     # The CLI reports an API failure as a synthetic assistant message, then an error
     # result: only the (scrubbed) terminal frame should carry it.

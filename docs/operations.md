@@ -21,6 +21,7 @@ contract itself lives in `openapi.yaml`.
 | `MCP_SERVER_NAME` | `domain-tools` | Name of the injected per-turn MCP server entry (the key under `mcpServers` / `-c mcp_servers.<name>`). | Letters, digits, `_` and `-` only.
 | `ANTHROPIC_API_KEY` | unset | **Production / general use.** Pay-as-you-go API key from the Anthropic Console. |
 | `ANTHROPIC_MODE` | `subscription` | Set to `api` in production so `/readyz` requires `ANTHROPIC_API_KEY` specifically. |
+| `ANTHROPIC_WORKSPACE_ID` | unset | **`PROVIDER=claude`.** Workspace ID for an organization-scoped API key, sent as the `anthropic-workspace-id` header on every request (see [Production / general use](#production--general-use-anthropic_api_key)). Letters, digits, `_` and `-` only; blank counts as unset. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | unset | **Local testing only.** Long-lived subscription token from `claude setup-token`. Never deploy it. |
 | `CLAUDE_AUTH_PATH` | `~/.claude.json` | Subscription auth file location (local dev alternative). Used by `/readyz` validation. |
 | `OPENAI_API_KEY` | unset | **`PROVIDER=codex`.** Codex API key. Materialized into `~/.codex/auth.json` at startup (see [Codex provider](#codex-provider)). |
@@ -82,6 +83,35 @@ specifically instead of accepting a leftover local credential.
 
 3. `deploy/k8s/deployment.yaml` loads `ANTHROPIC_API_KEY` from that Secret
    and sets `ANTHROPIC_MODE=api` on the sidecar container.
+
+A key created inside a workspace needs nothing else. An **organization-scoped**
+key (not scoped to a workspace) fails every turn with
+
+```text
+API Error: 400 This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use.
+```
+
+Set `ANTHROPIC_WORKSPACE_ID` to the workspace's ID (`wrkspc_...`, from the
+Console) to fix it. With an API key the claude CLI never sends that header
+itself (its own `ANTHROPIC_WORKSPACE_ID` only feeds workload-identity auth), so
+the sidecar sends it through the CLI's `ANTHROPIC_CUSTOM_HEADERS`: an
+`ANTHROPIC_CUSTOM_HEADERS` the sidecar inherits keeps its other lines, and an
+`anthropic-workspace-id` line in it is replaced. The workspace ID is not a
+credential; it can live in the Deployment's `env`.
+
+A wrong workspace ID is not reported as one. For an ID the key cannot access
+(another organization's workspace, or one the key's owner is not a member of)
+the API answers `404 Workspace … not found`, and the claude CLI words that 404 —
+so the error frame's `message` reads —
+
+```text
+There's an issue with the selected model (<model>). It may not exist or you may not have access to it.
+```
+
+If that appears after setting or changing `ANTHROPIC_WORKSPACE_ID`, check the ID
+before the model. A malformed ID fails with `400 anthropic-workspace-id header
+must be a valid workspace ID.` `/readyz` checks neither: only the API validates
+the ID, on the first turn.
 
 API keys bill per token, are issued per workspace rather than per person,
 and can be rotated or revoked from the Console without touching a browser

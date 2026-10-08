@@ -10,6 +10,9 @@ one credential path so each can be verified in isolation:
     api           claude: ANTHROPIC_API_KEY / codex: OPENAI_API_KEY
                   — the subscription token is scrubbed from the environment first
 
+ANTHROPIC_WORKSPACE_ID (claude, organization-scoped API key) is checked and sent as
+the server does it; AUTH_MODE=subscription leaves it out.
+
 Usage:
     cp .env.example .env.local          # fill in your token once
     .venv/bin/python scripts/smoke.py
@@ -24,7 +27,9 @@ Costs a small amount of quota per run — not wired into pytest.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -51,6 +56,11 @@ _load_env()
 PROVIDER = os.environ.get("PROVIDER", "claude")
 AUTH_MODE = os.environ.get("AUTH_MODE", "auto")
 PROMPT = sys.argv[1] if len(sys.argv) > 1 else "Reply with exactly the word: PONG"
+
+
+def _workspace_id() -> str | None:
+    """ANTHROPIC_WORKSPACE_ID as the server reads it: blank is unset."""
+    return os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip() or None
 
 
 def _apply_auth_mode() -> str | None:
@@ -84,6 +94,8 @@ def _apply_auth_mode() -> str | None:
             return "AUTH_MODE=api requires ANTHROPIC_API_KEY"
     else:
         os.environ.pop("ANTHROPIC_API_KEY", None)
+        # The workspace header belongs to an API key: keep it out of the OAuth path.
+        os.environ.pop("ANTHROPIC_WORKSPACE_ID", None)
         if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
             return (
                 "AUTH_MODE=subscription requires CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token`)"
@@ -94,12 +106,19 @@ def _apply_auth_mode() -> str | None:
 async def main() -> int:
     from sidecar import claude_runner, codex_runner
 
-    run_turn: Runner = codex_runner.run_turn if PROVIDER == "codex" else claude_runner.run_turn
-
     auth_error = _apply_auth_mode()
     if auth_error is not None:
         print(f"FAILED: {auth_error}", file=sys.stderr)
         return 2
+
+    run_turn: Runner = codex_runner.run_turn
+    if PROVIDER != "codex":
+        workspace_id = _workspace_id()  # after _apply_auth_mode: subscription drops it
+        if workspace_id and not re.fullmatch(r"[A-Za-z0-9_-]+", workspace_id):
+            print("FAILED: ANTHROPIC_WORKSPACE_ID takes letters, digits, _ and -", file=sys.stderr)
+            return 2
+        policy = claude_runner.ClaudePolicy(anthropic_workspace_id=workspace_id)
+        run_turn = functools.partial(claude_runner.run_turn, policy=policy)
     try:
         return await _smoke(run_turn)
     finally:
@@ -118,6 +137,8 @@ async def _smoke(run_turn: Runner) -> int:
 
     print(f"provider : {PROVIDER}")
     print(f"auth     : {AUTH_MODE}")
+    if PROVIDER != "codex":
+        print(f"workspace: {_workspace_id() or '-'}")
     print(f"prompt   : {PROMPT!r}")
     print("-" * 48)
 

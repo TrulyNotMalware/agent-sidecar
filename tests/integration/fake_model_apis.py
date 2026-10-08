@@ -7,7 +7,9 @@ an MCP `echo` tool (anthropic: when the request offers such a tool; openai: when
 FAKE_OPENAI_CALL_ECHO=1, since codex does not list MCP tools in the request), and
 once the tool's result is in the history the reply is "final answer". Every
 main-loop request body is recorded as <record_dir>/NN.json, so a test can assert
-what the CLI sent (system prompt placement, tool names).
+what the CLI sent (system prompt placement, tool names). anthropic also appends the
+anthropic-workspace-id header of every /v1/messages request ("" when absent) as one
+line to <record_dir>/workspace-ids.log.
 
 FAKE_API_ERROR=<status> makes the main-loop request fail with that HTTP status and
 an error message that contains a credential-shaped string (sk-...).
@@ -56,6 +58,11 @@ USAGE_OPENAI = {
 def _record(raw: bytes) -> None:
     with _lock:
         (RECORD / f"{next(_counter):02d}.json").write_bytes(raw)
+
+
+def _record_workspace_id(value: str) -> None:
+    with _lock, (RECORD / "workspace-ids.log").open("a", encoding="utf-8") as log:
+        log.write(f"{value}\n")
 
 
 def _sse(name: str, data: dict[str, Any]) -> str:
@@ -227,6 +234,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b"", "text/plain")
 
     def _anthropic(self, raw: bytes, body: dict[str, Any]) -> None:
+        _record_workspace_id(self.headers.get("anthropic-workspace-id", ""))
         if body.get("tools"):  # the agent loop (side requests, e.g. a title, have none)
             _record(raw)
             if ERROR_STATUS:

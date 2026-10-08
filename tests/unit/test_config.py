@@ -93,3 +93,25 @@ def test_mcp_server_name_default_is_neutral_and_validated() -> None:
     assert _settings(bearer_secret="x").mcp_server_name == "domain-tools"
     with pytest.raises(ValidationError):
         _settings(bearer_secret="x", mcp_server_name="a.b")  # TOML key path
+
+
+def test_anthropic_workspace_id_is_stripped_and_blank_means_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+
+    def workspace_id(**given: object) -> str | None:
+        return _settings(bearer_secret="x", **given).anthropic_workspace_id
+
+    assert workspace_id() is None
+    assert workspace_id(anthropic_workspace_id=" wrkspc_01Ab-c\n") == "wrkspc_01Ab-c"
+    assert workspace_id(anthropic_workspace_id=" ") is None  # a copied .env.example
+
+
+@pytest.mark.parametrize(
+    "given", ["wrkspc_a\nanthropic-beta: x", "wrkspc_a: x", "wrkspc a", "wrkspc_a\r\nx"]
+)
+def test_anthropic_workspace_id_cannot_add_a_header_line(given: str) -> None:
+    # It becomes an ANTHROPIC_CUSTOM_HEADERS line: newline / colon would inject headers.
+    with pytest.raises(ValidationError, match="anthropic_workspace_id"):
+        _settings(bearer_secret="x", anthropic_workspace_id=given)
