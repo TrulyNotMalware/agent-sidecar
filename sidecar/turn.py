@@ -88,6 +88,10 @@ class Turn:
     def task(self) -> asyncio.Task[None] | None:
         return self._task
 
+    @property
+    def timeout_sec(self) -> float:
+        return self._timeout_sec
+
     def start(
         self,
         open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],

@@ -126,7 +126,10 @@ def _requests(record: Path) -> list[dict[str, Any]]:
 
 
 def _claude(
-    start_sidecar: StartSidecar, fakes: StartFakes, **env: str
+    start_sidecar: StartSidecar,
+    fakes: StartFakes,
+    sidecar_env: dict[str, str] | None = None,
+    **env: str,
 ) -> tuple[SidecarServer, FakeServers]:
     f = fakes("anthropic", **env)
     srv = start_sidecar(
@@ -135,6 +138,7 @@ def _claude(
         ANTHROPIC_API_KEY="sk-ant-fake-integration-key",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
         MCP_SERVER_URL=f["mcp"],
+        **(sidecar_env or {}),
     )
     return srv, f
 
@@ -196,6 +200,25 @@ def test_claude_token_streaming_sends_the_api_deltas(
     assert tokens.events[-1][1]["finalText"] == "final answer"
 
 
+def test_claude_run_controls_reach_the_cli(start_sidecar: StartSidecar, fakes: StartFakes) -> None:
+    srv, f = _claude(start_sidecar, fakes, sidecar_env={"ALLOWED_MODELS": "claude-test-model"})
+    headers = {"X-Turn-Token": TURN_TOKEN}
+
+    picked = converse(
+        srv.port, "real-claude-model", headers=headers, body={"model": "claude-test-model"}
+    )
+    # The echo tool needs a second round trip, which maxTurns=1 does not allow.
+    capped = converse(srv.port, "real-claude-turns", headers=headers, body={"maxTurns": 1})
+
+    assert picked.event_names[-1] == "done"
+    assert {r["model"] for r in _requests(f["record"])[:2]} == {"claude-test-model"}
+    assert capped.event_names == ["session", "text", "tool_use", "tool_result", "error"]
+    assert capped.events[-1][1] == {
+        "code": "sdk_error",
+        "message": "Reached maximum number of turns (1)",
+    }
+
+
 def test_claude_api_error_is_the_terminal_frame_scrubbed(
     start_sidecar: StartSidecar, fakes: StartFakes
 ) -> None:
@@ -214,7 +237,12 @@ requires_codex = pytest.mark.skipif(shutil.which("codex") is None, reason="codex
 
 
 def _codex(
-    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path, config: str = "", **env: str
+    start_sidecar: StartSidecar,
+    fakes: StartFakes,
+    tmp_path: Path,
+    config: str = "",
+    sidecar_env: dict[str, str] | None = None,
+    **env: str,
 ) -> tuple[SidecarServer, FakeServers]:
     f = fakes("openai", **env)
     codex_home = tmp_path / "codex-home"
@@ -242,6 +270,7 @@ def _codex(
         CODEX_HOME=str(codex_home),
         OPENAI_API_KEY="sk-fake-integration-key",  # startup runs `codex login --with-api-key`
         MCP_SERVER_URL=f["mcp"],
+        **(sidecar_env or {}),
     )
     precondition((codex_home / "auth.json").exists(), "startup materialized auth.json")
     return srv, f
@@ -339,3 +368,19 @@ def test_codex_api_error_is_the_terminal_frame_scrubbed(
     assert error["code"] == "sdk_error"
     assert "model not available" in error["message"]
     assert "leakedkey" not in error["message"]
+
+
+@requires_codex
+def test_codex_model_reaches_the_api(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
+    srv, f = _codex(start_sidecar, fakes, tmp_path, sidecar_env={"ALLOWED_MODELS": "gpt-test"})
+
+    first = converse(srv.port, "real-codex-model", body={"model": "gpt-test"})
+    session_id = first.events[0][1]["sessionId"]
+    resumed = converse(
+        srv.port, "real-codex-model", body={"model": "gpt-test", "sessionId": session_id}
+    )
+
+    assert first.event_names[-1] == resumed.event_names[-1] == "done"
+    assert [r["model"] for r in _requests(f["record"])] == ["gpt-test", "gpt-test"]

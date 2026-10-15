@@ -169,6 +169,8 @@ def _invocation(spec: TurnSpec, policy: CodexPolicy) -> _Invocation:
     cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", policy.sandbox]
     if spec.ephemeral:
         cmd.append("--ephemeral")  # stateless: no rollout that could be resumed later
+    if spec.model is not None:
+        cmd += ["--model", spec.model]  # an ALLOWED_MODELS entry, never free-form input
 
     # Per-turn MCP scoping: inject a streamable-HTTP server via dotted `-c` TOML
     # overrides and hand codex the bearer through an env var (never on argv).

@@ -93,9 +93,17 @@ Auth: `Authorization: Bearer <secret>` required.
   "systemPrompt": "...",             // optional – replaces CLAUDE.md
   "appendSystemPrompt": "...",       // optional – appended to CLAUDE.md
   "mode": "session",                 // "session" (default) | "stateless"
-  "tokenStreaming": false            // optional – true: `text` per API delta (claude only)
+  "tokenStreaming": false,           // optional – true: `text` per API delta (claude only)
+  "model": "...",                    // optional – must be in ALLOWED_MODELS
+  "maxTurns": 5,                     // optional – ≤ MAX_TURNS (claude only)
+  "maxBudgetUsd": 0.5,               // optional – ≤ MAX_BUDGET_USD (claude only)
+  "timeoutSec": 60                   // optional – ≤ TURN_TIMEOUT_SEC
 }
 ```
+Run controls are checked before the stream opens (`400 bad_request` when a value is
+above its setting, a model is not listed, or codex is asked for `maxTurns` /
+`maxBudgetUsd`, which `codex exec` cannot enforce). Each setting is the default when
+the request leaves the field out.
 
 **SSE event sequence** (each frame is an `event:` line plus a `data:` line carrying the JSON below):
 ```
@@ -131,8 +139,11 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `PROVIDER` | `claude` | `claude` or `codex` |
 | `BIND` | `127.0.0.1` | Set `0.0.0.0` in Docker |
 | `PORT` | `7300` | |
-| `MAX_CONCURRENT` | `8` | Global in-flight cap |
-| `TURN_TIMEOUT_SEC` | `90` | Per-turn hard timeout |
+| `MAX_CONCURRENT` | `8` | Global in-flight cap (min 1) |
+| `TURN_TIMEOUT_SEC` | `90` | Per-turn hard timeout; default and maximum of a request's `timeoutSec` (min 1) |
+| `ALLOWED_MODELS` | — | Comma list a request's `model` must be in; empty = requests cannot pick a model |
+| `MAX_TURNS` | — | claude: default and maximum of a request's `maxTurns`; unset = no limit |
+| `MAX_BUDGET_USD` | — | claude: default and maximum of a request's `maxBudgetUsd`; unset = no limit |
 | `SHUTDOWN_GRACE_SEC` | `10` | On SIGTERM, how long turns may keep streaming before `error: cancelled` (min 1) |
 | `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Session workspaces root |
 | `CLAUDE_MD_PATH` | — | Base system prompt file (hot-reloaded per request) |

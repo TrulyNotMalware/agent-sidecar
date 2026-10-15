@@ -76,9 +76,14 @@ async def converse(
         mode=body.mode,
         resume=bool(body.session_id),
         turn_token=bool(x_turn_token),
+        model=body.model,
         prompt=body.prompt,
     )
 
+    try:
+        limits = _run_limits(body, settings)
+    except ApiError as exc:
+        return _reject(exc, turn_id)
     rejected = await _preflight_resume(body, settings)
     if rejected is not None:
         return _reject(rejected, turn_id)
@@ -104,11 +109,13 @@ async def converse(
     }
     if x_user_id:
         span_attributes["user.id"] = x_user_id
+    if limits.model is not None:
+        span_attributes["gen_ai.request.model"] = limits.model
     turn = Turn(
         session_key=body.session_key,
         user_id=x_user_id,
         admission=admission,
-        timeout_sec=settings.turn_timeout_sec,
+        timeout_sec=limits.timeout_sec,
         span_attributes=span_attributes,
         turn_id=turn_id,
     )
@@ -125,6 +132,9 @@ async def converse(
             turn_token=x_turn_token,
             ephemeral=body.mode == "stateless",
             token_streaming=body.token_streaming,
+            model=limits.model,
+            max_turns=limits.max_turns,
+            max_budget_usd=limits.max_budget_usd,
         )
         events = run_turn(spec, cwd=cwd)
         if body.mode == "stateless" or settings.provider != "codex":
@@ -152,7 +162,7 @@ async def converse(
     # grace period; the stream uses it to let the turn finish or end it cleanly.
     shutdown = anyio.Event()
     response = EventSourceResponse(
-        _event_stream(turn, shutdown, settings, body.session_key, state),
+        _event_stream(turn, shutdown, settings.shutdown_grace_sec, body.session_key, state),
         ping=15,
         # A client that stops reading must not hold the connection forever.
         send_timeout=_SEND_TIMEOUT_SEC,
@@ -169,6 +179,60 @@ async def converse(
     except ApiError as exc:
         return _reject(exc, turn_id)
     return response
+
+
+@dataclass(frozen=True, slots=True)
+class _RunLimits:
+    """A turn's run controls: the request's, within the operator's settings."""
+
+    timeout_sec: int
+    model: str | None = None
+    max_turns: int | None = None
+    max_budget_usd: float | None = None
+
+
+def _run_limits(body: ConverseRequest, settings: Settings) -> _RunLimits:
+    """Resolve the request's run controls against the settings; ApiError(400) if not allowed.
+
+    Each setting is the default and the ceiling: a request may lower a limit, not
+    raise it, and may only pick a model the operator listed.
+    """
+    if body.model is not None and body.model not in settings.allowed_models_names:
+        if not settings.allowed_models_names:
+            raise ApiError(
+                ErrorCode.BAD_REQUEST,
+                "model cannot be chosen per request (ALLOWED_MODELS is empty)",
+            )
+        raise ApiError(ErrorCode.BAD_REQUEST, f"model {body.model!r} is not in ALLOWED_MODELS")
+    timeout_sec = settings.turn_timeout_sec
+    if body.timeout_sec is not None:
+        timeout_sec = _within(body.timeout_sec, timeout_sec, "timeoutSec", "TURN_TIMEOUT_SEC")
+    if settings.provider == "codex":
+        # codex exec has no turn or cost limit to pass them to; MAX_TURNS / MAX_BUDGET_USD
+        # are ignored with a startup warning.
+        for field, value in (("maxTurns", body.max_turns), ("maxBudgetUsd", body.max_budget_usd)):
+            if value is not None:
+                raise ApiError(ErrorCode.BAD_REQUEST, f"{field} is not supported by PROVIDER=codex")
+        return _RunLimits(timeout_sec=timeout_sec, model=body.model)
+    return _RunLimits(
+        timeout_sec=timeout_sec,
+        model=body.model,
+        max_turns=settings.max_turns
+        if body.max_turns is None
+        else _within(body.max_turns, settings.max_turns, "maxTurns", "MAX_TURNS"),
+        max_budget_usd=settings.max_budget_usd
+        if body.max_budget_usd is None
+        else _within(
+            body.max_budget_usd, settings.max_budget_usd, "maxBudgetUsd", "MAX_BUDGET_USD"
+        ),
+    )
+
+
+def _within[T: (int, float)](requested: T, ceiling: T | None, field: str, setting: str) -> T:
+    """A requested limit, if the setting (when set) allows it; else ApiError(400)."""
+    if ceiling is not None and requested > ceiling:
+        raise ApiError(ErrorCode.BAD_REQUEST, f"{field} may not exceed {ceiling} ({setting})")
+    return requested
 
 
 async def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | None:
@@ -219,7 +283,7 @@ def _reject(error: ApiError, turn_id: str) -> JSONResponse:
 async def _event_stream(
     turn: Turn,
     shutdown: anyio.Event,
-    settings: Settings,
+    shutdown_grace_sec: int,
     session_key: str,
     state: "_StreamState",
 ) -> AsyncIterator[dict[str, str]]:
@@ -230,7 +294,7 @@ async def _event_stream(
     """
     started = time.perf_counter()
     loop = asyncio.get_running_loop()
-    drain_budget = max(0.0, settings.shutdown_grace_sec - 1.0)
+    drain_budget = max(0.0, shutdown_grace_sec - 1.0)
     drain_deadline: float | None = None
     shutdown_wait = asyncio.ensure_future(shutdown.wait())
     get: asyncio.Future[TurnItem] | None = None
@@ -265,7 +329,7 @@ async def _event_stream(
                     return
                 continue  # never a second terminal: the turn logs what happens after done
             if isinstance(item, TurnStopped | TurnEnded):
-                code, message = _terminal_error(item, settings.turn_timeout_sec, turn.turn_id)
+                code, message = _terminal_error(item, turn.timeout_sec, turn.turn_id)
                 outcome = code
                 log.warning("converse.error", code=code, message=message)
                 yield sse_event("error", {"code": code, "message": message})

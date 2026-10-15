@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from sidecar.config import Settings
+from sidecar.config import Settings, get_settings
 from sidecar.events import Runner, RunnerEvent, TurnSpec
 from sidecar.turn import Turn, TurnEnded, TurnStopped
 
@@ -559,3 +559,147 @@ def test_an_unreadable_claude_md_is_a_json_500_before_the_stream(
     assert r.json() == {"code": "internal", "message": "could not read the base system prompt"}
     assert len(r.headers["x-turn-id"]) == 32
     assert app.state.admission.inflight == 0  # rejected before the reservation
+
+
+def _limits_body(**extra: object) -> object:
+    from sidecar.models import ConverseRequest
+
+    return ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", **extra})
+
+
+def _resolve(settings: Settings, **extra: object) -> object:
+    from sidecar.models import ConverseRequest
+    from sidecar.routes.converse import _run_limits
+
+    body = _limits_body(**extra)
+    assert isinstance(body, ConverseRequest)
+    return _run_limits(body, settings)
+
+
+def _rejected(settings: Settings, **extra: object) -> str:
+    from sidecar.errors import ApiError
+
+    with pytest.raises(ApiError) as exc_info:
+        _resolve(settings, **extra)
+    assert exc_info.value.status_code == 400
+    return exc_info.value.message
+
+
+def test_run_limits_default_to_the_settings() -> None:
+    from sidecar.routes.converse import _RunLimits
+
+    assert _resolve(_settings(bearer_secret="x")) == _RunLimits(timeout_sec=90)
+    configured = _settings(bearer_secret="x", max_turns=8, max_budget_usd=0.5, turn_timeout_sec=60)
+    assert _resolve(configured) == _RunLimits(timeout_sec=60, max_turns=8, max_budget_usd=0.5)
+
+
+def test_a_request_may_lower_a_limit_but_not_raise_it() -> None:
+    from sidecar.routes.converse import _RunLimits
+
+    configured = _settings(bearer_secret="x", max_turns=8, max_budget_usd=0.5, turn_timeout_sec=60)
+
+    lowered = _resolve(configured, maxTurns=2, maxBudgetUsd=0.1, timeoutSec=30)
+    assert lowered == _RunLimits(timeout_sec=30, max_turns=2, max_budget_usd=0.1)
+    assert _rejected(configured, maxTurns=9) == "maxTurns may not exceed 8 (MAX_TURNS)"
+    assert (
+        _rejected(configured, maxBudgetUsd=1) == "maxBudgetUsd may not exceed 0.5 (MAX_BUDGET_USD)"
+    )
+    assert _rejected(configured, timeoutSec=61) == "timeoutSec may not exceed 60 (TURN_TIMEOUT_SEC)"
+    # Without a setting there is no ceiling (TURN_TIMEOUT_SEC always has one).
+    unlimited = _resolve(_settings(bearer_secret="x"), maxTurns=50, maxBudgetUsd=3)
+    assert unlimited == _RunLimits(timeout_sec=90, max_turns=50, max_budget_usd=3)
+
+
+def test_a_request_may_only_pick_a_listed_model() -> None:
+    from sidecar.routes.converse import _RunLimits
+
+    listed = _settings(bearer_secret="x", allowed_models="claude-a,claude-b")
+
+    assert _resolve(listed, model="claude-b") == _RunLimits(timeout_sec=90, model="claude-b")
+    assert _rejected(listed, model="claude-c") == "model 'claude-c' is not in ALLOWED_MODELS"
+    assert "ALLOWED_MODELS is empty" in _rejected(_settings(bearer_secret="x"), model="claude-a")
+
+
+def test_codex_refuses_the_limits_it_cannot_enforce() -> None:
+    from sidecar.routes.converse import _RunLimits
+
+    codex = _settings(
+        bearer_secret="x", provider="codex", allowed_models="gpt-a", max_turns=8, max_budget_usd=1
+    )
+
+    # MAX_TURNS / MAX_BUDGET_USD do not reach codex (startup warns about them) ...
+    assert _resolve(codex, model="gpt-a", timeoutSec=10) == _RunLimits(
+        timeout_sec=10, model="gpt-a"
+    )
+    # ... and a request that sets them is told so.
+    assert _rejected(codex, maxTurns=2) == "maxTurns is not supported by PROVIDER=codex"
+    assert _rejected(codex, maxBudgetUsd=0.1) == "maxBudgetUsd is not supported by PROVIDER=codex"
+
+
+def test_run_limits_reach_the_runner(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded = _install_recording_runner(monkeypatch)
+    get_settings.cache_clear()
+    monkeypatch.setenv("ALLOWED_MODELS", "claude-a")
+    try:
+        r = client.post(
+            "/v1/converse",
+            json={
+                "sessionKey": "k-limits",
+                "prompt": "hi",
+                "model": "claude-a",
+                "maxTurns": 3,
+                "maxBudgetUsd": 0.25,
+            },
+            headers={"Authorization": "Bearer test-secret"},
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert r.status_code == 200
+    assert (recorded["model"], recorded["max_turns"], recorded["max_budget_usd"]) == (
+        "claude-a",
+        3,
+        0.25,
+    )
+
+
+def test_a_requested_timeout_bounds_the_turn(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from sidecar.routes import converse as converse_mod
+
+    def hanging_runner(_settings: Settings) -> Runner:
+        async def run_turn(spec: TurnSpec, *, cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
+            await asyncio.Event().wait()
+            yield  # type: ignore[misc]  # unreachable; makes this an async generator
+
+        return run_turn
+
+    monkeypatch.setattr(converse_mod, "_get_runner", hanging_runner)
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k-timeout", "prompt": "hi", "timeoutSec": 1},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 200
+    assert '"code": "timeout"' in r.text
+    assert "turn exceeded 1s" in r.text  # the request's timeout, not TURN_TIMEOUT_SEC
+
+
+def test_a_limit_above_the_setting_is_a_400_before_the_stream(client: TestClient) -> None:
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k-over", "prompt": "hi", "timeoutSec": 10_000},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 400
+    assert r.json() == {
+        "code": "bad_request",
+        "message": "timeoutSec may not exceed 90 (TURN_TIMEOUT_SEC)",
+    }
+    assert len(r.headers["x-turn-id"]) == 32

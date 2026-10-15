@@ -470,3 +470,15 @@ async def test_stderr_lines_are_capped_in_length_and_number(
     assert len(lines) == count
     assert {len(line) for line in lines} == {cap}
     assert [event for event, _ in logged].count("claude.stderr_not_logged") == 1
+
+
+async def test_run_controls_reach_the_cli_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _install_fake_query(monkeypatch)
+
+    await _run()
+    assert (seen["options"].model, seen["options"].max_turns) == (None, None)
+    assert seen["options"].max_budget_usd is None
+
+    await _run(TurnSpec(prompt="hi", model="claude-a", max_turns=3, max_budget_usd=0.25))
+    assert (seen["options"].model, seen["options"].max_turns) == ("claude-a", 3)
+    assert seen["options"].max_budget_usd == 0.25

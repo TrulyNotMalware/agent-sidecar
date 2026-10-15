@@ -99,6 +99,12 @@ async def run_turn(
         options_kwargs["resume"] = spec.resume_session_id
     if spec.token_streaming:
         options_kwargs["include_partial_messages"] = True
+    if spec.model is not None:
+        options_kwargs["model"] = spec.model
+    if spec.max_turns is not None:
+        options_kwargs["max_turns"] = spec.max_turns
+    if spec.max_budget_usd is not None:
+        options_kwargs["max_budget_usd"] = spec.max_budget_usd
     static_servers = await asyncio.to_thread(static_mcp_servers, spec.mcp_config_path)
     merged_servers = per_turn_mcp_servers(
         static_servers,

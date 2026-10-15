@@ -291,6 +291,19 @@ async def test_flag_like_prompts_and_ids_are_not_parsed_as_flags(
     assert proc.stdin.data == b"--last"
 
 
+async def test_model_is_an_exec_option_on_new_and_resumed_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+
+    await _collect(TurnSpec(prompt="hi", model="gpt-a"))
+    assert calls["cmd"] == [*BASE_CMD, "--model", "gpt-a", "--", "-"]
+
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+    await _collect(TurnSpec(prompt="hi", model="gpt-a", resume_session_id="sess-9"))
+    assert calls["cmd"] == [*BASE_CMD, "--model", "gpt-a", "resume", "--", "sess-9", "-"]
+
+
 async def test_ephemeral_for_stateless_turns(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 

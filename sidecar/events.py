@@ -78,6 +78,11 @@ class TurnSpec:
     ephemeral: bool = False
     # Text deltas as the API streams them (claude); codex only reports whole messages.
     token_streaming: bool = False
+    # Run controls, already checked against the operator's ceilings. None: the
+    # CLI's default model / no limit. Turn and budget limits are claude-only.
+    model: str | None = None
+    max_turns: int | None = None
+    max_budget_usd: float | None = None
 
 
 class Runner(Protocol):

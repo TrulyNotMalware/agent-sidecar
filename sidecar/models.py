@@ -22,6 +22,14 @@ class ConverseRequest(BaseModel):
     mode: Literal["session", "stateless"] = "session"
     # `text` events as the model generates them, not one per finished text block.
     token_streaming: bool = Field(default=False, alias="tokenStreaming")
+    # Run controls, each checked against the operator's setting (ALLOWED_MODELS,
+    # MAX_TURNS, MAX_BUDGET_USD, TURN_TIMEOUT_SEC) before the turn starts.
+    model: str | None = Field(default=None, min_length=1, max_length=256)
+    max_turns: int | None = Field(default=None, alias="maxTurns", ge=1)
+    max_budget_usd: float | None = Field(
+        default=None, alias="maxBudgetUsd", gt=0, allow_inf_nan=False
+    )
+    timeout_sec: int | None = Field(default=None, alias="timeoutSec", ge=1)
 
     @field_validator("session_id", mode="before")
     @classmethod

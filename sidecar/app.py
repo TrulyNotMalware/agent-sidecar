@@ -83,6 +83,19 @@ def create_app() -> FastAPI:
         *(os.environ.get(name) for name in settings.codex_env_passthrough_names),
     )
 
+    if settings.provider == "codex":
+        # codex exec has no turn or cost limit: requests setting them get 400.
+        ignored = [
+            name
+            for name, value in (
+                ("MAX_TURNS", settings.max_turns),
+                ("MAX_BUDGET_USD", settings.max_budget_usd),
+            )
+            if value is not None
+        ]
+        if ignored:
+            log.warning("config.ignored", provider="codex", settings=ignored)
+
     tracer_provider: TracerProvider | None = None
 
     @asynccontextmanager

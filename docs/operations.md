@@ -11,8 +11,11 @@ contract itself lives in `openapi.yaml`.
 | `BIND` | `127.0.0.1` | Listen address. Use `127.0.0.1` for Pod-local sidecar; `0.0.0.0` only for standalone testing. |
 | `PORT` | `7300` | Listen port. |
 | `BEARER_SECRET` | **required** | Shared secret expected in `Authorization: Bearer …`. Provision via Kubernetes Secret. Startup fails if unset or empty. |
-| `MAX_CONCURRENT` | `8` | Global in-flight `/v1/converse` cap; further requests get HTTP 429 (`busy`). |
-| `TURN_TIMEOUT_SEC` | `90` | Hard ceiling per turn. At the deadline the stream emits `error: timeout` and the CLI is closed in the background (see [Turn lifecycle](#turn-lifecycle-timeout-cancel-disconnect-shutdown)). |
+| `MAX_CONCURRENT` | `8` | Global in-flight `/v1/converse` cap; further requests get HTTP 429 (`busy`). Minimum `1`. |
+| `TURN_TIMEOUT_SEC` | `90` | Hard ceiling per turn, and the default and maximum of a request's `timeoutSec`. At the deadline the stream emits `error: timeout` and the CLI is closed in the background (see [Turn lifecycle](#turn-lifecycle-timeout-cancel-disconnect-shutdown)). Minimum `1`. |
+| `ALLOWED_MODELS` | unset | Comma-separated models a request may pick with `model` (e.g. `claude-sonnet-5-5,claude-haiku-5-5`). Unset: a request naming a model gets `400`, and turns use the CLI's default (claude: `ANTHROPIC_MODEL` or the CLI's own; codex: `config.toml`). |
+| `MAX_TURNS` | unset | **`PROVIDER=claude`.** Default and maximum of a request's `maxTurns` (model round trips per turn). Reaching it ends the turn with `error: sdk_error` (`Reached maximum number of turns (N)`). Unset: no limit unless the request sets one. Ignored with a startup warning for codex. |
+| `MAX_BUDGET_USD` | unset | **`PROVIDER=claude`.** Default and maximum of a request's `maxBudgetUsd`, checked against the CLI's cost estimate after each model call (`error: sdk_error`, `Reached maximum budget ($N)`). Unset: no limit unless the request sets one. Ignored with a startup warning for codex. |
 | `SHUTDOWN_GRACE_SEC` | `10` | On SIGTERM, how long in-flight turns may keep streaming before they end with `error: cancelled` (see [Shutdown](#shutdown)). Minimum `1`. |
 | `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Per-`sessionKey` workspace root (session mode); stateless turns get a temporary directory under `WORKSPACE_ROOT/.stateless/`, and issued session ids are recorded in `WORKSPACE_ROOT/.session-ids/`. Created at startup. Non-root / local runs (e.g. macOS dev) must override this to a writable directory — otherwise startup fails with `PermissionError` creating the default path. |
 | `CLAUDE_MD_PATH` | unset | Path to the static base system prompt (typically a ConfigMap mount, e.g. `/workspace/CLAUDE.md`). |
