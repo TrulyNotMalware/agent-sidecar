@@ -55,6 +55,8 @@ for `ANTHROPIC_API_KEY`, `mcp.json`, and `CLAUDE.md`.
 
 SSE event sequence: `session` → 0..N of `text` / `tool_use` / `tool_result` → terminal `done` *or* `error` (a lone `error` if the turn fails before it starts). Full schema in [`openapi.yaml`](openapi.yaml).
 
+Optional per-request fields: `tokenStreaming` (token-level `text` deltas, claude), `outputSchema` (JSON Schema → `done.structuredOutput`), and run controls capped by the operator — `model` (`ALLOWED_MODELS`), `maxTurns` / `maxBudgetUsd` (`MAX_TURNS` / `MAX_BUDGET_USD`, claude), `timeoutSec` (`TURN_TIMEOUT_SEC`). `done` also reports `costUsd`, `numTurns`, `stopReason` and `durationMs`.
+
 ## Architecture
 
 ```
@@ -198,6 +200,8 @@ docker build -t claude-sidecar:1.0.0 .
 | `GET` | `/metrics` | 없음 | Prometheus text 포맷 |
 
 SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` → 종단 `done` 또는 `error` (턴 시작 전에 실패하면 `error` 하나만). 전체 스키마는 [`openapi.yaml`](openapi.yaml).
+
+요청별 선택 필드: `tokenStreaming` (토큰 단위 `text` delta, claude), `outputSchema` (JSON Schema → `done.structuredOutput`), 운영자 설정이 상한인 실행 제어 — `model` (`ALLOWED_MODELS`), `maxTurns` / `maxBudgetUsd` (`MAX_TURNS` / `MAX_BUDGET_USD`, claude), `timeoutSec` (`TURN_TIMEOUT_SEC`). `done`에는 `costUsd`, `numTurns`, `stopReason`, `durationMs`도 포함됩니다.
 
 ## 아키텍처
 
