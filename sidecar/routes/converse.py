@@ -41,6 +41,7 @@ from ..session import (
     remember_session_id,
     stateless_workspace,
     workspace_for,
+    workspace_path,
 )
 from ..sse import sse_event
 from ..turn import StopReason, Turn, TurnEnded, TurnItem, TurnStopped
@@ -140,8 +141,8 @@ async def converse(
         events = run_turn(spec, cwd=cwd)
         if body.mode == "stateless":
             return events  # nothing to resume or delete later
-        # codex resumes are bound to the recorded ids; DELETE /v1/sessions finds a
-        # session's transcripts by them (both providers).
+        # A resume is bound to the recorded ids (_preflight_resume); DELETE
+        # /v1/sessions finds a session's transcripts by them.
         return _remembering_session_ids(events, body.session_key, settings.workspace_root)
 
     @asynccontextmanager
@@ -239,21 +240,35 @@ def _within[T: (int, float)](requested: T, ceiling: T | None, field: str, settin
 
 
 async def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | None:
-    """codex resolves a thread id across *all* sessions in CODEX_HOME, so a resume is
-    only allowed for ids this sessionKey was issued. (claude scopes transcripts by the
-    workspace cwd, which is already per-sessionKey.)"""
-    if settings.provider != "codex" or body.session_id is None:
+    """A resume is only allowed for a session this sessionKey was issued.
+
+    Both CLIs find a session id among every session they stored — codex across
+    CODEX_HOME, claude across every project directory of CLAUDE_CONFIG_DIR, whatever
+    the cwd — so without this check one sessionKey could continue (and read) another
+    key's conversation, a stateless one included.
+    """
+    if body.session_id is None:
         return None
     try:
-        known = await asyncio.to_thread(
-            known_session_ids, body.session_key, root=settings.workspace_root
-        )
+        issued = await asyncio.to_thread(_issued_to, body.session_key, body.session_id, settings)
     except (OSError, UnicodeDecodeError) as exc:
         log.exception("session_id.record_unreadable", error_type=type(exc).__name__)
         return ApiError(ErrorCode.INTERNAL, "could not read this sessionKey's session record")
-    if body.session_id not in known:
+    if not issued:
         return ApiError(ErrorCode.BAD_REQUEST, "sessionId was not issued for this sessionKey")
     return None
+
+
+def _issued_to(session_key: str, session_id: str, settings: Settings) -> bool:
+    root = settings.workspace_root
+    if session_id in known_session_ids(session_key, root=root):
+        return True
+    if settings.provider != "claude":
+        return False
+    # claude ids were not recorded before this check existed: such a session counts
+    # as the key's if its transcript is in the key's own project directory.
+    project = claude_runner.claude_project_dir(workspace_path(session_key, root=root))
+    return project is not None and (project / f"{session_id}.jsonl").is_file()
 
 
 async def _remembering_session_ids(

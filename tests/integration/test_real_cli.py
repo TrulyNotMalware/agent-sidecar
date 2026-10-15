@@ -263,9 +263,52 @@ def test_claude_session_delete_removes_what_the_cli_stored(
     assert stored("KEEP-ME") != []
     assert not list(config.rglob(f"*{gone_id}*"))
     assert list(config.rglob(f"*{kept_id}*"))
-    # The conversation cannot be resumed any more.
-    resumed = converse(srv.port, "real-claude-gone", body={"sessionId": gone_id})
-    assert resumed.event_names[-1] == "error"
+    # The conversation cannot be resumed any more: its id record went too.
+    status, body = srv.post_json(
+        "/v1/converse", {"sessionKey": "real-claude-gone", "prompt": "hi", "sessionId": gone_id}
+    )
+    assert (status, body["code"]) == (400, "bad_request")
+
+
+def test_claude_session_cannot_be_resumed_under_another_key(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
+    # The CLI finds a session id in any project directory, whatever the cwd.
+    srv, f = _claude(start_sidecar, fakes)
+
+    owner = converse(srv.port, "real-claude-owner", prompt="OWNER-SECRET")
+    session_id = owner.events[0][1]["sessionId"]
+    status, body = srv.post_json(
+        "/v1/converse",
+        {"sessionKey": "real-claude-intruder", "prompt": "hi", "sessionId": session_id},
+    )
+    resumed = converse(srv.port, "real-claude-owner", body={"sessionId": session_id})
+
+    assert (status, body["code"]) == (400, "bad_request")
+    assert resumed.event_names[-1] == "done"  # the key it was issued to still can
+    sent = [json.dumps(r.get("messages")) for r in _requests(f["record"])]
+    assert len(sent) == 2 and "OWNER-SECRET" in sent[1]  # the owner's resume had the history
+
+
+def test_claude_stateless_turn_leaves_nothing_behind(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
+    srv, _f = _claude(start_sidecar, fakes)
+    config = srv.server_log.parent / "home" / ".claude"
+
+    r = converse(srv.port, "real-claude-stateless", prompt="EPHEMERAL", body={"mode": "stateless"})
+    session_id = r.events[0][1]["sessionId"]
+    status, _ = srv.post_json(
+        "/v1/converse", {"sessionKey": "any-key", "prompt": "hi", "sessionId": session_id}
+    )
+
+    assert r.event_names[-1] == "done"
+    leftovers = [
+        p for p in config.rglob("*") if p.is_file() and "EPHEMERAL" in p.read_text(errors="ignore")
+    ]
+    assert leftovers == []
+    assert not list(config.rglob(f"*{session_id}*"))
+    assert status == 400  # and it cannot be resumed
 
 
 def test_claude_api_error_is_the_terminal_frame_scrubbed(

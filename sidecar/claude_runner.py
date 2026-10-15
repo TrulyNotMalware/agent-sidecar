@@ -27,7 +27,7 @@ from .mcp import (
     static_mcp_servers,
 )
 from .observability.logging import get_logger
-from .session import is_session_id
+from .session import is_session_id, remove_paths
 
 # The SDK launches the CLI with the sidecar's full environment and only lets options
 # add or override keys. Blank the secrets that are the sidecar's own business so the
@@ -54,6 +54,17 @@ def claude_config_dir() -> Path:
     return Path(configured) if configured else Path.home() / ".claude"
 
 
+def claude_project_dir(cwd: Path) -> Path | None:
+    """The directory the CLI keeps the transcripts of sessions run in `cwd` in.
+
+    None when the name would be longer than the CLI's limit: it then ends in a hash
+    of the path, and a guess by prefix could match another workspace's directory.
+    """
+    # process.cwd() as the CLI sees it: absolute, symlinks resolved.
+    name = _NOT_IN_PROJECT_NAME.sub("-", str(cwd.resolve()))
+    return claude_config_dir() / "projects" / name if len(name) <= _PROJECT_NAME_MAX else None
+
+
 def claude_session_files(cwd: Path, session_ids: Iterable[str]) -> list[Path]:
     """What the CLI stored for the sessions run in `cwd` (best effort, CLI internals).
 
@@ -63,12 +74,9 @@ def claude_session_files(cwd: Path, session_ids: Iterable[str]) -> list[Path]:
     transcript in another project directory, …). Ids that are not UUIDs are skipped.
     """
     config = claude_config_dir()
-    found: list[Path] = []
-    # process.cwd() as the CLI sees it: absolute, symlinks resolved.
-    name = _NOT_IN_PROJECT_NAME.sub("-", str(cwd.resolve()))
-    if len(name) <= _PROJECT_NAME_MAX:
-        found.append(config / "projects" / name)
-    # A longer name ends in a hash of the path: only the session ids can find it.
+    project = claude_project_dir(cwd)
+    found: list[Path] = [] if project is None else [project]
+    # Past the name limit only the session ids can find the project's entries.
     for sid in filter(is_session_id, session_ids):
         found += config.glob(f"*/{sid}*")
         found += config.glob(f"projects/*/{sid}*")
@@ -110,10 +118,11 @@ async def run_turn(
     No timeout here: the caller bounds the turn (sidecar.turn.Turn) and cancels the
     task that iterates this generator exactly once, so the SDK can close the CLI.
 
-    `spec.ephemeral` is interface parity with codex: claude's transcript is keyed by
-    the (deleted) temp cwd, so a stateless turn cannot be resumed anyway; the file
-    itself stays under $CLAUDE_CONFIG_DIR/projects (default ~/.claude/projects;
-    --no-session-persistence is --print-only, not SDK mode).
+    `spec.ephemeral` (mode=stateless): once the CLI has exited, what it stored for
+    the turn under $CLAUDE_CONFIG_DIR is removed — its project directory (named after
+    the temp cwd) and the entries named after its session id. The CLI has no way to
+    not store it: --no-session-persistence is --print-only, not SDK mode. (Resuming
+    such a session is refused anyway: its id is recorded under no sessionKey.)
     """
     policy = ClaudePolicy() if policy is None else policy
     options_kwargs: dict[str, Any] = {
@@ -163,6 +172,10 @@ async def run_turn(
         options_kwargs["allowed_tools"] = list(dict.fromkeys(approved))
 
     async with contextlib.AsyncExitStack() as cleanup:
+        session_ids: set[str] = set()
+        if spec.ephemeral:
+            # Registered first, so it runs last: after the CLI has exited.
+            cleanup.push_async_callback(_forget_stateless_turn, cwd, session_ids)
         if spec.system_prompt is not None:
             # A file, not `--system-prompt <text>` on argv (visible via `ps`, capped at
             # 128 KiB per argument on Linux).
@@ -183,7 +196,21 @@ async def run_turn(
         )
         async with contextlib.aclosing(run) as events:
             async for ev in events:
+                if isinstance(ev, SessionEvent):
+                    session_ids.add(ev.session_id)
                 yield ev
+
+
+async def _forget_stateless_turn(cwd: Path, session_ids: set[str]) -> None:
+    """Remove what the CLI stored for a stateless turn; a failure is logged, not raised."""
+
+    def forget() -> int:
+        return remove_paths(claude_session_files(cwd, session_ids))
+
+    try:
+        await asyncio.to_thread(forget)
+    except OSError as exc:
+        log.warning("claude.stateless_transcript_not_removed", error_type=type(exc).__name__)
 
 
 @dataclass(slots=True)

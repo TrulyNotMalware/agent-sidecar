@@ -263,6 +263,21 @@ to stdin and closes it.
   blanked for the claude CLI and its children).
 
 
+## Claude sessions
+
+- **A resume is bound to its `sessionKey`.** `claude --resume <id>` finds a session
+  in any project directory under `CLAUDE_CONFIG_DIR`, whatever the cwd, so the
+  sidecar only lets a key resume ids it was issued (recorded under
+  `WORKSPACE_ROOT/.session-ids/`, as for codex); others get `400` before the stream
+  opens. Sessions from before ids were recorded for claude still resume when their
+  transcript is in the key's own project directory — unless the workspace path is
+  so long that the CLI shortens the directory name with a hash (more than 200
+  characters once `/` and other non-alphanumerics become `-`); those start fresh.
+- **Stateless turns leave no transcript.** Once the CLI has exited, the sidecar
+  removes what it stored for the turn under `CLAUDE_CONFIG_DIR` (the project
+  directory named after the temp workspace, and the entries named after the turn's
+  session id). A turn killed hard (SIGKILL, OOM) can leave them behind.
+
 ## Claude agent policy
 
 The `claude` provider does not inherit tool permissions or settings from the
@@ -433,7 +448,8 @@ closing the CLI. Consequences:
 ## Operational gotchas
 
 - **Stateless leftovers.** A turn killed hard (SIGKILL, OOM) can leave a directory
-  under `WORKSPACE_ROOT/.stateless/`; it is safe to delete whenever no turn runs.
+  under `WORKSPACE_ROOT/.stateless/` (and, with claude, its transcript under
+  `CLAUDE_CONFIG_DIR/projects/`); both are safe to delete whenever no turn runs.
 - **Where state lives.** The image keeps all mutable state under
   `/var/lib/claude-sidecar`: `sessions/` (`WORKSPACE_ROOT`), `claude/`
   (`CLAUDE_CONFIG_DIR`: claude transcripts, needed to resume) and `codex/`

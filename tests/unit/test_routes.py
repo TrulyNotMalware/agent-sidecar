@@ -396,22 +396,60 @@ def test_claude_policy_defaults() -> None:
     assert policy.setting_sources == ()
 
 
-async def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path: Path) -> None:
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_a_resume_requires_an_id_issued_for_the_session_key(
+    tmp_path: Path, provider: str
+) -> None:
+    # Both CLIs find a session id across all their sessions, whatever the cwd.
     from sidecar.models import ConverseRequest
     from sidecar.routes.converse import _preflight_resume
     from sidecar.session import remember_session_id
 
     sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
-    codex = _settings(bearer_secret="x", provider="codex", workspace_root=tmp_path)
-    claude = _settings(bearer_secret="x", workspace_root=tmp_path)
+    settings = _settings(bearer_secret="x", provider=provider, workspace_root=tmp_path)
     body = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": sid})
 
-    rejected = await _preflight_resume(body, codex)
+    rejected = await _preflight_resume(body, settings)
     assert rejected is not None and rejected.status_code == 400
-    assert await _preflight_resume(body, claude) is None  # claude scopes transcripts by cwd
+
+    remember_session_id("other-key", sid, root=tmp_path)
+    assert await _preflight_resume(body, settings) is not None  # another key's session
 
     remember_session_id("k", sid, root=tmp_path)
-    assert await _preflight_resume(body, codex) is None
+    assert await _preflight_resume(body, settings) is None
+
+
+async def test_an_unrecorded_claude_session_counts_if_its_transcript_is_the_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Sessions from before claude ids were recorded: the transcript's location decides.
+    from sidecar.claude_runner import claude_project_dir
+    from sidecar.models import ConverseRequest
+    from sidecar.routes.converse import _preflight_resume
+    from sidecar.session import workspace_path
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    root = tmp_path / "sessions"
+    sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
+    settings = _settings(bearer_secret="x", workspace_root=root)
+
+    def transcript_under(session_key: str) -> None:
+        project = claude_project_dir(workspace_path(session_key, root=root))
+        assert project is not None
+        project.mkdir(parents=True, exist_ok=True)
+        (project / f"{sid}.jsonl").write_text("{}")
+
+    def body(session_key: str) -> ConverseRequest:
+        return ConverseRequest.model_validate(
+            {"sessionKey": session_key, "prompt": "hi", "sessionId": sid}
+        )
+
+    transcript_under("owner")
+
+    assert await _preflight_resume(body("owner"), settings) is None
+    assert await _preflight_resume(body("intruder"), settings) is not None
+    codex = _settings(bearer_secret="x", provider="codex", workspace_root=root)
+    assert await _preflight_resume(body("owner"), codex) is not None  # claude's files only
 
 
 async def test_an_unreadable_session_record_is_a_json_500(tmp_path: Path) -> None:

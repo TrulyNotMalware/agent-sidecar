@@ -200,7 +200,13 @@ recorded ids' rollouts under `CODEX_HOME` (`codex_session_files`).
 - **One in-flight turn per `user_id` (`X-User-Id` header)** — same constraint.
 - **Global cap** — `MAX_CONCURRENT` total; excess gets `429 busy`.
 - Session workspaces are SHA-256–keyed directories under `WORKSPACE_ROOT` (`root/XX/YYYY...`).
-- `mode=stateless` uses a temp workspace under `WORKSPACE_ROOT/.stateless/`, deleted after each turn.
+- `mode=stateless` uses a temp workspace under `WORKSPACE_ROOT/.stateless/`, deleted after each
+  turn together with what the CLI stored for it.
+- **A resume is bound to its `sessionKey`** for both providers: `sessionId` must be an id
+  that key was issued (recorded under `WORKSPACE_ROOT/.session-ids/`, outside the
+  workspaces), else `400` before the stream opens — both CLIs find a session id across
+  all of their sessions, whatever the cwd. claude sessions from before ids were recorded
+  count when their transcript is in the key's own project directory.
 
 ---
 
@@ -222,6 +228,11 @@ recorded ids' rollouts under `CODEX_HOME` (`codex_session_files`).
   (subscription) and `~/.claude.json` are for local testing only.
 - The merged system prompt goes to the CLI as a `0600` file (`--system-prompt-file`),
   not on argv (visible via `ps`, 128 KiB per argument on Linux).
+- `--resume <id>` finds a session in **any** project directory under
+  `CLAUDE_CONFIG_DIR`, not just the cwd's: the route checks the id against the key's
+  record first (`_preflight_resume`). A stateless turn's transcript (its project
+  directory, named after the temp cwd, and the entries named after its session id) is
+  removed once the CLI has exited — the SDK mode has no `--no-session-persistence`.
 - An API failure the CLI reports as a synthetic assistant message is not streamed as
   `text`; the error result that follows is the terminal `error` frame.
 
@@ -245,9 +256,8 @@ recorded ids' rollouts under `CODEX_HOME` (`codex_session_files`).
   settings, e.g. `writable_roots`, still apply). A `config.toml` that relied on
   `sandbox_mode = "danger-full-access"` must now set `CODEX_SANDBOX` instead.
 - The resume id follows `--`, so a value starting with `-` is never parsed as a
-  flag. `sessionId` must be a UUID, and for codex it must have been issued to the
-  same `sessionKey` (recorded under `WORKSPACE_ROOT/.session-ids/`, outside the
-  workspaces): codex resolves thread ids across every session in `CODEX_HOME`.
+  flag. `sessionId` must be a UUID issued to the same `sessionKey` (as for claude):
+  codex resolves thread ids across every session in `CODEX_HOME`.
   On resume codex may report the same or a new (forked) thread id — both are
   recorded; continue with the latest `session` id. `mode=stateless` runs with
   `--ephemeral` and cannot be resumed.

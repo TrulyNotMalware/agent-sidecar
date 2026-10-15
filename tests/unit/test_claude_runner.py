@@ -517,3 +517,38 @@ async def test_a_result_without_the_requested_structured_output_fails_the_turn(
         await _run(TurnSpec(prompt="hi", output_schema={"type": "object"}))
 
     assert exc_info.value.message == "claude returned no structured output"
+
+
+async def test_a_stateless_turn_leaves_nothing_under_the_config_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock
+
+    from sidecar.claude_runner import claude_project_dir
+
+    config = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    cwd = tmp_path / "stateless-ws"
+    cwd.mkdir()
+    sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
+    project = claude_project_dir(cwd)
+    assert project is not None
+    kept = config / "projects" / "-another-workspace" / "9b2e4c1d-0000-4000-8000-000000000000.jsonl"
+    for path in (project / f"{sid}.jsonl", config / "file-history" / sid / "v1", kept):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("what the CLI stored")
+    init = SystemMessage(subtype="init", data={"session_id": sid})
+    answer = AssistantMessage(content=[TextBlock(text="hi")], model="m")
+
+    async def run(*, ephemeral: bool) -> None:
+        _install_query(monkeypatch, init, answer, _success_result())
+        async for _ in claude_runner.run_turn(TurnSpec(prompt="hi", ephemeral=ephemeral), cwd=cwd):
+            pass
+
+    await run(ephemeral=False)
+    assert (project / f"{sid}.jsonl").exists()  # a session-mode turn keeps its transcript
+
+    await run(ephemeral=True)
+    assert not project.exists()
+    assert not (config / "file-history" / sid).exists()
+    assert kept.exists()  # other sessions are not touched

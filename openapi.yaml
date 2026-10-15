@@ -100,8 +100,8 @@ paths:
         under `CODEX_HOME`) and the record of those ids. Its sessions cannot be
         resumed afterwards; the next turn on the key starts fresh. Sessions run
         before this sidecar version recorded claude session ids are found by
-        their workspace only. Safe to retry. Stateless turns are not recorded
-        under any sessionKey, so this endpoint does not reach them.
+        their workspace only. Safe to retry. Stateless turns leave nothing to
+        delete: their workspace and transcript are removed after each turn.
       operationId: deleteSession
       parameters:
         - name: sessionKey
@@ -253,8 +253,10 @@ components:
             Session id (a UUID) from a prior `session` event. When provided,
             resumes that conversation; when null or `""`, starts fresh under
             sessionKey. Rejected with `400` when it is not a UUID, when
-            `mode=stateless`, or (codex provider) when it was not issued for this
-            sessionKey.
+            `mode=stateless`, or when it was not issued for this sessionKey
+            (both CLIs would otherwise find any key's session by its id; claude
+            sessions from before ids were recorded count as the key's when
+            their transcript is in the key's own workspace).
         systemPrompt:
           type:
             - string
@@ -282,9 +284,11 @@ components:
             `session` (default): persist workspace under a sessionKey hash for
             resume.
             `stateless`: a fresh ephemeral workspace is created per request and
-            removed when the turn ends; the returned `sessionId` is not
-            resumable (codex runs with `--ephemeral`), and sending a
-            `sessionId` with `mode=stateless` is rejected with `400`.
+            removed when the turn ends, together with what the CLI stored for
+            the turn (claude: its transcript is deleted once the CLI exits;
+            codex runs with `--ephemeral`). The returned `sessionId` cannot be
+            resumed under any sessionKey, and sending a `sessionId` with
+            `mode=stateless` is rejected with `400`.
             In both modes a sessionKey has at most one in-flight turn (the
             cancel endpoint addresses turns by sessionKey): a concurrent
             request for it is rejected with `429 busy`.
