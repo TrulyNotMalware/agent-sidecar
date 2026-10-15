@@ -240,6 +240,34 @@ def test_claude_structured_output(start_sidecar: StartSidecar, fakes: StartFakes
     assert json.loads(done["finalText"]) == done["structuredOutput"]
 
 
+def test_claude_session_delete_removes_what_the_cli_stored(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
+    srv, _f = _claude(start_sidecar, fakes)
+    config = srv.server_log.parent / "home" / ".claude"  # the server's CLAUDE_CONFIG_DIR
+
+    gone = converse(srv.port, "real-claude-gone", prompt="FORGET-ME")
+    kept = converse(srv.port, "real-claude-kept", prompt="KEEP-ME")
+    gone_id, kept_id = gone.events[0][1]["sessionId"], kept.events[0][1]["sessionId"]
+
+    def stored(text: str) -> list[Path]:
+        return [
+            p for p in config.rglob("*") if p.is_file() and text in p.read_text(errors="ignore")
+        ]
+
+    precondition(bool(stored("FORGET-ME")), "the CLI stored the first conversation")
+    status, body = srv.request("DELETE", "/v1/sessions/real-claude-gone")
+
+    assert (status, body) == (200, {"status": "deleted", "sessionKey": "real-claude-gone"})
+    assert stored("FORGET-ME") == []
+    assert stored("KEEP-ME") != []
+    assert not list(config.rglob(f"*{gone_id}*"))
+    assert list(config.rglob(f"*{kept_id}*"))
+    # The conversation cannot be resumed any more.
+    resumed = converse(srv.port, "real-claude-gone", body={"sessionId": gone_id})
+    assert resumed.event_names[-1] == "error"
+
+
 def test_claude_api_error_is_the_terminal_frame_scrubbed(
     start_sidecar: StartSidecar, fakes: StartFakes
 ) -> None:
@@ -421,3 +449,27 @@ def test_codex_structured_output(
     assert json.loads(done["finalText"]) == done["structuredOutput"]  # as with claude
     [request] = _requests(f["record"])
     assert request["text"]["format"]["schema"] == ANSWER_SCHEMA
+
+
+@requires_codex
+def test_codex_session_delete_removes_the_rollouts(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
+    srv, _f = _codex(start_sidecar, fakes, tmp_path)
+    codex_home = tmp_path / "codex-home"
+
+    gone = converse(srv.port, "real-codex-gone")
+    kept = converse(srv.port, "real-codex-kept")
+    gone_id, kept_id = gone.events[0][1]["sessionId"], kept.events[0][1]["sessionId"]
+    precondition(bool(list(codex_home.rglob(f"rollout-*{gone_id}.jsonl"))), "codex kept a rollout")
+
+    status, _ = srv.request("DELETE", "/v1/sessions/real-codex-gone")
+
+    assert status == 200
+    assert not list(codex_home.rglob(f"*{gone_id}*"))
+    assert list(codex_home.rglob(f"rollout-*{kept_id}.jsonl"))
+    # The id record went too: a resume is refused before codex runs.
+    status, body = srv.post_json(
+        "/v1/converse", {"sessionKey": "real-codex-gone", "prompt": "hi", "sessionId": gone_id}
+    )
+    assert (status, body["code"]) == (400, "bad_request")

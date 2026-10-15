@@ -1,7 +1,9 @@
 import asyncio
 import collections
 import contextlib
-from collections.abc import AsyncGenerator, Callable, Iterator
+import os
+import re
+from collections.abc import AsyncGenerator, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ from .mcp import (
     static_mcp_servers,
 )
 from .observability.logging import get_logger
+from .session import is_session_id
 
 # The SDK launches the CLI with the sidecar's full environment and only lets options
 # add or override keys. Blank the secrets that are the sidecar's own business so the
@@ -37,6 +40,41 @@ _STDERR_LOG_LINES = 200  # per turn; the tail still reaches error_detail
 _STDERR_DETAIL_CHARS = 2000  # of the stderr tail quoted in error_detail
 
 log = get_logger("sidecar.claude")
+
+
+# The CLI names a project directory after the cwd, every character outside
+# [A-Za-z0-9] replaced by "-"; a longer name is cut and suffixed with a hash.
+_PROJECT_NAME_MAX = 200
+_NOT_IN_PROJECT_NAME = re.compile(r"[^A-Za-z0-9]")
+
+
+def claude_config_dir() -> Path:
+    """Where the CLI keeps its state: $CLAUDE_CONFIG_DIR, else ~/.claude."""
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(configured) if configured else Path.home() / ".claude"
+
+
+def claude_session_files(cwd: Path, session_ids: Iterable[str]) -> list[Path]:
+    """What the CLI stored for the sessions run in `cwd` (best effort, CLI internals).
+
+    The project directory of `cwd` (transcripts, subagent logs) and, for each
+    session id, its entries anywhere one level down in the config dir
+    (`file-history/<id>`, `todos/<id>-…`, `session-env/<id>`, a resumed session's
+    transcript in another project directory, …). Ids that are not UUIDs are skipped.
+    """
+    config = claude_config_dir()
+    found: list[Path] = []
+    # process.cwd() as the CLI sees it: absolute, symlinks resolved.
+    name = _NOT_IN_PROJECT_NAME.sub("-", str(cwd.resolve()))
+    if len(name) <= _PROJECT_NAME_MAX:
+        found.append(config / "projects" / name)
+    # A longer name ends in a hash of the path: only the session ids can find it.
+    for sid in filter(is_session_id, session_ids):
+        found += config.glob(f"*/{sid}*")
+        found += config.glob(f"projects/*/{sid}*")
+    unique = list(dict.fromkeys(found))
+    # A transcript inside the project directory goes with the directory.
+    return [p for p in unique if not any(p != q and p.is_relative_to(q) for q in unique)]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

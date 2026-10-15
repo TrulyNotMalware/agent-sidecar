@@ -56,3 +56,36 @@ def test_session_id_record_lives_outside_the_workspace(tmp_path: Path) -> None:
     remember_session_id("k1", "aaaa-1", root=tmp_path)
 
     assert not any(p.is_file() for p in ws.rglob("*"))
+
+
+def test_workspace_path_does_not_create_the_workspace(tmp_path: Path) -> None:
+    from sidecar.session import workspace_path
+
+    path = workspace_path("k1", root=tmp_path)
+
+    assert not path.exists()
+    assert workspace_for("k1", root=tmp_path) == path
+
+
+def test_remove_paths_counts_what_existed(tmp_path: Path) -> None:
+    from sidecar.session import remove_paths
+
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "f").write_text("x")
+    file = tmp_path / "file"
+    file.write_text("x")
+    link = tmp_path / "link"
+    link.symlink_to(tree)  # a link is removed, not what it points to
+
+    assert remove_paths([link, tree, file, tmp_path / "missing"]) == 3
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_only_uuids_count_as_session_ids() -> None:
+    from sidecar.session import is_session_id
+
+    assert is_session_id("01a0ec1c-14d2-7d12-aaa7-47100d58f161")
+    assert not is_session_id("sess-fake-1")
+    assert not is_session_id("*")
+    assert not is_session_id("../01a0ec1c-14d2-7d12-aaa7-47100d58f161")

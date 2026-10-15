@@ -3,7 +3,7 @@ import contextlib
 import json
 import os
 import signal
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,7 @@ from .events import (
 )
 from .mcp import mcp_tool_name, private_file
 from .observability.logging import get_logger
+from .session import is_session_id
 
 log = get_logger("sidecar.codex")
 
@@ -37,16 +38,33 @@ _KILL_WAIT_SEC = 5.0
 _EXIT_WAIT_SEC = 5.0
 
 
+def codex_home() -> Path:
+    """Where codex keeps its state: $CODEX_HOME, else ~/.codex."""
+    configured = os.environ.get("CODEX_HOME")
+    return Path(configured) if configured else Path.home() / ".codex"
+
+
 def codex_auth_file(configured: Path | None = None) -> Path:
     """Where codex keeps auth.json: CODEX_AUTH_PATH if set, else $CODEX_HOME (~/.codex).
 
     `codex login` writes, and `codex exec` reads, $CODEX_HOME/auth.json; the sidecar's
     readiness check and startup materialization must look at the same file.
     """
-    if configured is not None:
-        return configured
-    codex_home = os.environ.get("CODEX_HOME")
-    return (Path(codex_home) if codex_home else Path.home() / ".codex") / "auth.json"
+    return configured if configured is not None else codex_home() / "auth.json"
+
+
+def codex_session_files(session_ids: Iterable[str]) -> list[Path]:
+    """The rollouts (transcripts) codex stored for these thread ids.
+
+    codex files them by date, `sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`
+    (`archived_sessions/` once archived). Ids that are not UUIDs are skipped.
+    """
+    home = codex_home()
+    found: list[Path] = []
+    for sid in filter(is_session_id, session_ids):
+        for kept in ("sessions", "archived_sessions"):
+            found += (home / kept).rglob(f"rollout-*{sid}.jsonl")
+    return found
 
 
 async def ensure_codex_auth(auth_path: Path | None = None) -> bool:

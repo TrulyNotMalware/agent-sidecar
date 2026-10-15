@@ -90,6 +90,65 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
 
+  /v1/sessions/{sessionKey}:
+    delete:
+      summary: Delete what is stored for a sessionKey (may contain "/").
+      description: |
+        Removes the sessionKey's workspace, the provider CLI's transcripts of its
+        sessions (claude: under `CLAUDE_CONFIG_DIR`, found by the workspace and
+        by the session ids issued to the key; codex: the rollouts of those ids
+        under `CODEX_HOME`) and the record of those ids. Its sessions cannot be
+        resumed afterwards; the next turn on the key starts fresh. Sessions run
+        before this sidecar version recorded claude session ids are found by
+        their workspace only. Safe to retry. Stateless turns are not recorded
+        under any sessionKey, so this endpoint does not reach them.
+      operationId: deleteSession
+      parameters:
+        - name: sessionKey
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, sessionKey]
+                properties:
+                  status:
+                    type: string
+                    enum: [deleted]
+                  sessionKey:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Nothing is stored for the sessionKey.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: |
+            A turn holds the sessionKey (including one still closing its CLI), or
+            another delete of it is running. While a delete runs, a turn on the
+            key gets `429` too.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: A file could not be removed (details in the sidecar log); retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /v1/sessions/{sessionKey}/cancel:
     post:
       summary: Cancel an in-flight turn for a sessionKey (may contain "/").

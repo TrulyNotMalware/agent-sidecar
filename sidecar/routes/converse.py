@@ -138,8 +138,10 @@ async def converse(
             output_schema=body.output_schema,
         )
         events = run_turn(spec, cwd=cwd)
-        if body.mode == "stateless" or settings.provider != "codex":
-            return events  # only codex resumes are bound to recorded ids
+        if body.mode == "stateless":
+            return events  # nothing to resume or delete later
+        # codex resumes are bound to the recorded ids; DELETE /v1/sessions finds a
+        # session's transcripts by them (both providers).
         return _remembering_session_ids(events, body.session_key, settings.workspace_root)
 
     @asynccontextmanager

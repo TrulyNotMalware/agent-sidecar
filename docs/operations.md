@@ -361,7 +361,8 @@ in-cluster scrapers and probes can hit them without secret distribution.
 ## Error model
 
 - HTTP 4xx is returned **before** a turn starts: `400 bad_request`,
-  `401 unauthorized`, `404 not_found` (cancel target absent), `429 busy`.
+  `401 unauthorized`, `404 not_found` (cancel target absent, nothing stored for a
+  deleted sessionKey), `429 busy`.
 - After the SSE stream opens, every error is reported as the terminal
   `event: error` frame. No HTTP status changes mid-stream.
 - SSE error codes: `timeout | sdk_error | internal | cancelled` (`busy` is always the pre-stream `429`).
@@ -438,7 +439,8 @@ closing the CLI. Consequences:
   (`CLAUDE_CONFIG_DIR`: claude transcripts, needed to resume) and `codex/`
   (`CODEX_HOME`: auth and rollouts). Mount one volume there; an `emptyDir` loses
   conversations when the Pod goes away, a persistent volume keeps them. Size it
-  for transcripts too, and clean all three together (keep `.session-ids/`).
+  for transcripts too, and clean all three together (keep `.session-ids/`), or
+  per conversation with `DELETE /v1/sessions/{sessionKey}`.
 - **Image.** Runs as uid/gid 10001 on `python:<minor>-slim-bookworm` (the minor is
   the Dockerfile's `FROM`) with Node.js 24 LTS and a pinned `@openai/codex`; the
   claude CLI is the one bundled with `claude-agent-sdk`. Python dependencies are
@@ -449,8 +451,13 @@ closing the CLI. Consequences:
   user-namespace support from the node). Upgrading from an image that ran as root:
   `chown -R 10001:10001` an existing state volume first.
 - **Workspace cardinality.** `WORKSPACE_ROOT` accumulates one sub-directory per
-  unique `sessionKey` in session mode. Mount it on a volume that has retention
-  policy / cleanup — the sidecar does not GC.
+  unique `sessionKey` in session mode. The sidecar does not GC on its own: delete a
+  finished conversation with `DELETE /v1/sessions/{sessionKey}` (its workspace,
+  the CLI's transcripts and its session id record; `429` while a turn holds the
+  key), or mount it on a volume that has a retention policy / cleanup.
+  Conversations from before this release recorded no claude session ids, so for
+  them the delete finds the transcripts of the key's workspace but not entries the
+  CLI keeps elsewhere by session id (`file-history/`, `todos/`, …).
 - **Tool name cardinality.** `sidecar_tool_calls_total` labels by `tool_name`.
   If your MCP exposes a vast number of distinct tool names, consider
   pre-aggregating in the consumer or relabel rules in Prometheus.

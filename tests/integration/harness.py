@@ -284,9 +284,14 @@ class SidecarServer:
     server_log: Path
 
     def post_json(self, path: str, payload: dict[str, Any] | None = None) -> tuple[int, Any]:
+        return self.request("POST", path, payload)
+
+    def request(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> tuple[int, Any]:
         body = json.dumps(payload).encode() if payload is not None else b""
         request = (
-            f"POST {path} HTTP/1.1\r\nHost: localhost\r\n"
+            f"{method} {path} HTTP/1.1\r\nHost: localhost\r\n"
             f"Authorization: Bearer {BEARER}\r\nContent-Type: application/json\r\n"
             f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
         ).encode() + body

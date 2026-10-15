@@ -54,6 +54,7 @@ sidecar/                 # Application package
 ├── routes/
 │   ├── converse.py      # POST /v1/converse — main SSE stream
 │   ├── cancel.py        # POST /v1/sessions/{key}/cancel
+│   ├── sessions.py      # DELETE /v1/sessions/{key}
 │   ├── health.py        # GET /healthz  GET /readyz
 │   └── metrics.py       # GET /metrics (Prometheus)
 └── observability/
@@ -126,6 +127,16 @@ Field shapes are the source-of-truth contract in `openapi.yaml`.
 
 Returns `202` immediately. The stream ends with `error: cancelled` right away; the CLI is
 closed in the background and the `sessionKey` stays busy (`429`) until it has exited.
+
+### `DELETE /v1/sessions/{session_key}`
+
+Removes the key's workspace, the CLI's transcripts of its sessions and their id record
+(`WORKSPACE_ROOT/.session-ids/`, recorded for both providers): `200`, `404` when nothing
+is stored, `429` while a turn holds the key (a turn on the key gets `429` while the
+delete runs — `Admission.exclusive`). claude: the workspace's project directory under
+`CLAUDE_CONFIG_DIR/projects/` plus every entry named after a recorded session id one
+level below `CLAUDE_CONFIG_DIR` (CLI internals: `claude_session_files`). codex: the
+recorded ids' rollouts under `CODEX_HOME` (`codex_session_files`).
 
 ### `GET /healthz` — always 200
 ### `GET /readyz` — 200 if the provider CLI (claude: the SDK's bundled binary, else PATH) + auth credential present, else 503
@@ -368,7 +379,7 @@ sends `WWW-Authenticate: Bearer`.
 On `/v1/converse` only pre-stream errors are sent with that status and a JSON body:
 `bad_request`, `unauthorized`, `busy`, and `internal` when a file the turn needs cannot
 be read before it starts (the base system prompt, a codex session record) — plus
-`not_found` on `/cancel`. Once the
+`not_found` on `/cancel` and `DELETE /v1/sessions/{key}`. Once the
 SSE stream has opened the response is already HTTP 200, so `timeout`, `sdk_error`,
 `internal`, and `cancelled` surface **only** as a terminal `event: error` frame —
 their HTTP code is never put on the wire for the converse response.
@@ -465,8 +476,9 @@ Key manifests:
 ### Operational constraints
 
 - **1 Pod = 1 Anthropic identity.** Multiple identities → multiple Pods.
-- `WORKSPACE_ROOT` is **not GC'd** — session directories accumulate. Use an external cleanup
-  policy (CronJob, emptyDir with size limit, etc.).
+- `WORKSPACE_ROOT` is **not GC'd** — session directories accumulate. Delete finished
+  sessions with `DELETE /v1/sessions/{key}`, or use an external cleanup policy (CronJob,
+  emptyDir with size limit, etc.).
 - `CLAUDE.md` is re-read on every request (ConfigMap hot-reload, no restart needed).
 - `tini` is required as PID-1 to reap zombie claude subprocesses. Do not remove from Dockerfile.
 - The image runs as uid 10001; all mutable state is under `/var/lib/claude-sidecar`
@@ -485,6 +497,7 @@ Key manifests:
 admission.reserve(turn)       # sessionKey + X-User-Id + global cap, all or nothing; raises ApiError(BUSY)
 admission.release(turn)       # no-op unless `turn` holds the reservation
 admission.get(session_key)    # → Turn | None (the cancel route)
+with admission.exclusive(session_key): ...  # no turn may start on the key; BUSY if one holds it
 await admission.drain(grace_sec)  # stop all turns, wait for cleanup; returns force-cancelled count
 ```
 
