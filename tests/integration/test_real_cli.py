@@ -219,6 +219,27 @@ def test_claude_run_controls_reach_the_cli(start_sidecar: StartSidecar, fakes: S
     }
 
 
+ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+    "additionalProperties": False,
+}
+
+
+def test_claude_structured_output(start_sidecar: StartSidecar, fakes: StartFakes) -> None:
+    srv, _f = _claude(start_sidecar, fakes)
+
+    r = converse(srv.port, "real-claude-schema", body={"outputSchema": ANSWER_SCHEMA})
+
+    # claude answers through its StructuredOutput tool, which the stream shows as a tool.
+    assert r.event_names == ["session", "tool_use", "tool_result", "done"]
+    assert r.events[1][1]["name"] == "StructuredOutput"
+    done = r.events[-1][1]
+    assert done["structuredOutput"] == {"answer": "final answer"}
+    assert json.loads(done["finalText"]) == done["structuredOutput"]
+
+
 def test_claude_api_error_is_the_terminal_frame_scrubbed(
     start_sidecar: StartSidecar, fakes: StartFakes
 ) -> None:
@@ -384,3 +405,19 @@ def test_codex_model_reaches_the_api(
 
     assert first.event_names[-1] == resumed.event_names[-1] == "done"
     assert [r["model"] for r in _requests(f["record"])] == ["gpt-test", "gpt-test"]
+
+
+@requires_codex
+def test_codex_structured_output(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
+    srv, f = _codex(start_sidecar, fakes, tmp_path)
+
+    r = converse(srv.port, "real-codex-schema", body={"outputSchema": ANSWER_SCHEMA})
+
+    assert r.event_names[-1] == "done"
+    done = r.events[-1][1]
+    assert done["structuredOutput"] == {"answer": "final answer"}
+    assert json.loads(done["finalText"]) == done["structuredOutput"]  # as with claude
+    [request] = _requests(f["record"])
+    assert request["text"]["format"]["schema"] == ANSWER_SCHEMA

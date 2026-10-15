@@ -482,3 +482,38 @@ async def test_run_controls_reach_the_cli_options(monkeypatch: pytest.MonkeyPatc
     await _run(TurnSpec(prompt="hi", model="claude-a", max_turns=3, max_budget_usd=0.25))
     assert (seen["options"].model, seen["options"].max_turns) == ("claude-a", 3)
     assert seen["options"].max_budget_usd == 0.25
+
+
+async def test_output_schema_asks_the_cli_for_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    result = ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="s",
+        result="",
+        structured_output={"answer": "42"},
+    )
+    _install_query(monkeypatch, result)
+    seen = _install_fake_query_options(monkeypatch)
+
+    [*_, done] = await _run(TurnSpec(prompt="hi", output_schema=schema))
+
+    assert seen["options"].output_format == {"type": "json_schema", "schema": schema}
+    assert isinstance(done, DoneEvent)
+    assert done.structured_output == {"answer": "42"}
+
+
+async def test_a_result_without_the_requested_structured_output_fails_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_query(monkeypatch, _success_result())
+
+    with pytest.raises(ApiError) as exc_info:
+        await _run(TurnSpec(prompt="hi", output_schema={"type": "object"}))
+
+    assert exc_info.value.message == "claude returned no structured output"

@@ -97,7 +97,8 @@ Auth: `Authorization: Bearer <secret>` required.
   "model": "...",                    // optional – must be in ALLOWED_MODELS
   "maxTurns": 5,                     // optional – ≤ MAX_TURNS (claude only)
   "maxBudgetUsd": 0.5,               // optional – ≤ MAX_BUDGET_USD (claude only)
-  "timeoutSec": 60                   // optional – ≤ TURN_TIMEOUT_SEC
+  "timeoutSec": 60,                  // optional – ≤ TURN_TIMEOUT_SEC
+  "outputSchema": {"type": "object"} // optional – JSON Schema; parsed answer in done.structuredOutput
 }
 ```
 Run controls are checked before the stream opens (`400 bad_request` when a value is
@@ -112,7 +113,8 @@ event: text         {"delta": "..."}
 event: tool_use     {"name": "...", "args": {...}, "toolUseId": "..."}
 event: tool_result  {"name": "...", "ok": true, "toolUseId": "..."}
 event: done         {"finalText": "...", "usage": {"inputTokens": N, "outputTokens": N, "cacheReadInputTokens": N, "cacheCreationInputTokens": N},
-                     "costUsd": N, "numTurns": N, "stopReason": "...", "durationMs": N}   ← cost/turns/stop: claude only, else null
+                     "costUsd": N, "numTurns": N, "stopReason": "...", "durationMs": N,
+                     "structuredOutput": {...}}   ← cost/turns/stop: claude only, else null; structuredOutput: with outputSchema
 event: error        {"code": "...", "message": "..."}   ← terminal, replaces done
 ```
 Exactly one `session` first, then zero or more `text` / `tool_use` / `tool_result`,

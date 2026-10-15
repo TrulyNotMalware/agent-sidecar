@@ -1,4 +1,5 @@
-from typing import Literal, Self
+import json
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -7,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SESSION_ID_PATTERN = (
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+
+MAX_OUTPUT_SCHEMA_BYTES = 64 * 1024
 
 
 class ConverseRequest(BaseModel):
@@ -30,6 +33,8 @@ class ConverseRequest(BaseModel):
         default=None, alias="maxBudgetUsd", gt=0, allow_inf_nan=False
     )
     timeout_sec: int | None = Field(default=None, alias="timeoutSec", ge=1)
+    # A JSON Schema the final answer must match; it arrives parsed as done.structuredOutput.
+    output_schema: dict[str, Any] | None = Field(default=None, alias="outputSchema")
 
     @field_validator("session_id", mode="before")
     @classmethod
@@ -50,6 +55,15 @@ class ConverseRequest(BaseModel):
                 v.encode("utf-8")
             except UnicodeEncodeError:
                 raise ValueError("must be valid Unicode text (no lone surrogates)") from None
+        return v
+
+    @field_validator("output_schema")
+    @classmethod
+    def _bounded_schema(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        # claude takes it on argv (--json-schema), where Linux caps one argument at
+        # 128 KiB; a real schema is a few KiB.
+        if v is not None and len(json.dumps(v)) > MAX_OUTPUT_SCHEMA_BYTES:
+            raise ValueError(f"must be at most {MAX_OUTPUT_SCHEMA_BYTES} bytes as JSON")
         return v
 
     @model_validator(mode="after")

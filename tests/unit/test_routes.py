@@ -326,6 +326,7 @@ def test_done_frame_shape() -> None:
         "numTurns": 2,
         "stopReason": "end_turn",
         "durationMs": 1200,
+        "structuredOutput": None,
     }
 
 
@@ -703,3 +704,19 @@ def test_a_limit_above_the_setting_is_a_400_before_the_stream(client: TestClient
         "message": "timeoutSec may not exceed 90 (TURN_TIMEOUT_SEC)",
     }
     assert len(r.headers["x-turn-id"]) == 32
+
+
+def test_output_schema_reaches_the_runner(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _install_recording_runner(monkeypatch)
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k-schema", "prompt": "hi", "outputSchema": schema},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 200
+    assert recorded["output_schema"] == schema

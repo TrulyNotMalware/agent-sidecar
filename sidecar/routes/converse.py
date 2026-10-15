@@ -135,6 +135,7 @@ async def converse(
             model=limits.model,
             max_turns=limits.max_turns,
             max_budget_usd=limits.max_budget_usd,
+            output_schema=body.output_schema,
         )
         events = run_turn(spec, cwd=cwd)
         if body.mode == "stateless" or settings.provider != "codex":
@@ -467,6 +468,7 @@ def _to_sse(ev: RunnerEvent) -> dict[str, str]:
                 "numTurns": ev.num_turns,
                 "stopReason": ev.stop_reason,
                 "durationMs": ev.duration_ms,
+                "structuredOutput": ev.structured_output,
             },
         )
     raise TypeError(f"unknown runner event: {type(ev).__name__}")

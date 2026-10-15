@@ -105,6 +105,9 @@ async def run_turn(
         options_kwargs["max_turns"] = spec.max_turns
     if spec.max_budget_usd is not None:
         options_kwargs["max_budget_usd"] = spec.max_budget_usd
+    if spec.output_schema is not None:
+        # Not secret, so argv (--json-schema) is fine; its size is bounded by the request.
+        options_kwargs["output_format"] = {"type": "json_schema", "schema": spec.output_schema}
     static_servers = await asyncio.to_thread(static_mcp_servers, spec.mcp_config_path)
     merged_servers = per_turn_mcp_servers(
         static_servers,
@@ -134,7 +137,12 @@ async def run_turn(
             options_kwargs["mcp_servers"] = str(mcp_path)
         elif spec.mcp_config_path is not None:
             options_kwargs["mcp_servers"] = str(spec.mcp_config_path)
-        run = _run(options_kwargs, prompt=spec.prompt, token_streaming=spec.token_streaming)
+        run = _run(
+            options_kwargs,
+            prompt=spec.prompt,
+            token_streaming=spec.token_streaming,
+            structured=spec.output_schema is not None,
+        )
         async with contextlib.aclosing(run) as events:
             async for ev in events:
                 yield ev
@@ -193,11 +201,16 @@ def _done_event(message: object, final_text_parts: list[str]) -> DoneEvent:
         cost_usd=float(cost) if isinstance(cost, int | float) else None,
         num_turns=num_turns if isinstance(num_turns, int) else None,
         stop_reason=stop_reason if isinstance(stop_reason, str) and stop_reason else None,
+        structured_output=getattr(message, "structured_output", None),
     )
 
 
 async def _run(
-    options_kwargs: dict[str, Any], *, prompt: str, token_streaming: bool = False
+    options_kwargs: dict[str, Any],
+    *,
+    prompt: str,
+    token_streaming: bool = False,
+    structured: bool = False,
 ) -> AsyncGenerator[RunnerEvent, None]:
     # Lazy import keeps the rest of the app usable without the SDK (e.g. auth/health tests).
     from claude_agent_sdk import (
@@ -255,6 +268,12 @@ async def _run(
             if message.is_error:
                 progress.result_error = _result_error(
                     message.errors, message.result, message.subtype
+                )
+            elif structured and message.structured_output is None:
+                # The CLI fails the turn itself when no attempt matched the schema;
+                # this only guards against a result that silently lacks it.
+                progress.result_error = ApiError(
+                    ErrorCode.SDK_ERROR, "claude returned no structured output"
                 )
             else:
                 yield _done_event(message, progress.final_text_parts)

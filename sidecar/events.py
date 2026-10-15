@@ -83,6 +83,8 @@ class TurnSpec:
     model: str | None = None
     max_turns: int | None = None
     max_budget_usd: float | None = None
+    # A JSON Schema the final answer must match (DoneEvent.structured_output).
+    output_schema: dict[str, Any] | None = None
 
 
 class Runner(Protocol):
