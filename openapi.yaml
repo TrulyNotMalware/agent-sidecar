@@ -351,6 +351,33 @@ components:
             tool call) arrive only as `text` deltas.
         usage:
           $ref: '#/components/schemas/Usage'
+        costUsd:
+          type:
+            - number
+            - 'null'
+          minimum: 0
+          description: |
+            The turn's cost in USD as the claude CLI estimates it from its price
+            table (not an invoice). `null` with codex, which reports none.
+        numTurns:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+          description: Model round trips in this turn (claude). `null` with codex.
+        stopReason:
+          type:
+            - string
+            - 'null'
+          description: |
+            Why the model stopped, as the API reported it (e.g. `end_turn`,
+            `max_tokens`: the answer was cut off). claude only; `null` with codex.
+        durationMs:
+          type: integer
+          minimum: 0
+          description: |
+            Wall-clock milliseconds from the start of the turn to `done`, measured by
+            the sidecar (both providers).
 
     SseError:
       type: object

@@ -293,6 +293,42 @@ def test_terminal_error_mapping() -> None:
     )
 
 
+def test_done_frame_shape() -> None:
+    import json
+
+    from sidecar.events import DoneEvent
+    from sidecar.routes.converse import _to_sse
+
+    frame = _to_sse(
+        DoneEvent(
+            final_text="ok",
+            input_tokens=1,
+            output_tokens=2,
+            cache_read_input_tokens=3,
+            cache_creation_input_tokens=None,
+            cost_usd=0.5,
+            num_turns=2,
+            stop_reason="end_turn",
+            duration_ms=1200,
+        )
+    )
+
+    assert frame["event"] == "done"
+    assert json.loads(frame["data"]) == {
+        "finalText": "ok",
+        "usage": {
+            "inputTokens": 1,
+            "outputTokens": 2,
+            "cacheReadInputTokens": 3,
+            "cacheCreationInputTokens": None,
+        },
+        "costUsd": 0.5,
+        "numTurns": 2,
+        "stopReason": "end_turn",
+        "durationMs": 1200,
+    }
+
+
 def test_stream_carries_the_turn_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _install_recording_runner(monkeypatch)
 

@@ -172,12 +172,18 @@ def _done_event(message: object, final_text_parts: list[str]) -> DoneEvent:
     """The terminal event for a successful result message."""
     result = getattr(message, "result", None)
     usage = _extract_usage(message)
+    cost = getattr(message, "total_cost_usd", None)
+    num_turns = getattr(message, "num_turns", None)
+    stop_reason = getattr(message, "stop_reason", None)
     return DoneEvent(
         final_text=result if isinstance(result, str) and result else "".join(final_text_parts),
         input_tokens=int(usage.get("input_tokens", 0) or 0),
         output_tokens=int(usage.get("output_tokens", 0) or 0),
         cache_read_input_tokens=usage.get("cache_read_input_tokens"),
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
+        cost_usd=float(cost) if isinstance(cost, int | float) else None,
+        num_turns=num_turns if isinstance(num_turns, int) else None,
+        stop_reason=stop_reason if isinstance(stop_reason, str) and stop_reason else None,
     )
 
 

@@ -102,7 +102,8 @@ event: session      {"sessionId": "..."}
 event: text         {"delta": "..."}
 event: tool_use     {"name": "...", "args": {...}, "toolUseId": "..."}
 event: tool_result  {"name": "...", "ok": true, "toolUseId": "..."}
-event: done         {"finalText": "...", "usage": {"inputTokens": N, "outputTokens": N, "cacheReadInputTokens": N, "cacheCreationInputTokens": N}}
+event: done         {"finalText": "...", "usage": {"inputTokens": N, "outputTokens": N, "cacheReadInputTokens": N, "cacheCreationInputTokens": N},
+                     "costUsd": N, "numTurns": N, "stopReason": "...", "durationMs": N}   ← cost/turns/stop: claude only, else null
 event: error        {"code": "...", "message": "..."}   ← terminal, replaces done
 ```
 Exactly one `session` first, then zero or more `text` / `tool_use` / `tool_result`,
@@ -283,6 +284,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `sidecar_inflight` | Gauge | — |
 | `sidecar_tool_calls_total` | Counter | `tool_name`, `outcome` |
 | `sidecar_tokens_total` | Counter | `kind` (input\|output\|cache_read\|cache_creation) |
+| `sidecar_cost_usd_total` | Counter | — (claude's cost estimate; codex reports none) |
+| `sidecar_time_to_first_text_seconds` | Histogram | — |
 
 > `sidecar_tool_calls_total` is labeled by `tool_name`. If you expose many distinct MCP tool
 > names, apply Prometheus relabeling rules to cap cardinality.

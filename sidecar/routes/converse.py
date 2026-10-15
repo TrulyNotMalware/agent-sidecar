@@ -398,6 +398,10 @@ def _to_sse(ev: RunnerEvent) -> dict[str, str]:
                     "cacheReadInputTokens": ev.cache_read_input_tokens,
                     "cacheCreationInputTokens": ev.cache_creation_input_tokens,
                 },
+                "costUsd": ev.cost_usd,
+                "numTurns": ev.num_turns,
+                "stopReason": ev.stop_reason,
+                "durationMs": ev.duration_ms,
             },
         )
     raise TypeError(f"unknown runner event: {type(ev).__name__}")

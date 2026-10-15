@@ -8,7 +8,7 @@ from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 from sidecar import claude_runner
 from sidecar.claude_runner import ClaudePolicy
 from sidecar.errors import ApiError, ErrorCode
-from sidecar.events import RunnerEvent, TurnSpec
+from sidecar.events import DoneEvent, RunnerEvent, TurnSpec
 
 
 def _install_fake_query(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -191,6 +191,47 @@ def _install_failing_query(
         raise exc
 
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+
+def _install_query(monkeypatch: pytest.MonkeyPatch, *messages: Message) -> None:
+    import claude_agent_sdk
+
+    async def fake_query(
+        *, prompt: str, options: ClaudeAgentOptions
+    ) -> AsyncGenerator[Message, None]:
+        for m in messages:
+            yield m
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+
+async def test_done_carries_cost_turns_and_stop_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=2,
+        session_id="s",
+        stop_reason="end_turn",
+        total_cost_usd=0.0123,
+        usage={"input_tokens": 5, "output_tokens": 7},
+        result="answer",
+    )
+    _install_query(monkeypatch, result)
+
+    [*_, done] = await _run()
+
+    assert done == DoneEvent(
+        final_text="answer",
+        input_tokens=5,
+        output_tokens=7,
+        cache_read_input_tokens=None,
+        cache_creation_input_tokens=None,
+        cost_usd=0.0123,
+        num_turns=2,
+        stop_reason="end_turn",
+    )
 
 
 def _error_result(subtype: str = "success", errors: list[str] | None = None) -> ResultMessage:

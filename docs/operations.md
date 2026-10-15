@@ -338,7 +338,7 @@ that opens a prompt-injection vector where the model invents IDs.
 |---|---|---|
 | `/healthz` | none | Liveness — process responding. |
 | `/readyz` | none | Readiness — the provider's CLI (the SDK's bundled `claude`, else `claude` on PATH; `codex` on PATH when `PROVIDER=codex`) **and** a matching identity present. 503 with `detail` when not ready. |
-| `/metrics` | none | Prometheus text format with five collectors. |
+| `/metrics` | none | Prometheus text format with seven collectors. |
 
 Metrics:
 
@@ -349,6 +349,8 @@ Metrics:
 | `sidecar_inflight` | gauge | — (turns holding a slot, including the time spent closing their CLI) |
 | `sidecar_tool_calls_total` | counter | `tool_name`, `outcome` ∈ `{started, ok, error}` |
 | `sidecar_tokens_total` | counter | `kind` ∈ `{input, output, cache_read, cache_creation}` (codex's `input` includes its cache reads, claude's does not) |
+| `sidecar_cost_usd_total` | counter | — (the claude CLI's estimate from its price table, the sum of `done.costUsd`; codex reports no cost) |
+| `sidecar_time_to_first_text_seconds` | histogram | — (turn start to its first `text` event; turns without text are not observed) |
 
 `/metrics` and `/healthz` intentionally do not require the Bearer secret so
 in-cluster scrapers and probes can hit them without secret distribution.

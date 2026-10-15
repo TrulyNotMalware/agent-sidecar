@@ -154,6 +154,10 @@ def test_claude_turn_reaches_the_per_turn_mcp_server(
     }
     assert done["finalText"] == "final answer"  # the last message only, not the preamble
     assert done["usage"]["cacheReadInputTokens"] == 14  # two model calls x 7
+    assert done["numTurns"] == 2
+    assert done["stopReason"] == "end_turn"
+    assert isinstance(done["costUsd"], float) and done["costUsd"] > 0  # the CLI's estimate
+    assert isinstance(done["durationMs"], int)
     assert f"Bearer {TURN_TOKEN}" in f["auth_log"].read_text()
     [first, *_] = _requests(f["record"])
     assert SYSTEM_MARK in json.dumps(first["system"])
@@ -230,6 +234,9 @@ def test_codex_turn_reaches_the_per_turn_mcp_server(
     assert tool_use["args"] == {"text": "hi"}
     assert r.events[3][1]["ok"] is True
     assert done["finalText"] == "final answer"
+    # codex reports tokens only; the sidecar measures the duration for both providers.
+    assert (done["costUsd"], done["numTurns"], done["stopReason"]) == (None, None, None)
+    assert isinstance(done["durationMs"], int)
     assert f"Bearer {TURN_TOKEN}" in f["auth_log"].read_text()
     first = _requests(f["record"])[0]
     messages = [(i.get("role"), json.dumps(i.get("content"))) for i in first["input"]]

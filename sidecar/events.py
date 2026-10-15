@@ -43,6 +43,15 @@ class DoneEvent:
     output_tokens: int
     cache_read_input_tokens: int | None
     cache_creation_input_tokens: int | None
+    # What else the provider reported; None where it reports nothing (codex: cost,
+    # turns, stop reason).
+    cost_usd: float | None = None
+    num_turns: int | None = None
+    stop_reason: str | None = None
+    # The parsed result when the turn asked for one (TurnSpec.output_schema).
+    structured_output: Any = None
+    # Wall-clock time of the whole turn; set by sidecar.turn.Turn, not the runner.
+    duration_ms: int | None = None
 
 
 RunnerEvent = SessionEvent | TextEvent | ToolUseEvent | ToolResultEvent | DoneEvent
