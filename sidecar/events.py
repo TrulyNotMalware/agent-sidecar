@@ -76,6 +76,8 @@ class TurnSpec:
     turn_token: str | None = None
     # mode=stateless: the workspace is temporary and the session cannot be resumed.
     ephemeral: bool = False
+    # Text deltas as the API streams them (claude); codex only reports whole messages.
+    token_streaming: bool = False
 
 
 class Runner(Protocol):

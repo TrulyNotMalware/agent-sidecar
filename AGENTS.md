@@ -92,7 +92,8 @@ Auth: `Authorization: Bearer <secret>` required.
   "sessionId": "<resume-id>",        // optional
   "systemPrompt": "...",             // optional – replaces CLAUDE.md
   "appendSystemPrompt": "...",       // optional – appended to CLAUDE.md
-  "mode": "session"                  // "session" (default) | "stateless"
+  "mode": "session",                 // "session" (default) | "stateless"
+  "tokenStreaming": false            // optional – true: `text` per API delta (claude only)
 }
 ```
 

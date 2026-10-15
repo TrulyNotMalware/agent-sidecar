@@ -104,12 +104,16 @@ def _anthropic_stream(
     for i, block in enumerate(blocks):
         if block["type"] == "text":
             opening: dict[str, Any] = {"type": "text", "text": ""}
-            delta = {"type": "text_delta", "text": block["text"]}
+            # Two deltas per block, as a real stream splits text: token streaming
+            # (include_partial_messages) is then told apart from one event per block.
+            half = len(block["text"]) // 2
+            parts = [block["text"][:half], block["text"][half:]]
+            deltas = [{"type": "text_delta", "text": part} for part in parts if part]
         else:
             opening = {**block, "input": {}}
-            delta = {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}
+            deltas = [{"type": "input_json_delta", "partial_json": json.dumps(block["input"])}]
         out.append(_sse("content_block_start", {"index": i, "content_block": opening}))
-        out.append(_sse("content_block_delta", {"index": i, "delta": delta}))
+        out.extend(_sse("content_block_delta", {"index": i, "delta": d}) for d in deltas)
         out.append(_sse("content_block_stop", {"index": i}))
     out.append(
         _sse(

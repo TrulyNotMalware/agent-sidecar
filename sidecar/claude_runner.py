@@ -97,6 +97,8 @@ async def run_turn(
         options_kwargs["disallowed_tools"] = list(policy.disallowed_tools)
     if spec.resume_session_id:
         options_kwargs["resume"] = spec.resume_session_id
+    if spec.token_streaming:
+        options_kwargs["include_partial_messages"] = True
     static_servers = await asyncio.to_thread(static_mcp_servers, spec.mcp_config_path)
     merged_servers = per_turn_mcp_servers(
         static_servers,
@@ -126,7 +128,8 @@ async def run_turn(
             options_kwargs["mcp_servers"] = str(mcp_path)
         elif spec.mcp_config_path is not None:
             options_kwargs["mcp_servers"] = str(spec.mcp_config_path)
-        async with contextlib.aclosing(_run(options_kwargs, prompt=spec.prompt)) as events:
+        run = _run(options_kwargs, prompt=spec.prompt, token_streaming=spec.token_streaming)
+        async with contextlib.aclosing(run) as events:
             async for ev in events:
                 yield ev
 
@@ -187,7 +190,9 @@ def _done_event(message: object, final_text_parts: list[str]) -> DoneEvent:
     )
 
 
-async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncGenerator[RunnerEvent, None]:
+async def _run(
+    options_kwargs: dict[str, Any], *, prompt: str, token_streaming: bool = False
+) -> AsyncGenerator[RunnerEvent, None]:
     # Lazy import keeps the rest of the app usable without the SDK (e.g. auth/health tests).
     from claude_agent_sdk import (
         AssistantMessage,
@@ -195,6 +200,7 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncGenerator
         Message,
         ResultError,
         ResultMessage,
+        StreamEvent,
         TextBlock,
         ToolResultBlock,
         ToolUseBlock,
@@ -221,12 +227,16 @@ async def _run(options_kwargs: dict[str, Any], *, prompt: str) -> AsyncGenerator
             for block in message.content:
                 if isinstance(block, TextBlock):
                     progress.final_text_parts.append(block.text)
-                    yield TextEvent(delta=block.text)
+                    if not token_streaming:  # else already sent, delta by delta
+                        yield TextEvent(delta=block.text)
                 elif isinstance(block, ToolUseBlock):
                     progress.pending_tool_names[block.id] = block.name
                     yield ToolUseEvent(
                         name=block.name, args=dict(block.input or {}), tool_use_id=block.id
                     )
+        elif isinstance(message, StreamEvent):
+            if (delta := _text_delta(message.event)) is not None:
+                yield TextEvent(delta=delta)
         elif isinstance(message, UserMessage) and isinstance(message.content, list):
             for block in message.content:
                 if isinstance(block, ToolResultBlock):
@@ -289,6 +299,17 @@ def _cli_failure(exc: Exception, stderr: str) -> ApiError:
     return ApiError(
         ErrorCode.SDK_ERROR, f"claude CLI failed ({type(exc).__name__}{code})", detail=detail
     )
+
+
+def _text_delta(event: dict[str, Any]) -> str | None:
+    """The text a raw API stream event adds (include_partial_messages), if any."""
+    if event.get("type") != "content_block_delta":
+        return None
+    delta = event.get("delta")
+    if not isinstance(delta, dict) or delta.get("type") != "text_delta":
+        return None
+    text = delta.get("text")
+    return text if isinstance(text, str) and text else None
 
 
 def _extract_session_id(message: object) -> str | None:

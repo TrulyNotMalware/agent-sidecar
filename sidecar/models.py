@@ -20,6 +20,8 @@ class ConverseRequest(BaseModel):
     system_prompt: str | None = Field(default=None, alias="systemPrompt")
     append_system_prompt: str | None = Field(default=None, alias="appendSystemPrompt")
     mode: Literal["session", "stateless"] = "session"
+    # `text` events as the model generates them, not one per finished text block.
+    token_streaming: bool = Field(default=False, alias="tokenStreaming")
 
     @field_validator("session_id", mode="before")
     @classmethod

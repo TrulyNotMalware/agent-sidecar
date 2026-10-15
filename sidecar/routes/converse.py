@@ -124,6 +124,7 @@ async def converse(
             mcp_server_name=settings.mcp_server_name,
             turn_token=x_turn_token,
             ephemeral=body.mode == "stateless",
+            token_streaming=body.token_streaming,
         )
         events = run_turn(spec, cwd=cwd)
         if body.mode == "stateless" or settings.provider != "codex":

@@ -19,7 +19,15 @@ from typing import Any, Protocol, TypedDict
 
 import pytest
 
-from .harness import HERE, SidecarServer, StartSidecar, converse, precondition, wait_until
+from .harness import (
+    HERE,
+    SidecarServer,
+    StartSidecar,
+    StreamResult,
+    converse,
+    precondition,
+    wait_until,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -161,6 +169,31 @@ def test_claude_turn_reaches_the_per_turn_mcp_server(
     assert f"Bearer {TURN_TOKEN}" in f["auth_log"].read_text()
     [first, *_] = _requests(f["record"])
     assert SYSTEM_MARK in json.dumps(first["system"])
+
+
+def test_claude_token_streaming_sends_the_api_deltas(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
+    srv, _f = _claude(start_sidecar, fakes)
+
+    blocks = converse(
+        srv.port, "real-claude-blocks", headers={"X-Turn-Token": TURN_TOKEN}, read_timeout=60
+    )
+    tokens = converse(
+        srv.port,
+        "real-claude-tokens",
+        headers={"X-Turn-Token": TURN_TOKEN},
+        body={"tokenStreaming": True},
+        read_timeout=60,
+    )
+
+    def texts(r: StreamResult) -> list[str]:
+        return [data["delta"] for name, data in r.events if name == "text"]
+
+    assert texts(blocks) == ["preamble", "final answer"]  # one event per text block
+    assert texts(tokens) == ["prea", "mble", "final ", "answer"]  # as the API streamed them
+    assert tokens.event_names[-1] == "done"
+    assert tokens.events[-1][1]["finalText"] == "final answer"
 
 
 def test_claude_api_error_is_the_terminal_frame_scrubbed(

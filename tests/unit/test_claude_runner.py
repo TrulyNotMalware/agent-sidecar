@@ -8,7 +8,7 @@ from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 from sidecar import claude_runner
 from sidecar.claude_runner import ClaudePolicy
 from sidecar.errors import ApiError, ErrorCode
-from sidecar.events import DoneEvent, RunnerEvent, TurnSpec
+from sidecar.events import DoneEvent, RunnerEvent, SessionEvent, TextEvent, TurnSpec
 
 
 def _install_fake_query(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -232,6 +232,102 @@ async def test_done_carries_cost_turns_and_stop_reason(monkeypatch: pytest.Monke
         num_turns=2,
         stop_reason="end_turn",
     )
+
+
+def _success_result(result: str = "answer") -> ResultMessage:
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="s",
+        usage={"input_tokens": 1, "output_tokens": 1},
+        result=result,
+    )
+
+
+def _stream_event(event: dict[str, object]) -> Message:
+    from claude_agent_sdk import StreamEvent
+
+    return StreamEvent(uuid="u", session_id="s", event=event)
+
+
+async def test_token_streaming_sends_api_deltas_instead_of_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    def delta(text: str) -> Message:
+        return _stream_event(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": text},
+            }
+        )
+
+    messages = [
+        _stream_event({"type": "message_start", "message": {}}),
+        delta("hel"),
+        _stream_event(
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{}"},
+            }
+        ),
+        delta("lo"),
+        AssistantMessage(content=[TextBlock(text="hello")], model="m"),
+        _success_result(result=""),
+    ]
+    _install_query(monkeypatch, *messages)
+    seen = _install_fake_query_options(monkeypatch)
+
+    events = await _run(TurnSpec(prompt="hi", token_streaming=True))
+
+    assert seen["options"].include_partial_messages is True
+    assert [e for e in events if isinstance(e, TextEvent)] == [
+        TextEvent(delta="hel"),
+        TextEvent(delta="lo"),
+    ]
+    assert isinstance(events[0], SessionEvent)
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.final_text == "hello"  # from the blocks, which are not re-sent
+
+
+async def test_without_token_streaming_one_text_event_per_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    _install_query(
+        monkeypatch,
+        AssistantMessage(content=[TextBlock(text="hello")], model="m"),
+        _success_result(),
+    )
+    seen = _install_fake_query_options(monkeypatch)
+
+    events = await _run()
+
+    assert seen["options"].include_partial_messages is False
+    assert [e for e in events if isinstance(e, TextEvent)] == [TextEvent(delta="hello")]
+
+
+def _install_fake_query_options(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Record the options of whichever fake query() is installed."""
+    import claude_agent_sdk
+
+    seen: dict[str, Any] = {}
+    inner = claude_agent_sdk.query
+
+    def recording(*, prompt: str, options: ClaudeAgentOptions) -> AsyncGenerator[Message, None]:
+        seen["options"] = options
+        return cast("AsyncGenerator[Message, None]", inner(prompt=prompt, options=options))
+
+    monkeypatch.setattr(claude_agent_sdk, "query", recording)
+    return seen
 
 
 def _error_result(subtype: str = "success", errors: list[str] | None = None) -> ResultMessage:
