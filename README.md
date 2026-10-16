@@ -48,11 +48,14 @@ for `ANTHROPIC_API_KEY`, `mcp.json`, and `CLAUDE.md`.
 |---|---|---|---|
 | `POST` | `/v1/converse` | Bearer | Run one turn; streams SSE events |
 | `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | Cancel an in-flight turn (`error: cancelled` at once; CLI closed in the background) |
+| `DELETE` | `/v1/sessions/{sessionKey}` | Bearer | Delete a conversation: its workspace, the CLI's transcripts and its session ids |
 | `GET` | `/healthz` | none | Liveness |
 | `GET` | `/readyz` | none | Readiness — provider CLI (`claude`/`codex`) + auth present |
 | `GET` | `/metrics` | none | Prometheus text format |
 
 SSE event sequence: `session` → 0..N of `text` / `tool_use` / `tool_result` → terminal `done` *or* `error` (a lone `error` if the turn fails before it starts). Full schema in [`openapi.yaml`](openapi.yaml).
+
+Optional per-request fields: `tokenStreaming` (token-level `text` deltas, claude), `outputSchema` (JSON Schema → `done.structuredOutput`), and run controls capped by the operator — `model` (`ALLOWED_MODELS`), `maxTurns` / `maxBudgetUsd` (`MAX_TURNS` / `MAX_BUDGET_USD`, claude), `timeoutSec` (`TURN_TIMEOUT_SEC`). `done` also reports `costUsd`, `numTurns`, `stopReason` and `durationMs`.
 
 ## Architecture
 
@@ -106,7 +109,7 @@ can do the same — the contract is plain HTTP + SSE (see [`openapi.yaml`](opena
 ```
 sidecar/                  # the application
 ├── app.py                # FastAPI factory + lifespan
-├── routes/               # converse, cancel, health, metrics
+├── routes/               # converse, cancel, sessions, health, metrics
 ├── claude_runner.py      # Agent SDK adapter (event mapping)
 ├── codex_runner.py       # OpenAI Codex CLI adapter (PROVIDER=codex)
 ├── admission.py          # limits (global / user / sessionKey) + registry + drain
@@ -191,11 +194,14 @@ docker build -t claude-sidecar:1.0.0 .
 |---|---|---|---|
 | `POST` | `/v1/converse` | Bearer | 1턴 실행, SSE 이벤트 스트림 |
 | `POST` | `/v1/sessions/{sessionKey}/cancel` | Bearer | 진행 중 turn 취소 (즉시 `error: cancelled`, CLI는 백그라운드에서 종료) |
+| `DELETE` | `/v1/sessions/{sessionKey}` | Bearer | 대화 삭제: 워크스페이스, CLI 대화 기록, 세션 id 기록 |
 | `GET` | `/healthz` | 없음 | Liveness |
 | `GET` | `/readyz` | 없음 | Readiness — provider CLI (`claude`/`codex`) 바이너리 + 인증 검증 |
 | `GET` | `/metrics` | 없음 | Prometheus text 포맷 |
 
 SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` → 종단 `done` 또는 `error` (턴 시작 전에 실패하면 `error` 하나만). 전체 스키마는 [`openapi.yaml`](openapi.yaml).
+
+요청별 선택 필드: `tokenStreaming` (토큰 단위 `text` delta, claude), `outputSchema` (JSON Schema → `done.structuredOutput`), 운영자 설정이 상한인 실행 제어 — `model` (`ALLOWED_MODELS`), `maxTurns` / `maxBudgetUsd` (`MAX_TURNS` / `MAX_BUDGET_USD`, claude), `timeoutSec` (`TURN_TIMEOUT_SEC`). `done`에는 `costUsd`, `numTurns`, `stopReason`, `durationMs`도 포함됩니다.
 
 ## 아키텍처
 
@@ -249,7 +255,7 @@ SSE 이벤트 순서: `session` → 0..N개 `text` / `tool_use` / `tool_result` 
 ```
 sidecar/                  # 애플리케이션
 ├── app.py                # FastAPI 팩토리 + lifespan
-├── routes/               # converse, cancel, health, metrics
+├── routes/               # converse, cancel, sessions, health, metrics
 ├── claude_runner.py      # Agent SDK 어댑터 (이벤트 매핑)
 ├── codex_runner.py       # OpenAI Codex CLI 어댑터 (PROVIDER=codex)
 ├── admission.py          # 동시 실행 제한(글로벌 / user / sessionKey) + 레지스트리 + drain

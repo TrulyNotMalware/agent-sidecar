@@ -43,6 +43,15 @@ class DoneEvent:
     output_tokens: int
     cache_read_input_tokens: int | None
     cache_creation_input_tokens: int | None
+    # What else the provider reported; None where it reports nothing (codex: cost,
+    # turns, stop reason).
+    cost_usd: float | None = None
+    num_turns: int | None = None
+    stop_reason: str | None = None
+    # The parsed result when the turn asked for one (TurnSpec.output_schema).
+    structured_output: Any = None
+    # Wall-clock time of the whole turn; set by sidecar.turn.Turn, not the runner.
+    duration_ms: int | None = None
 
 
 RunnerEvent = SessionEvent | TextEvent | ToolUseEvent | ToolResultEvent | DoneEvent
@@ -67,6 +76,15 @@ class TurnSpec:
     turn_token: str | None = None
     # mode=stateless: the workspace is temporary and the session cannot be resumed.
     ephemeral: bool = False
+    # Text deltas as the API streams them (claude); codex only reports whole messages.
+    token_streaming: bool = False
+    # Run controls, already checked against the operator's ceilings. None: the
+    # CLI's default model / no limit. Turn and budget limits are claude-only.
+    model: str | None = None
+    max_turns: int | None = None
+    max_budget_usd: float | None = None
+    # A JSON Schema the final answer must match (DoneEvent.structured_output).
+    output_schema: dict[str, Any] | None = None
 
 
 class Runner(Protocol):

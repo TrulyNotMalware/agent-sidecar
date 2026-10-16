@@ -21,7 +21,7 @@ from .mcp import static_mcp_server_names
 from .observability.logging import configure_logging, get_logger
 from .observability.redaction import register_secrets
 from .observability.tracing import configure_tracing, shutdown_tracing
-from .routes import cancel, converse, health, metrics
+from .routes import cancel, converse, health, metrics, sessions
 
 log = get_logger("sidecar.app")
 
@@ -83,6 +83,19 @@ def create_app() -> FastAPI:
         *(os.environ.get(name) for name in settings.codex_env_passthrough_names),
     )
 
+    if settings.provider == "codex":
+        # codex exec has no turn or cost limit: requests setting them get 400.
+        ignored = [
+            name
+            for name, value in (
+                ("MAX_TURNS", settings.max_turns),
+                ("MAX_BUDGET_USD", settings.max_budget_usd),
+            )
+            if value is not None
+        ]
+        if ignored:
+            log.warning("config.ignored", provider="codex", settings=ignored)
+
     tracer_provider: TracerProvider | None = None
 
     @asynccontextmanager
@@ -111,6 +124,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(cancel.router)
+    app.include_router(sessions.router)
     app.include_router(converse.router)
 
     # Every error body on the wire is {"code", "message"} (openapi `Error`), whether it

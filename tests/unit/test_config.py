@@ -93,3 +93,25 @@ def test_mcp_server_name_default_is_neutral_and_validated() -> None:
     assert _settings(bearer_secret="x").mcp_server_name == "domain-tools"
     with pytest.raises(ValidationError):
         _settings(bearer_secret="x", mcp_server_name="a.b")  # TOML key path
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_concurrent": 0},  # every request would be `busy`
+        {"turn_timeout_sec": 0},  # every turn an immediate `timeout`
+        {"max_turns": 0},
+        {"max_budget_usd": 0},
+        {"max_budget_usd": "inf"},
+    ],
+)
+def test_limits_must_be_positive_and_finite(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        _settings(bearer_secret="x", **overrides)
+
+
+def test_allowed_models_are_a_comma_list() -> None:
+    s = _settings(bearer_secret="x", allowed_models=" claude-a, ,claude-b ")
+
+    assert s.allowed_models_names == ("claude-a", "claude-b")
+    assert _settings(bearer_secret="x").allowed_models_names == ()

@@ -12,6 +12,10 @@ what the CLI sent (system prompt placement, tool names).
 FAKE_API_ERROR=<status> makes the main-loop request fail with that HTTP status and
 an error message that contains a credential-shaped string (sk-...).
 
+A turn with an output schema gets STRUCTURED_OUTPUT as its answer: anthropic as a
+call to the CLI's `StructuredOutput` tool, openai as the final message's JSON text
+(codex sends the schema as `text.format`).
+
 FAKE_OPENAI_COMPACT_ON=<text>: the first request whose last user message contains
 <text> is answered with a tool call and a huge token usage, which makes codex
 auto-compact the thread (with a low model_auto_compact_token_limit) before it
@@ -34,6 +38,7 @@ RECORD.mkdir(parents=True, exist_ok=True)
 ERROR_STATUS = os.environ.get("FAKE_API_ERROR")
 COMPACT_ON = os.environ.get("FAKE_OPENAI_COMPACT_ON")
 ERROR_MESSAGE = "model not available for key sk-proj-leakedkey123456"
+STRUCTURED_OUTPUT = {"answer": "final answer"}
 _lock = threading.Lock()
 _counter = itertools.count(1)
 _compacted = False
@@ -73,6 +78,9 @@ def _anthropic_blocks(body: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
         for m in body.get("messages", [])
     )
     echo = next((n for n in tools if n.startswith("mcp__") and n.endswith("__echo")), None)
+    if "StructuredOutput" in tools and not answered:  # the turn has an output schema
+        call = {"type": "tool_use", "id": "toolu_02", "name": "StructuredOutput"}
+        return [{**call, "input": STRUCTURED_OUTPUT}], "tool_use"
     if answered or echo is None:
         return [{"type": "text", "text": "final answer"}], "end_turn"
     return [
@@ -104,12 +112,16 @@ def _anthropic_stream(
     for i, block in enumerate(blocks):
         if block["type"] == "text":
             opening: dict[str, Any] = {"type": "text", "text": ""}
-            delta = {"type": "text_delta", "text": block["text"]}
+            # Two deltas per block, as a real stream splits text: token streaming
+            # (include_partial_messages) is then told apart from one event per block.
+            half = len(block["text"]) // 2
+            parts = [block["text"][:half], block["text"][half:]]
+            deltas = [{"type": "text_delta", "text": part} for part in parts if part]
         else:
             opening = {**block, "input": {}}
-            delta = {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}
+            deltas = [{"type": "input_json_delta", "partial_json": json.dumps(block["input"])}]
         out.append(_sse("content_block_start", {"index": i, "content_block": opening}))
-        out.append(_sse("content_block_delta", {"index": i, "delta": delta}))
+        out.extend(_sse("content_block_delta", {"index": i, "delta": d}) for d in deltas)
         out.append(_sse("content_block_stop", {"index": i}))
     out.append(
         _sse(
@@ -165,6 +177,8 @@ def _openai_items(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str,
                 "input_tokens": 900_000,
                 "total_tokens": 900_005,
             }
+    if (body.get("text") or {}).get("format", {}).get("type") == "json_schema":
+        return [message(json.dumps(STRUCTURED_OUTPUT), 1)], USAGE_OPENAI  # --output-schema
     if answered or os.environ.get("FAKE_OPENAI_CALL_ECHO") != "1":
         return [message("final answer", 1)], USAGE_OPENAI
     return [

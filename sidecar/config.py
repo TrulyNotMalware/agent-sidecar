@@ -19,8 +19,16 @@ class Settings(BaseSettings):
     # Required: startup fails fast instead of serving 500s on every request.
     bearer_secret: SecretStr = Field(min_length=1)
 
-    max_concurrent: int = 8
-    turn_timeout_sec: int = 90
+    # >= 1: with 0 every request would be `busy`, every turn an immediate `timeout`.
+    max_concurrent: int = Field(default=8, ge=1)
+    # The default and the ceiling of a request's `timeoutSec`.
+    turn_timeout_sec: int = Field(default=90, ge=1)
+    # Comma-separated models a request may name in `model`; empty = it may not pick one.
+    allowed_models: str = ""
+    # Default and ceiling of a request's `maxTurns` / `maxBudgetUsd` (claude only).
+    # Unset: no limit unless the request sets one.
+    max_turns: int | None = Field(default=None, ge=1)
+    max_budget_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     # >= 1: with 0, sse-starlette cancels streams at SIGTERM before a frame can be sent.
     shutdown_grace_sec: int = Field(default=10, ge=1)
 
@@ -86,6 +94,10 @@ class Settings(BaseSettings):
         if unknown:
             raise ValueError(f"unknown setting source(s): {', '.join(sorted(unknown))}")
         return v
+
+    @property
+    def allowed_models_names(self) -> tuple[str, ...]:
+        return _csv(self.allowed_models)
 
     @property
     def codex_env_passthrough_names(self) -> tuple[str, ...]:

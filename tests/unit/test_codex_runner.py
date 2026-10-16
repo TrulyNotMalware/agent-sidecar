@@ -291,6 +291,65 @@ async def test_flag_like_prompts_and_ids_are_not_parsed_as_flags(
     assert proc.stdin.data == b"--last"
 
 
+async def test_model_is_an_exec_option_on_new_and_resumed_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+
+    await _collect(TurnSpec(prompt="hi", model="gpt-a"))
+    assert calls["cmd"] == [*BASE_CMD, "--model", "gpt-a", "--", "-"]
+
+    calls = _install(monkeypatch, FakeProc([COMPLETED]))
+    await _collect(TurnSpec(prompt="hi", model="gpt-a", resume_session_id="sess-9"))
+    assert calls["cmd"] == [*BASE_CMD, "--model", "gpt-a", "resume", "--", "sess-9", "-"]
+
+
+async def test_output_schema_goes_to_codex_as_a_private_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    lines = [
+        _line(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"42"}'}}
+        ),
+        COMPLETED,
+    ]
+    proc = FakeProc(lines)
+    seen: dict[str, Any] = {}
+    calls = _install(monkeypatch, proc)
+    real_wait = proc.wait
+
+    async def wait_and_look() -> int:
+        path = Path(calls["cmd"][calls["cmd"].index("--output-schema") + 1])
+        seen.update(content=json.loads(path.read_text()), mode=path.stat().st_mode & 0o777)
+        return await real_wait()
+
+    monkeypatch.setattr(proc, "wait", wait_and_look)
+
+    [*_, done] = await _collect(TurnSpec(prompt="hi", output_schema=schema))
+
+    assert calls["cmd"].index("--output-schema") < calls["cmd"].index("--")
+    assert seen == {"content": schema, "mode": 0o600}
+    assert not Path(calls["cmd"][calls["cmd"].index("--output-schema") + 1]).exists()
+    assert isinstance(done, DoneEvent)
+    assert done.structured_output == {"answer": "42"}
+
+
+async def test_a_final_message_that_is_not_json_fails_a_structured_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lines = [
+        _line({"type": "item.completed", "item": {"type": "agent_message", "text": "Sure! 42"}}),
+        COMPLETED,
+    ]
+    _install(monkeypatch, FakeProc(lines))
+
+    with pytest.raises(ApiError) as exc_info:
+        await _collect(TurnSpec(prompt="hi", output_schema={"type": "object"}))
+
+    assert exc_info.value.message == "codex's final message is not the requested JSON"
+
+
 async def test_ephemeral_for_stateless_turns(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _install(monkeypatch, FakeProc([COMPLETED]))
 
