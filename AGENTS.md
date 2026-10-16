@@ -54,6 +54,7 @@ sidecar/                 # Application package
 ├── routes/
 │   ├── converse.py      # POST /v1/converse — main SSE stream
 │   ├── cancel.py        # POST /v1/sessions/{key}/cancel
+│   ├── sessions.py      # DELETE /v1/sessions/{key}
 │   ├── health.py        # GET /healthz  GET /readyz
 │   └── metrics.py       # GET /metrics (Prometheus)
 └── observability/
@@ -92,9 +93,19 @@ Auth: `Authorization: Bearer <secret>` required.
   "sessionId": "<resume-id>",        // optional
   "systemPrompt": "...",             // optional – replaces CLAUDE.md
   "appendSystemPrompt": "...",       // optional – appended to CLAUDE.md
-  "mode": "session"                  // "session" (default) | "stateless"
+  "mode": "session",                 // "session" (default) | "stateless"
+  "tokenStreaming": false,           // optional – true: `text` per API delta (claude only)
+  "model": "...",                    // optional – must be in ALLOWED_MODELS
+  "maxTurns": 5,                     // optional – ≤ MAX_TURNS (claude only)
+  "maxBudgetUsd": 0.5,               // optional – ≤ MAX_BUDGET_USD (claude only)
+  "timeoutSec": 60,                  // optional – ≤ TURN_TIMEOUT_SEC
+  "outputSchema": {"type": "object"} // optional – JSON Schema; parsed answer in done.structuredOutput
 }
 ```
+Run controls are checked before the stream opens (`400 bad_request` when a value is
+above its setting, a model is not listed, or codex is asked for `maxTurns` /
+`maxBudgetUsd`, which `codex exec` cannot enforce). Each setting is the default when
+the request leaves the field out.
 
 **SSE event sequence** (each frame is an `event:` line plus a `data:` line carrying the JSON below):
 ```
@@ -102,7 +113,9 @@ event: session      {"sessionId": "..."}
 event: text         {"delta": "..."}
 event: tool_use     {"name": "...", "args": {...}, "toolUseId": "..."}
 event: tool_result  {"name": "...", "ok": true, "toolUseId": "..."}
-event: done         {"finalText": "...", "usage": {"inputTokens": N, "outputTokens": N, "cacheReadInputTokens": N, "cacheCreationInputTokens": N}}
+event: done         {"finalText": "...", "usage": {"inputTokens": N, "outputTokens": N, "cacheReadInputTokens": N, "cacheCreationInputTokens": N},
+                     "costUsd": N, "numTurns": N, "stopReason": "...", "durationMs": N,
+                     "structuredOutput": {...}}   ← cost/turns/stop: claude only, else null; structuredOutput: with outputSchema
 event: error        {"code": "...", "message": "..."}   ← terminal, replaces done
 ```
 Exactly one `session` first, then zero or more `text` / `tool_use` / `tool_result`,
@@ -114,6 +127,16 @@ Field shapes are the source-of-truth contract in `openapi.yaml`.
 
 Returns `202` immediately. The stream ends with `error: cancelled` right away; the CLI is
 closed in the background and the `sessionKey` stays busy (`429`) until it has exited.
+
+### `DELETE /v1/sessions/{session_key}`
+
+Removes the key's workspace, the CLI's transcripts of its sessions and their id record
+(`WORKSPACE_ROOT/.session-ids/`, recorded for both providers): `200`, `404` when nothing
+is stored, `429` while a turn holds the key (a turn on the key gets `429` while the
+delete runs — `Admission.exclusive`). claude: the workspace's project directory under
+`CLAUDE_CONFIG_DIR/projects/` plus every entry named after a recorded session id one
+level below `CLAUDE_CONFIG_DIR` (CLI internals: `claude_session_files`). codex: the
+recorded ids' rollouts under `CODEX_HOME` (`codex_session_files`).
 
 ### `GET /healthz` — always 200
 ### `GET /readyz` — 200 if the provider CLI (claude: the SDK's bundled binary, else PATH) + auth credential present, else 503
@@ -129,8 +152,11 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `PROVIDER` | `claude` | `claude` or `codex` |
 | `BIND` | `127.0.0.1` | Set `0.0.0.0` in Docker |
 | `PORT` | `7300` | |
-| `MAX_CONCURRENT` | `8` | Global in-flight cap |
-| `TURN_TIMEOUT_SEC` | `90` | Per-turn hard timeout |
+| `MAX_CONCURRENT` | `8` | Global in-flight cap (min 1) |
+| `TURN_TIMEOUT_SEC` | `90` | Per-turn hard timeout; default and maximum of a request's `timeoutSec` (min 1) |
+| `ALLOWED_MODELS` | — | Comma list a request's `model` must be in; empty = requests cannot pick a model |
+| `MAX_TURNS` | — | claude: default and maximum of a request's `maxTurns`; unset = no limit |
+| `MAX_BUDGET_USD` | — | claude: default and maximum of a request's `maxBudgetUsd`; unset = no limit |
 | `SHUTDOWN_GRACE_SEC` | `10` | On SIGTERM, how long turns may keep streaming before `error: cancelled` (min 1) |
 | `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Session workspaces root |
 | `CLAUDE_MD_PATH` | — | Base system prompt file (hot-reloaded per request) |
@@ -174,7 +200,13 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 - **One in-flight turn per `user_id` (`X-User-Id` header)** — same constraint.
 - **Global cap** — `MAX_CONCURRENT` total; excess gets `429 busy`.
 - Session workspaces are SHA-256–keyed directories under `WORKSPACE_ROOT` (`root/XX/YYYY...`).
-- `mode=stateless` uses a temp workspace under `WORKSPACE_ROOT/.stateless/`, deleted after each turn.
+- `mode=stateless` uses a temp workspace under `WORKSPACE_ROOT/.stateless/`, deleted after each
+  turn together with what the CLI stored for it.
+- **A resume is bound to its `sessionKey`** for both providers: `sessionId` must be an id
+  that key was issued (recorded under `WORKSPACE_ROOT/.session-ids/`, outside the
+  workspaces), else `400` before the stream opens — both CLIs find a session id across
+  all of their sessions, whatever the cwd. claude sessions from before ids were recorded
+  count when their transcript is in the key's own project directory.
 
 ---
 
@@ -196,6 +228,11 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   (subscription) and `~/.claude.json` are for local testing only.
 - The merged system prompt goes to the CLI as a `0600` file (`--system-prompt-file`),
   not on argv (visible via `ps`, 128 KiB per argument on Linux).
+- `--resume <id>` finds a session in **any** project directory under
+  `CLAUDE_CONFIG_DIR`, not just the cwd's: the route checks the id against the key's
+  record first (`_preflight_resume`). A stateless turn's transcript (its project
+  directory, named after the temp cwd, and the entries named after its session id) is
+  removed once the CLI has exited — the SDK mode has no `--no-session-persistence`.
 - An API failure the CLI reports as a synthetic assistant message is not streamed as
   `text`; the error result that follows is the terminal `error` frame.
 
@@ -219,9 +256,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
   settings, e.g. `writable_roots`, still apply). A `config.toml` that relied on
   `sandbox_mode = "danger-full-access"` must now set `CODEX_SANDBOX` instead.
 - The resume id follows `--`, so a value starting with `-` is never parsed as a
-  flag. `sessionId` must be a UUID, and for codex it must have been issued to the
-  same `sessionKey` (recorded under `WORKSPACE_ROOT/.session-ids/`, outside the
-  workspaces): codex resolves thread ids across every session in `CODEX_HOME`.
+  flag. `sessionId` must be a UUID issued to the same `sessionKey` (as for claude):
+  codex resolves thread ids across every session in `CODEX_HOME`.
   On resume codex may report the same or a new (forked) thread id — both are
   recorded; continue with the latest `session` id. `mode=stateless` runs with
   `--ephemeral` and cannot be resumed.
@@ -283,6 +319,8 @@ closed in the background and the `sessionKey` stays busy (`429`) until it has ex
 | `sidecar_inflight` | Gauge | — |
 | `sidecar_tool_calls_total` | Counter | `tool_name`, `outcome` |
 | `sidecar_tokens_total` | Counter | `kind` (input\|output\|cache_read\|cache_creation) |
+| `sidecar_cost_usd_total` | Counter | — (claude's cost estimate; codex reports none) |
+| `sidecar_time_to_first_text_seconds` | Histogram | — |
 
 > `sidecar_tool_calls_total` is labeled by `tool_name`. If you expose many distinct MCP tool
 > names, apply Prometheus relabeling rules to cap cardinality.
@@ -351,7 +389,7 @@ sends `WWW-Authenticate: Bearer`.
 On `/v1/converse` only pre-stream errors are sent with that status and a JSON body:
 `bad_request`, `unauthorized`, `busy`, and `internal` when a file the turn needs cannot
 be read before it starts (the base system prompt, a codex session record) — plus
-`not_found` on `/cancel`. Once the
+`not_found` on `/cancel` and `DELETE /v1/sessions/{key}`. Once the
 SSE stream has opened the response is already HTTP 200, so `timeout`, `sdk_error`,
 `internal`, and `cancelled` surface **only** as a terminal `event: error` frame —
 their HTTP code is never put on the wire for the converse response.
@@ -448,8 +486,9 @@ Key manifests:
 ### Operational constraints
 
 - **1 Pod = 1 Anthropic identity.** Multiple identities → multiple Pods.
-- `WORKSPACE_ROOT` is **not GC'd** — session directories accumulate. Use an external cleanup
-  policy (CronJob, emptyDir with size limit, etc.).
+- `WORKSPACE_ROOT` is **not GC'd** — session directories accumulate. Delete finished
+  sessions with `DELETE /v1/sessions/{key}`, or use an external cleanup policy (CronJob,
+  emptyDir with size limit, etc.).
 - `CLAUDE.md` is re-read on every request (ConfigMap hot-reload, no restart needed).
 - `tini` is required as PID-1 to reap zombie claude subprocesses. Do not remove from Dockerfile.
 - The image runs as uid 10001; all mutable state is under `/var/lib/claude-sidecar`
@@ -468,6 +507,7 @@ Key manifests:
 admission.reserve(turn)       # sessionKey + X-User-Id + global cap, all or nothing; raises ApiError(BUSY)
 admission.release(turn)       # no-op unless `turn` holds the reservation
 admission.get(session_key)    # → Turn | None (the cancel route)
+with admission.exclusive(session_key): ...  # no turn may start on the key; BUSY if one holds it
 await admission.drain(grace_sec)  # stop all turns, wait for cleanup; returns force-cancelled count
 ```
 

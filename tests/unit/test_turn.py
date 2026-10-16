@@ -1,14 +1,17 @@
 import asyncio
+import dataclasses
 from collections.abc import AsyncGenerator
 from contextlib import nullcontext
 from pathlib import Path
 from typing import NoReturn
+from unittest.mock import ANY
 
 import pytest
+from prometheus_client import REGISTRY
 
 from sidecar.admission import Admission
 from sidecar.errors import ApiError, ErrorCode
-from sidecar.events import DoneEvent, RunnerEvent, SessionEvent
+from sidecar.events import DoneEvent, RunnerEvent, SessionEvent, TextEvent
 from sidecar.turn import Turn, TurnEnded, TurnItem, TurnStopped
 
 DONE = DoneEvent(
@@ -70,7 +73,8 @@ async def test_events_are_followed_by_exactly_one_turn_ended() -> None:
 
     items = await _until_ended(turn)
 
-    assert items == [SessionEvent(session_id="s"), DONE, TurnEnded(None, None)]
+    done = dataclasses.replace(DONE, duration_ms=ANY)  # the turn adds its duration
+    assert items == [SessionEvent(session_id="s"), done, TurnEnded(None, None)]
     assert admission.inflight == 0
 
 
@@ -253,3 +257,44 @@ async def test_a_stopped_turn_still_removes_its_stateless_workspace(tmp_path: Pa
 
     assert slow.cleanup_finished
     assert list(tmp_path.iterdir()) == []  # the single cancel lets the removal complete
+
+
+def _sample(name: str) -> float:
+    return REGISTRY.get_sample_value(name) or 0.0
+
+
+async def test_done_carries_the_turn_duration_and_cost_is_counted() -> None:
+    first_text_before = _sample("sidecar_time_to_first_text_seconds_count")
+    cost_before = _sample("sidecar_cost_usd_total")
+
+    async def runner(_cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
+        yield SessionEvent(session_id="s")
+        yield TextEvent(delta="a")
+        await asyncio.sleep(0.05)
+        yield TextEvent(delta="b")
+        yield dataclasses.replace(DONE, cost_usd=0.25, num_turns=3)
+
+    turn = _turn()
+    turn.start(runner, _workspace)
+    items = await _until_ended(turn)
+
+    done = items[-2]
+    assert isinstance(done, DoneEvent)
+    assert done.duration_ms is not None and done.duration_ms >= 50
+    assert (done.cost_usd, done.num_turns) == (0.25, 3)
+    # One observation per turn: the first text only.
+    assert _sample("sidecar_time_to_first_text_seconds_count") - first_text_before == 1
+    assert _sample("sidecar_cost_usd_total") - cost_before == 0.25
+
+
+async def test_a_turn_without_cost_counts_none() -> None:
+    cost_before = _sample("sidecar_cost_usd_total")
+
+    async def runner(_cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
+        yield DONE  # codex reports no cost
+
+    turn = _turn()
+    turn.start(runner, _workspace)
+    await _until_ended(turn)
+
+    assert _sample("sidecar_cost_usd_total") == cost_before

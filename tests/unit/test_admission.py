@@ -133,3 +133,27 @@ async def test_drain_force_cancels_a_turn_whose_cleanup_hangs() -> None:
     await asyncio.wait({turn.task}, timeout=1)
     assert turn.task.done()
     assert a.inflight == 0  # released on the way out, even when forced
+
+
+def test_exclusive_keeps_turns_off_a_session_key() -> None:
+    a = Admission(max_concurrent=4)
+
+    with a.exclusive("k"):
+        assert "being deleted" in _busy(a, _turn(a, "k"))
+        a.reserve(_turn(a, "other"))  # other keys are unaffected, and no slot is used
+        assert a.inflight == 1
+        with pytest.raises(ApiError) as exc, a.exclusive("k"):
+            pass
+        assert exc.value.code is ErrorCode.BUSY
+    a.reserve(_turn(a, "k"))  # released on exit
+
+
+def test_exclusive_waits_for_no_turn_but_refuses_a_busy_key() -> None:
+    a = Admission(max_concurrent=4)
+    a.reserve(_turn(a, "k"))
+
+    with pytest.raises(ApiError) as exc, a.exclusive("k"):
+        pass
+
+    assert exc.value.code is ErrorCode.BUSY
+    assert "in-flight" in exc.value.message

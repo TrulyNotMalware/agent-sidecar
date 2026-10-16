@@ -19,7 +19,15 @@ from typing import Any, Protocol, TypedDict
 
 import pytest
 
-from .harness import HERE, SidecarServer, StartSidecar, converse, precondition, wait_until
+from .harness import (
+    HERE,
+    SidecarServer,
+    StartSidecar,
+    StreamResult,
+    converse,
+    precondition,
+    wait_until,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -118,7 +126,10 @@ def _requests(record: Path) -> list[dict[str, Any]]:
 
 
 def _claude(
-    start_sidecar: StartSidecar, fakes: StartFakes, **env: str
+    start_sidecar: StartSidecar,
+    fakes: StartFakes,
+    sidecar_env: dict[str, str] | None = None,
+    **env: str,
 ) -> tuple[SidecarServer, FakeServers]:
     f = fakes("anthropic", **env)
     srv = start_sidecar(
@@ -127,6 +138,7 @@ def _claude(
         ANTHROPIC_API_KEY="sk-ant-fake-integration-key",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
         MCP_SERVER_URL=f["mcp"],
+        **(sidecar_env or {}),
     )
     return srv, f
 
@@ -154,9 +166,149 @@ def test_claude_turn_reaches_the_per_turn_mcp_server(
     }
     assert done["finalText"] == "final answer"  # the last message only, not the preamble
     assert done["usage"]["cacheReadInputTokens"] == 14  # two model calls x 7
+    assert done["numTurns"] == 2
+    assert done["stopReason"] == "end_turn"
+    assert isinstance(done["costUsd"], float) and done["costUsd"] > 0  # the CLI's estimate
+    assert isinstance(done["durationMs"], int)
     assert f"Bearer {TURN_TOKEN}" in f["auth_log"].read_text()
     [first, *_] = _requests(f["record"])
     assert SYSTEM_MARK in json.dumps(first["system"])
+
+
+def test_claude_token_streaming_sends_the_api_deltas(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
+    srv, _f = _claude(start_sidecar, fakes)
+
+    blocks = converse(
+        srv.port, "real-claude-blocks", headers={"X-Turn-Token": TURN_TOKEN}, read_timeout=60
+    )
+    tokens = converse(
+        srv.port,
+        "real-claude-tokens",
+        headers={"X-Turn-Token": TURN_TOKEN},
+        body={"tokenStreaming": True},
+        read_timeout=60,
+    )
+
+    def texts(r: StreamResult) -> list[str]:
+        return [data["delta"] for name, data in r.events if name == "text"]
+
+    assert texts(blocks) == ["preamble", "final answer"]  # one event per text block
+    assert texts(tokens) == ["prea", "mble", "final ", "answer"]  # as the API streamed them
+    assert tokens.event_names[-1] == "done"
+    assert tokens.events[-1][1]["finalText"] == "final answer"
+
+
+def test_claude_run_controls_reach_the_cli(start_sidecar: StartSidecar, fakes: StartFakes) -> None:
+    srv, f = _claude(start_sidecar, fakes, sidecar_env={"ALLOWED_MODELS": "claude-test-model"})
+    headers = {"X-Turn-Token": TURN_TOKEN}
+
+    picked = converse(
+        srv.port, "real-claude-model", headers=headers, body={"model": "claude-test-model"}
+    )
+    # The echo tool needs a second round trip, which maxTurns=1 does not allow.
+    capped = converse(srv.port, "real-claude-turns", headers=headers, body={"maxTurns": 1})
+
+    assert picked.event_names[-1] == "done"
+    assert {r["model"] for r in _requests(f["record"])[:2]} == {"claude-test-model"}
+    assert capped.event_names == ["session", "text", "tool_use", "tool_result", "error"]
+    assert capped.events[-1][1] == {
+        "code": "sdk_error",
+        "message": "Reached maximum number of turns (1)",
+    }
+
+
+ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+    "additionalProperties": False,
+}
+
+
+def test_claude_structured_output(start_sidecar: StartSidecar, fakes: StartFakes) -> None:
+    srv, _f = _claude(start_sidecar, fakes)
+
+    r = converse(srv.port, "real-claude-schema", body={"outputSchema": ANSWER_SCHEMA})
+
+    # claude answers through its StructuredOutput tool, which the stream shows as a tool.
+    assert r.event_names == ["session", "tool_use", "tool_result", "done"]
+    assert r.events[1][1]["name"] == "StructuredOutput"
+    done = r.events[-1][1]
+    assert done["structuredOutput"] == {"answer": "final answer"}
+    assert json.loads(done["finalText"]) == done["structuredOutput"]
+
+
+def test_claude_session_delete_removes_what_the_cli_stored(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
+    srv, _f = _claude(start_sidecar, fakes)
+    config = srv.server_log.parent / "home" / ".claude"  # the server's CLAUDE_CONFIG_DIR
+
+    gone = converse(srv.port, "real-claude-gone", prompt="FORGET-ME")
+    kept = converse(srv.port, "real-claude-kept", prompt="KEEP-ME")
+    gone_id, kept_id = gone.events[0][1]["sessionId"], kept.events[0][1]["sessionId"]
+
+    def stored(text: str) -> list[Path]:
+        return [
+            p for p in config.rglob("*") if p.is_file() and text in p.read_text(errors="ignore")
+        ]
+
+    precondition(bool(stored("FORGET-ME")), "the CLI stored the first conversation")
+    status, body = srv.request("DELETE", "/v1/sessions/real-claude-gone")
+
+    assert (status, body) == (200, {"status": "deleted", "sessionKey": "real-claude-gone"})
+    assert stored("FORGET-ME") == []
+    assert stored("KEEP-ME") != []
+    assert not list(config.rglob(f"*{gone_id}*"))
+    assert list(config.rglob(f"*{kept_id}*"))
+    # The conversation cannot be resumed any more: its id record went too.
+    status, body = srv.post_json(
+        "/v1/converse", {"sessionKey": "real-claude-gone", "prompt": "hi", "sessionId": gone_id}
+    )
+    assert (status, body["code"]) == (400, "bad_request")
+
+
+def test_claude_session_cannot_be_resumed_under_another_key(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
+    # The CLI finds a session id in any project directory, whatever the cwd.
+    srv, f = _claude(start_sidecar, fakes)
+
+    owner = converse(srv.port, "real-claude-owner", prompt="OWNER-SECRET")
+    session_id = owner.events[0][1]["sessionId"]
+    status, body = srv.post_json(
+        "/v1/converse",
+        {"sessionKey": "real-claude-intruder", "prompt": "hi", "sessionId": session_id},
+    )
+    resumed = converse(srv.port, "real-claude-owner", body={"sessionId": session_id})
+
+    assert (status, body["code"]) == (400, "bad_request")
+    assert resumed.event_names[-1] == "done"  # the key it was issued to still can
+    sent = [json.dumps(r.get("messages")) for r in _requests(f["record"])]
+    assert len(sent) == 2 and "OWNER-SECRET" in sent[1]  # the owner's resume had the history
+
+
+def test_claude_stateless_turn_leaves_nothing_behind(
+    start_sidecar: StartSidecar, fakes: StartFakes
+) -> None:
+    srv, _f = _claude(start_sidecar, fakes)
+    config = srv.server_log.parent / "home" / ".claude"
+
+    r = converse(srv.port, "real-claude-stateless", prompt="EPHEMERAL", body={"mode": "stateless"})
+    session_id = r.events[0][1]["sessionId"]
+    status, _ = srv.post_json(
+        "/v1/converse", {"sessionKey": "any-key", "prompt": "hi", "sessionId": session_id}
+    )
+
+    assert r.event_names[-1] == "done"
+    leftovers = [
+        p for p in config.rglob("*") if p.is_file() and "EPHEMERAL" in p.read_text(errors="ignore")
+    ]
+    assert leftovers == []
+    assert not list(config.rglob(f"*{session_id}*"))
+    assert status == 400  # and it cannot be resumed
 
 
 def test_claude_api_error_is_the_terminal_frame_scrubbed(
@@ -177,7 +329,12 @@ requires_codex = pytest.mark.skipif(shutil.which("codex") is None, reason="codex
 
 
 def _codex(
-    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path, config: str = "", **env: str
+    start_sidecar: StartSidecar,
+    fakes: StartFakes,
+    tmp_path: Path,
+    config: str = "",
+    sidecar_env: dict[str, str] | None = None,
+    **env: str,
 ) -> tuple[SidecarServer, FakeServers]:
     f = fakes("openai", **env)
     codex_home = tmp_path / "codex-home"
@@ -205,6 +362,7 @@ def _codex(
         CODEX_HOME=str(codex_home),
         OPENAI_API_KEY="sk-fake-integration-key",  # startup runs `codex login --with-api-key`
         MCP_SERVER_URL=f["mcp"],
+        **(sidecar_env or {}),
     )
     precondition((codex_home / "auth.json").exists(), "startup materialized auth.json")
     return srv, f
@@ -230,6 +388,9 @@ def test_codex_turn_reaches_the_per_turn_mcp_server(
     assert tool_use["args"] == {"text": "hi"}
     assert r.events[3][1]["ok"] is True
     assert done["finalText"] == "final answer"
+    # codex reports tokens only; the sidecar measures the duration for both providers.
+    assert (done["costUsd"], done["numTurns"], done["stopReason"]) == (None, None, None)
+    assert isinstance(done["durationMs"], int)
     assert f"Bearer {TURN_TOKEN}" in f["auth_log"].read_text()
     first = _requests(f["record"])[0]
     messages = [(i.get("role"), json.dumps(i.get("content"))) for i in first["input"]]
@@ -299,3 +460,59 @@ def test_codex_api_error_is_the_terminal_frame_scrubbed(
     assert error["code"] == "sdk_error"
     assert "model not available" in error["message"]
     assert "leakedkey" not in error["message"]
+
+
+@requires_codex
+def test_codex_model_reaches_the_api(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
+    srv, f = _codex(start_sidecar, fakes, tmp_path, sidecar_env={"ALLOWED_MODELS": "gpt-test"})
+
+    first = converse(srv.port, "real-codex-model", body={"model": "gpt-test"})
+    session_id = first.events[0][1]["sessionId"]
+    resumed = converse(
+        srv.port, "real-codex-model", body={"model": "gpt-test", "sessionId": session_id}
+    )
+
+    assert first.event_names[-1] == resumed.event_names[-1] == "done"
+    assert [r["model"] for r in _requests(f["record"])] == ["gpt-test", "gpt-test"]
+
+
+@requires_codex
+def test_codex_structured_output(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
+    srv, f = _codex(start_sidecar, fakes, tmp_path)
+
+    r = converse(srv.port, "real-codex-schema", body={"outputSchema": ANSWER_SCHEMA})
+
+    assert r.event_names[-1] == "done"
+    done = r.events[-1][1]
+    assert done["structuredOutput"] == {"answer": "final answer"}
+    assert json.loads(done["finalText"]) == done["structuredOutput"]  # as with claude
+    [request] = _requests(f["record"])
+    assert request["text"]["format"]["schema"] == ANSWER_SCHEMA
+
+
+@requires_codex
+def test_codex_session_delete_removes_the_rollouts(
+    start_sidecar: StartSidecar, fakes: StartFakes, tmp_path: Path
+) -> None:
+    srv, _f = _codex(start_sidecar, fakes, tmp_path)
+    codex_home = tmp_path / "codex-home"
+
+    gone = converse(srv.port, "real-codex-gone")
+    kept = converse(srv.port, "real-codex-kept")
+    gone_id, kept_id = gone.events[0][1]["sessionId"], kept.events[0][1]["sessionId"]
+    precondition(bool(list(codex_home.rglob(f"rollout-*{gone_id}.jsonl"))), "codex kept a rollout")
+
+    status, _ = srv.request("DELETE", "/v1/sessions/real-codex-gone")
+
+    assert status == 200
+    assert not list(codex_home.rglob(f"*{gone_id}*"))
+    assert list(codex_home.rglob(f"rollout-*{kept_id}.jsonl"))
+    # The id record went too: a resume is refused before codex runs.
+    status, body = srv.post_json(
+        "/v1/converse", {"sessionKey": "real-codex-gone", "prompt": "hi", "sessionId": gone_id}
+    )
+    assert (status, body["code"]) == (400, "bad_request")

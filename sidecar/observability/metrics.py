@@ -30,6 +30,17 @@ TOKENS = Counter(
     labelnames=("kind",),
 )
 
+COST = Counter(
+    "sidecar_cost_usd_total",
+    "Turn cost in USD as the provider CLI estimates it (claude only; codex reports none).",
+)
+
+FIRST_TEXT = Histogram(
+    "sidecar_time_to_first_text_seconds",
+    "Time from the start of a turn to its first `text` event.",
+    buckets=(0.25, 0.5, 1, 2, 3, 5, 10, 20, 30, 60, 120),
+)
+
 
 def render() -> tuple[bytes, str]:
     return generate_latest(), CONTENT_TYPE_LATEST

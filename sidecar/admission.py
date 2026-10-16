@@ -13,6 +13,8 @@ releases it), so a sessionKey stays busy until its CLI has exited.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from .errors import ApiError, ErrorCode
@@ -30,6 +32,7 @@ class Admission:
         self._max = max_concurrent
         self._by_session: dict[str, Turn] = {}
         self._users: set[str] = set()
+        self._held: set[str] = set()  # sessionKeys held by `exclusive` (no turn may start)
 
     @property
     def inflight(self) -> int:
@@ -43,6 +46,8 @@ class Admission:
         """
         if turn.session_key in self._by_session:
             raise ApiError(ErrorCode.BUSY, f"sessionKey {turn.session_key!r} has an in-flight turn")
+        if turn.session_key in self._held:
+            raise ApiError(ErrorCode.BUSY, f"sessionKey {turn.session_key!r} is being deleted")
         if turn.user_id and turn.user_id in self._users:
             raise ApiError(ErrorCode.BUSY, f"user {turn.user_id!r} has an in-flight turn")
         if len(self._by_session) >= self._max:
@@ -63,6 +68,23 @@ class Admission:
 
     def get(self, session_key: str) -> Turn | None:
         return self._by_session.get(session_key)
+
+    @contextlib.contextmanager
+    def exclusive(self, session_key: str) -> Iterator[None]:
+        """Keep turns off `session_key` while the caller works on its files.
+
+        Raises ApiError(BUSY) if a turn holds it (including one still closing its
+        CLI) or another caller does. Counts toward no limit.
+        """
+        if session_key in self._by_session:
+            raise ApiError(ErrorCode.BUSY, f"sessionKey {session_key!r} has an in-flight turn")
+        if session_key in self._held:
+            raise ApiError(ErrorCode.BUSY, f"sessionKey {session_key!r} is being deleted")
+        self._held.add(session_key)
+        try:
+            yield
+        finally:
+            self._held.discard(session_key)
 
     async def drain(self, *, grace_sec: float) -> int:
         """Stop every in-flight turn and wait up to grace_sec for its cleanup.

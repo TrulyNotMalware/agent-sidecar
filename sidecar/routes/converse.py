@@ -41,6 +41,7 @@ from ..session import (
     remember_session_id,
     stateless_workspace,
     workspace_for,
+    workspace_path,
 )
 from ..sse import sse_event
 from ..turn import StopReason, Turn, TurnEnded, TurnItem, TurnStopped
@@ -76,9 +77,14 @@ async def converse(
         mode=body.mode,
         resume=bool(body.session_id),
         turn_token=bool(x_turn_token),
+        model=body.model,
         prompt=body.prompt,
     )
 
+    try:
+        limits = _run_limits(body, settings)
+    except ApiError as exc:
+        return _reject(exc, turn_id)
     rejected = await _preflight_resume(body, settings)
     if rejected is not None:
         return _reject(rejected, turn_id)
@@ -104,11 +110,13 @@ async def converse(
     }
     if x_user_id:
         span_attributes["user.id"] = x_user_id
+    if limits.model is not None:
+        span_attributes["gen_ai.request.model"] = limits.model
     turn = Turn(
         session_key=body.session_key,
         user_id=x_user_id,
         admission=admission,
-        timeout_sec=settings.turn_timeout_sec,
+        timeout_sec=limits.timeout_sec,
         span_attributes=span_attributes,
         turn_id=turn_id,
     )
@@ -124,10 +132,17 @@ async def converse(
             mcp_server_name=settings.mcp_server_name,
             turn_token=x_turn_token,
             ephemeral=body.mode == "stateless",
+            token_streaming=body.token_streaming,
+            model=limits.model,
+            max_turns=limits.max_turns,
+            max_budget_usd=limits.max_budget_usd,
+            output_schema=body.output_schema,
         )
         events = run_turn(spec, cwd=cwd)
-        if body.mode == "stateless" or settings.provider != "codex":
-            return events  # only codex resumes are bound to recorded ids
+        if body.mode == "stateless":
+            return events  # nothing to resume or delete later
+        # A resume is bound to the recorded ids (_preflight_resume); DELETE
+        # /v1/sessions finds a session's transcripts by them.
         return _remembering_session_ids(events, body.session_key, settings.workspace_root)
 
     @asynccontextmanager
@@ -151,7 +166,7 @@ async def converse(
     # grace period; the stream uses it to let the turn finish or end it cleanly.
     shutdown = anyio.Event()
     response = EventSourceResponse(
-        _event_stream(turn, shutdown, settings, body.session_key, state),
+        _event_stream(turn, shutdown, settings.shutdown_grace_sec, body.session_key, state),
         ping=15,
         # A client that stops reading must not hold the connection forever.
         send_timeout=_SEND_TIMEOUT_SEC,
@@ -170,22 +185,90 @@ async def converse(
     return response
 
 
+@dataclass(frozen=True, slots=True)
+class _RunLimits:
+    """A turn's run controls: the request's, within the operator's settings."""
+
+    timeout_sec: int
+    model: str | None = None
+    max_turns: int | None = None
+    max_budget_usd: float | None = None
+
+
+def _run_limits(body: ConverseRequest, settings: Settings) -> _RunLimits:
+    """Resolve the request's run controls against the settings; ApiError(400) if not allowed.
+
+    Each setting is the default and the ceiling: a request may lower a limit, not
+    raise it, and may only pick a model the operator listed.
+    """
+    if body.model is not None and body.model not in settings.allowed_models_names:
+        if not settings.allowed_models_names:
+            raise ApiError(
+                ErrorCode.BAD_REQUEST,
+                "model cannot be chosen per request (ALLOWED_MODELS is empty)",
+            )
+        raise ApiError(ErrorCode.BAD_REQUEST, f"model {body.model!r} is not in ALLOWED_MODELS")
+    timeout_sec = settings.turn_timeout_sec
+    if body.timeout_sec is not None:
+        timeout_sec = _within(body.timeout_sec, timeout_sec, "timeoutSec", "TURN_TIMEOUT_SEC")
+    if settings.provider == "codex":
+        # codex exec has no turn or cost limit to pass them to; MAX_TURNS / MAX_BUDGET_USD
+        # are ignored with a startup warning.
+        for field, value in (("maxTurns", body.max_turns), ("maxBudgetUsd", body.max_budget_usd)):
+            if value is not None:
+                raise ApiError(ErrorCode.BAD_REQUEST, f"{field} is not supported by PROVIDER=codex")
+        return _RunLimits(timeout_sec=timeout_sec, model=body.model)
+    return _RunLimits(
+        timeout_sec=timeout_sec,
+        model=body.model,
+        max_turns=settings.max_turns
+        if body.max_turns is None
+        else _within(body.max_turns, settings.max_turns, "maxTurns", "MAX_TURNS"),
+        max_budget_usd=settings.max_budget_usd
+        if body.max_budget_usd is None
+        else _within(
+            body.max_budget_usd, settings.max_budget_usd, "maxBudgetUsd", "MAX_BUDGET_USD"
+        ),
+    )
+
+
+def _within[T: (int, float)](requested: T, ceiling: T | None, field: str, setting: str) -> T:
+    """A requested limit, if the setting (when set) allows it; else ApiError(400)."""
+    if ceiling is not None and requested > ceiling:
+        raise ApiError(ErrorCode.BAD_REQUEST, f"{field} may not exceed {ceiling} ({setting})")
+    return requested
+
+
 async def _preflight_resume(body: ConverseRequest, settings: Settings) -> ApiError | None:
-    """codex resolves a thread id across *all* sessions in CODEX_HOME, so a resume is
-    only allowed for ids this sessionKey was issued. (claude scopes transcripts by the
-    workspace cwd, which is already per-sessionKey.)"""
-    if settings.provider != "codex" or body.session_id is None:
+    """A resume is only allowed for a session this sessionKey was issued.
+
+    Both CLIs find a session id among every session they stored — codex across
+    CODEX_HOME, claude across every project directory of CLAUDE_CONFIG_DIR, whatever
+    the cwd — so without this check one sessionKey could continue (and read) another
+    key's conversation, a stateless one included.
+    """
+    if body.session_id is None:
         return None
     try:
-        known = await asyncio.to_thread(
-            known_session_ids, body.session_key, root=settings.workspace_root
-        )
+        issued = await asyncio.to_thread(_issued_to, body.session_key, body.session_id, settings)
     except (OSError, UnicodeDecodeError) as exc:
         log.exception("session_id.record_unreadable", error_type=type(exc).__name__)
         return ApiError(ErrorCode.INTERNAL, "could not read this sessionKey's session record")
-    if body.session_id not in known:
+    if not issued:
         return ApiError(ErrorCode.BAD_REQUEST, "sessionId was not issued for this sessionKey")
     return None
+
+
+def _issued_to(session_key: str, session_id: str, settings: Settings) -> bool:
+    root = settings.workspace_root
+    if session_id in known_session_ids(session_key, root=root):
+        return True
+    if settings.provider != "claude":
+        return False
+    # claude ids were not recorded before this check existed: such a session counts
+    # as the key's if its transcript is in the key's own project directory.
+    project = claude_runner.claude_project_dir(workspace_path(session_key, root=root))
+    return project is not None and (project / f"{session_id}.jsonl").is_file()
 
 
 async def _remembering_session_ids(
@@ -218,7 +301,7 @@ def _reject(error: ApiError, turn_id: str) -> JSONResponse:
 async def _event_stream(
     turn: Turn,
     shutdown: anyio.Event,
-    settings: Settings,
+    shutdown_grace_sec: int,
     session_key: str,
     state: "_StreamState",
 ) -> AsyncIterator[dict[str, str]]:
@@ -229,7 +312,7 @@ async def _event_stream(
     """
     started = time.perf_counter()
     loop = asyncio.get_running_loop()
-    drain_budget = max(0.0, settings.shutdown_grace_sec - 1.0)
+    drain_budget = max(0.0, shutdown_grace_sec - 1.0)
     drain_deadline: float | None = None
     shutdown_wait = asyncio.ensure_future(shutdown.wait())
     get: asyncio.Future[TurnItem] | None = None
@@ -264,7 +347,7 @@ async def _event_stream(
                     return
                 continue  # never a second terminal: the turn logs what happens after done
             if isinstance(item, TurnStopped | TurnEnded):
-                code, message = _terminal_error(item, settings.turn_timeout_sec, turn.turn_id)
+                code, message = _terminal_error(item, turn.timeout_sec, turn.turn_id)
                 outcome = code
                 log.warning("converse.error", code=code, message=message)
                 yield sse_event("error", {"code": code, "message": message})
@@ -398,6 +481,11 @@ def _to_sse(ev: RunnerEvent) -> dict[str, str]:
                     "cacheReadInputTokens": ev.cache_read_input_tokens,
                     "cacheCreationInputTokens": ev.cache_creation_input_tokens,
                 },
+                "costUsd": ev.cost_usd,
+                "numTurns": ev.num_turns,
+                "stopReason": ev.stop_reason,
+                "durationMs": ev.duration_ms,
+                "structuredOutput": ev.structured_output,
             },
         )
     raise TypeError(f"unknown runner event: {type(ev).__name__}")
