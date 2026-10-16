@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable
@@ -31,9 +32,9 @@ from opentelemetry.trace import Span, Status, StatusCode
 
 from .admission import Admission
 from .errors import ApiError
-from .events import DoneEvent, RunnerEvent, ToolResultEvent, ToolUseEvent
+from .events import DoneEvent, RunnerEvent, TextEvent, ToolResultEvent, ToolUseEvent
 from .observability.logging import get_logger
-from .observability.metrics import TOKENS, TOOL_CALLS
+from .observability.metrics import COST, FIRST_TEXT, TOKENS, TOOL_CALLS
 from .observability.tracing import get_tracer
 
 log = get_logger("sidecar.turn")
@@ -87,6 +88,10 @@ class Turn:
     def task(self) -> asyncio.Task[None] | None:
         return self._task
 
+    @property
+    def timeout_sec(self) -> float:
+        return self._timeout_sec
+
     def start(
         self,
         open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],
@@ -135,7 +140,7 @@ class Turn:
             ) as span:
                 outcome = "completed"
                 try:
-                    await self._run(open_runner, workspace, span)
+                    await self._run(open_runner, workspace, span, started)
                 except BaseException as exc:
                     outcome = exc.code.value if isinstance(exc, ApiError) else type(exc).__name__
                     if not isinstance(exc, asyncio.CancelledError):
@@ -184,16 +189,25 @@ class Turn:
         open_runner: Callable[[Path], AsyncGenerator[RunnerEvent, None]],
         workspace: Callable[[], AbstractAsyncContextManager[Path]],
         span: Span,
+        started: float,
     ) -> None:
         # aclosing: the runner (and the CLI it drives) is fully closed before the
         # workspace and the admission reservation are released.
+        text_seen = False
         async with (
             workspace() as cwd,
             contextlib.aclosing(open_runner(cwd)) as runner,
         ):
             async for ev in runner:
-                _instrument(ev, span)
-                self.events.put_nowait(ev)
+                elapsed = time.perf_counter() - started
+                sent: RunnerEvent = ev
+                if isinstance(ev, TextEvent) and not text_seen:
+                    text_seen = True
+                    FIRST_TEXT.observe(elapsed)
+                elif isinstance(ev, DoneEvent):
+                    sent = dataclasses.replace(ev, duration_ms=round(elapsed * 1000))
+                _instrument(sent, span)
+                self.events.put_nowait(sent)
 
 
 def _instrument(ev: RunnerEvent, span: Span) -> None:
@@ -212,3 +226,8 @@ def _instrument(ev: RunnerEvent, span: Span) -> None:
         TOKENS.labels(kind="cache_creation").inc(ev.cache_creation_input_tokens or 0)
         span.set_attribute("tokens.input", ev.input_tokens)
         span.set_attribute("tokens.output", ev.output_tokens)
+        if ev.cost_usd is not None:
+            COST.inc(ev.cost_usd)
+            span.set_attribute("cost.usd", ev.cost_usd)
+        if ev.num_turns is not None:
+            span.set_attribute("turns", ev.num_turns)

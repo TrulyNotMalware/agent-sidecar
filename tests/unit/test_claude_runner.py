@@ -8,7 +8,7 @@ from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 from sidecar import claude_runner
 from sidecar.claude_runner import ClaudePolicy
 from sidecar.errors import ApiError, ErrorCode
-from sidecar.events import RunnerEvent, TurnSpec
+from sidecar.events import DoneEvent, RunnerEvent, SessionEvent, TextEvent, TurnSpec
 
 
 def _install_fake_query(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -193,6 +193,143 @@ def _install_failing_query(
     monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
 
 
+def _install_query(monkeypatch: pytest.MonkeyPatch, *messages: Message) -> None:
+    import claude_agent_sdk
+
+    async def fake_query(
+        *, prompt: str, options: ClaudeAgentOptions
+    ) -> AsyncGenerator[Message, None]:
+        for m in messages:
+            yield m
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+
+async def test_done_carries_cost_turns_and_stop_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=2,
+        session_id="s",
+        stop_reason="end_turn",
+        total_cost_usd=0.0123,
+        usage={"input_tokens": 5, "output_tokens": 7},
+        result="answer",
+    )
+    _install_query(monkeypatch, result)
+
+    [*_, done] = await _run()
+
+    assert done == DoneEvent(
+        final_text="answer",
+        input_tokens=5,
+        output_tokens=7,
+        cache_read_input_tokens=None,
+        cache_creation_input_tokens=None,
+        cost_usd=0.0123,
+        num_turns=2,
+        stop_reason="end_turn",
+    )
+
+
+def _success_result(result: str = "answer") -> ResultMessage:
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="s",
+        usage={"input_tokens": 1, "output_tokens": 1},
+        result=result,
+    )
+
+
+def _stream_event(event: dict[str, object]) -> Message:
+    from claude_agent_sdk import StreamEvent
+
+    return StreamEvent(uuid="u", session_id="s", event=event)
+
+
+async def test_token_streaming_sends_api_deltas_instead_of_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    def delta(text: str) -> Message:
+        return _stream_event(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": text},
+            }
+        )
+
+    messages = [
+        _stream_event({"type": "message_start", "message": {}}),
+        delta("hel"),
+        _stream_event(
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{}"},
+            }
+        ),
+        delta("lo"),
+        AssistantMessage(content=[TextBlock(text="hello")], model="m"),
+        _success_result(result=""),
+    ]
+    _install_query(monkeypatch, *messages)
+    seen = _install_fake_query_options(monkeypatch)
+
+    events = await _run(TurnSpec(prompt="hi", token_streaming=True))
+
+    assert seen["options"].include_partial_messages is True
+    assert [e for e in events if isinstance(e, TextEvent)] == [
+        TextEvent(delta="hel"),
+        TextEvent(delta="lo"),
+    ]
+    assert isinstance(events[0], SessionEvent)
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.final_text == "hello"  # from the blocks, which are not re-sent
+
+
+async def test_without_token_streaming_one_text_event_per_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    _install_query(
+        monkeypatch,
+        AssistantMessage(content=[TextBlock(text="hello")], model="m"),
+        _success_result(),
+    )
+    seen = _install_fake_query_options(monkeypatch)
+
+    events = await _run()
+
+    assert seen["options"].include_partial_messages is False
+    assert [e for e in events if isinstance(e, TextEvent)] == [TextEvent(delta="hello")]
+
+
+def _install_fake_query_options(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Record the options of whichever fake query() is installed."""
+    import claude_agent_sdk
+
+    seen: dict[str, Any] = {}
+    inner = claude_agent_sdk.query
+
+    def recording(*, prompt: str, options: ClaudeAgentOptions) -> AsyncGenerator[Message, None]:
+        seen["options"] = options
+        return cast("AsyncGenerator[Message, None]", inner(prompt=prompt, options=options))
+
+    monkeypatch.setattr(claude_agent_sdk, "query", recording)
+    return seen
+
+
 def _error_result(subtype: str = "success", errors: list[str] | None = None) -> ResultMessage:
     return ResultMessage(
         subtype=subtype,
@@ -333,3 +470,85 @@ async def test_stderr_lines_are_capped_in_length_and_number(
     assert len(lines) == count
     assert {len(line) for line in lines} == {cap}
     assert [event for event, _ in logged].count("claude.stderr_not_logged") == 1
+
+
+async def test_run_controls_reach_the_cli_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _install_fake_query(monkeypatch)
+
+    await _run()
+    assert (seen["options"].model, seen["options"].max_turns) == (None, None)
+    assert seen["options"].max_budget_usd is None
+
+    await _run(TurnSpec(prompt="hi", model="claude-a", max_turns=3, max_budget_usd=0.25))
+    assert (seen["options"].model, seen["options"].max_turns) == ("claude-a", 3)
+    assert seen["options"].max_budget_usd == 0.25
+
+
+async def test_output_schema_asks_the_cli_for_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    result = ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="s",
+        result="",
+        structured_output={"answer": "42"},
+    )
+    _install_query(monkeypatch, result)
+    seen = _install_fake_query_options(monkeypatch)
+
+    [*_, done] = await _run(TurnSpec(prompt="hi", output_schema=schema))
+
+    assert seen["options"].output_format == {"type": "json_schema", "schema": schema}
+    assert isinstance(done, DoneEvent)
+    assert done.structured_output == {"answer": "42"}
+
+
+async def test_a_result_without_the_requested_structured_output_fails_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_query(monkeypatch, _success_result())
+
+    with pytest.raises(ApiError) as exc_info:
+        await _run(TurnSpec(prompt="hi", output_schema={"type": "object"}))
+
+    assert exc_info.value.message == "claude returned no structured output"
+
+
+async def test_a_stateless_turn_leaves_nothing_under_the_config_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_agent_sdk import AssistantMessage, SystemMessage, TextBlock
+
+    from sidecar.claude_runner import claude_project_dir
+
+    config = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    cwd = tmp_path / "stateless-ws"
+    cwd.mkdir()
+    sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
+    project = claude_project_dir(cwd)
+    assert project is not None
+    kept = config / "projects" / "-another-workspace" / "9b2e4c1d-0000-4000-8000-000000000000.jsonl"
+    for path in (project / f"{sid}.jsonl", config / "file-history" / sid / "v1", kept):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("what the CLI stored")
+    init = SystemMessage(subtype="init", data={"session_id": sid})
+    answer = AssistantMessage(content=[TextBlock(text="hi")], model="m")
+
+    async def run(*, ephemeral: bool) -> None:
+        _install_query(monkeypatch, init, answer, _success_result())
+        async for _ in claude_runner.run_turn(TurnSpec(prompt="hi", ephemeral=ephemeral), cwd=cwd):
+            pass
+
+    await run(ephemeral=False)
+    assert (project / f"{sid}.jsonl").exists()  # a session-mode turn keeps its transcript
+
+    await run(ephemeral=True)
+    assert not project.exists()
+    assert not (config / "file-history" / sid).exists()
+    assert kept.exists()  # other sessions are not touched

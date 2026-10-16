@@ -3,7 +3,7 @@ import contextlib
 import json
 import os
 import signal
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,8 +19,9 @@ from .events import (
     ToolUseEvent,
     TurnSpec,
 )
-from .mcp import mcp_tool_name
+from .mcp import mcp_tool_name, private_file
 from .observability.logging import get_logger
+from .session import is_session_id
 
 log = get_logger("sidecar.codex")
 
@@ -37,16 +38,33 @@ _KILL_WAIT_SEC = 5.0
 _EXIT_WAIT_SEC = 5.0
 
 
+def codex_home() -> Path:
+    """Where codex keeps its state: $CODEX_HOME, else ~/.codex."""
+    configured = os.environ.get("CODEX_HOME")
+    return Path(configured) if configured else Path.home() / ".codex"
+
+
 def codex_auth_file(configured: Path | None = None) -> Path:
     """Where codex keeps auth.json: CODEX_AUTH_PATH if set, else $CODEX_HOME (~/.codex).
 
     `codex login` writes, and `codex exec` reads, $CODEX_HOME/auth.json; the sidecar's
     readiness check and startup materialization must look at the same file.
     """
-    if configured is not None:
-        return configured
-    codex_home = os.environ.get("CODEX_HOME")
-    return (Path(codex_home) if codex_home else Path.home() / ".codex") / "auth.json"
+    return configured if configured is not None else codex_home() / "auth.json"
+
+
+def codex_session_files(session_ids: Iterable[str]) -> list[Path]:
+    """The rollouts (transcripts) codex stored for these thread ids.
+
+    codex files them by date, `sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`
+    (`archived_sessions/` once archived). Ids that are not UUIDs are skipped.
+    """
+    home = codex_home()
+    found: list[Path] = []
+    for sid in filter(is_session_id, session_ids):
+        for kept in ("sessions", "archived_sessions"):
+            found += (home / kept).rglob(f"rollout-*{sid}.jsonl")
+    return found
 
 
 async def ensure_codex_auth(auth_path: Path | None = None) -> bool:
@@ -162,13 +180,19 @@ class _Invocation:
     env: dict[str, str]
 
 
-def _invocation(spec: TurnSpec, policy: CodexPolicy) -> _Invocation:
+def _invocation(
+    spec: TurnSpec, policy: CodexPolicy, *, output_schema_path: Path | None = None
+) -> _Invocation:
     # Session workspaces are plain scratch dirs; without the flag `codex exec`
     # refuses to run outside a trusted git repository. --sandbox is always explicit
     # so a config.toml cannot change the sandbox mode.
     cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", policy.sandbox]
     if spec.ephemeral:
         cmd.append("--ephemeral")  # stateless: no rollout that could be resumed later
+    if spec.model is not None:
+        cmd += ["--model", spec.model]  # an ALLOWED_MODELS entry, never free-form input
+    if output_schema_path is not None:
+        cmd += ["--output-schema", str(output_schema_path)]
 
     # Per-turn MCP scoping: inject a streamable-HTTP server via dotted `-c` TOML
     # overrides and hand codex the bearer through an env var (never on argv).
@@ -233,11 +257,19 @@ async def run_turn(
     `spec.mcp_config_path` is unused: static MCP servers are claude-only, codex reads
     its own config.toml.
     """
-    run = _invocation(spec, CodexPolicy() if policy is None else policy)
-    # aclosing makes closing this generator kill the process now, in this task.
-    async with contextlib.aclosing(_stream(run, cwd=cwd)) as events:
-        async for ev in events:
-            yield ev
+    policy = CodexPolicy() if policy is None else policy
+    async with contextlib.AsyncExitStack() as cleanup:
+        schema_path = None
+        if spec.output_schema is not None:
+            # codex takes the schema as a file only (--output-schema <FILE>).
+            schema_file = private_file("output-schema.json", json.dumps(spec.output_schema))
+            schema_path = await cleanup.enter_async_context(schema_file)
+        run = _invocation(spec, policy, output_schema_path=schema_path)
+        structured = spec.output_schema is not None
+        # aclosing makes closing this generator kill the process now, in this task.
+        async with contextlib.aclosing(_stream(run, cwd=cwd, structured=structured)) as events:
+            async for ev in events:
+                yield ev
 
 
 class _Tail:
@@ -267,6 +299,8 @@ class _Progress:
     # trouble that way too ("Reconnecting... 2/5" while falling back from WebSocket to
     # HTTPS). Kept for the error message if the turn then ends without a result.
     last_error: str | None = None
+    # The turn asked for structured output: the last message is JSON to parse.
+    structured: bool = False
 
 
 async def _spawn(run: _Invocation, *, cwd: Path) -> asyncio.subprocess.Process:
@@ -290,7 +324,9 @@ async def _spawn(run: _Invocation, *, cwd: Path) -> asyncio.subprocess.Process:
         ) from exc
 
 
-async def _stream(run: _Invocation, *, cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
+async def _stream(
+    run: _Invocation, *, cwd: Path, structured: bool = False
+) -> AsyncGenerator[RunnerEvent, None]:
     proc = await _spawn(run, cwd=cwd)
     # PIPE was requested for all three, so none is None.
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
@@ -299,7 +335,7 @@ async def _stream(run: _Invocation, *, cwd: Path) -> AsyncGenerator[RunnerEvent,
     # Written concurrently with reading stdout: if codex ever produced a pipe's worth
     # of output before reading stdin, a sequential write would deadlock both sides.
     stdin_task = asyncio.create_task(_send_prompt(proc.stdin, run.stdin_prompt))
-    progress = _Progress()
+    progress = _Progress(structured=structured)
 
     try:
         async for line in _ndjson_lines(proc.stdout):
@@ -348,6 +384,7 @@ def _translate_event(event: dict[str, Any], progress: _Progress) -> RunnerEvent 
     if ev_type == "turn.completed":
         progress.completed = True
         usage = event.get("usage") or {}
+        structured_output = _structured_output(progress) if progress.structured else None
         return DoneEvent(
             final_text=progress.last_message,
             # OpenAI semantics: input_tokens includes the cached ones.
@@ -355,6 +392,7 @@ def _translate_event(event: dict[str, Any], progress: _Progress) -> RunnerEvent 
             output_tokens=int(usage.get("output_tokens") or 0),
             cache_read_input_tokens=usage.get("cached_input_tokens"),
             cache_creation_input_tokens=usage.get("cache_write_input_tokens"),
+            structured_output=structured_output,
         )
     if ev_type == "turn.failed":
         raise ApiError(ErrorCode.SDK_ERROR, provider_message(_failure_text(event)))
@@ -394,6 +432,16 @@ async def _exit_status(
             if progress.last_error
             else "codex ended without turn.completed",
         )
+
+
+def _structured_output(progress: _Progress) -> object:
+    """The last agent message, which --output-schema makes a JSON document."""
+    try:
+        return json.loads(progress.last_message)
+    except json.JSONDecodeError:
+        raise ApiError(
+            ErrorCode.SDK_ERROR, "codex's final message is not the requested JSON"
+        ) from None
 
 
 def _failure_text(event: dict[str, Any]) -> str:

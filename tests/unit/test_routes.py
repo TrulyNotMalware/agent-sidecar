@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from sidecar.config import Settings
+from sidecar.config import Settings, get_settings
 from sidecar.events import Runner, RunnerEvent, TurnSpec
 from sidecar.turn import Turn, TurnEnded, TurnStopped
 
@@ -293,6 +293,43 @@ def test_terminal_error_mapping() -> None:
     )
 
 
+def test_done_frame_shape() -> None:
+    import json
+
+    from sidecar.events import DoneEvent
+    from sidecar.routes.converse import _to_sse
+
+    frame = _to_sse(
+        DoneEvent(
+            final_text="ok",
+            input_tokens=1,
+            output_tokens=2,
+            cache_read_input_tokens=3,
+            cache_creation_input_tokens=None,
+            cost_usd=0.5,
+            num_turns=2,
+            stop_reason="end_turn",
+            duration_ms=1200,
+        )
+    )
+
+    assert frame["event"] == "done"
+    assert json.loads(frame["data"]) == {
+        "finalText": "ok",
+        "usage": {
+            "inputTokens": 1,
+            "outputTokens": 2,
+            "cacheReadInputTokens": 3,
+            "cacheCreationInputTokens": None,
+        },
+        "costUsd": 0.5,
+        "numTurns": 2,
+        "stopReason": "end_turn",
+        "durationMs": 1200,
+        "structuredOutput": None,
+    }
+
+
 def test_stream_carries_the_turn_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _install_recording_runner(monkeypatch)
 
@@ -359,22 +396,60 @@ def test_claude_policy_defaults() -> None:
     assert policy.setting_sources == ()
 
 
-async def test_codex_resume_requires_an_id_issued_for_the_session_key(tmp_path: Path) -> None:
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+async def test_a_resume_requires_an_id_issued_for_the_session_key(
+    tmp_path: Path, provider: str
+) -> None:
+    # Both CLIs find a session id across all their sessions, whatever the cwd.
     from sidecar.models import ConverseRequest
     from sidecar.routes.converse import _preflight_resume
     from sidecar.session import remember_session_id
 
     sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
-    codex = _settings(bearer_secret="x", provider="codex", workspace_root=tmp_path)
-    claude = _settings(bearer_secret="x", workspace_root=tmp_path)
+    settings = _settings(bearer_secret="x", provider=provider, workspace_root=tmp_path)
     body = ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", "sessionId": sid})
 
-    rejected = await _preflight_resume(body, codex)
+    rejected = await _preflight_resume(body, settings)
     assert rejected is not None and rejected.status_code == 400
-    assert await _preflight_resume(body, claude) is None  # claude scopes transcripts by cwd
+
+    remember_session_id("other-key", sid, root=tmp_path)
+    assert await _preflight_resume(body, settings) is not None  # another key's session
 
     remember_session_id("k", sid, root=tmp_path)
-    assert await _preflight_resume(body, codex) is None
+    assert await _preflight_resume(body, settings) is None
+
+
+async def test_an_unrecorded_claude_session_counts_if_its_transcript_is_the_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Sessions from before claude ids were recorded: the transcript's location decides.
+    from sidecar.claude_runner import claude_project_dir
+    from sidecar.models import ConverseRequest
+    from sidecar.routes.converse import _preflight_resume
+    from sidecar.session import workspace_path
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    root = tmp_path / "sessions"
+    sid = "01a0ec1c-14d2-7d12-aaa7-47100d58f161"
+    settings = _settings(bearer_secret="x", workspace_root=root)
+
+    def transcript_under(session_key: str) -> None:
+        project = claude_project_dir(workspace_path(session_key, root=root))
+        assert project is not None
+        project.mkdir(parents=True, exist_ok=True)
+        (project / f"{sid}.jsonl").write_text("{}")
+
+    def body(session_key: str) -> ConverseRequest:
+        return ConverseRequest.model_validate(
+            {"sessionKey": session_key, "prompt": "hi", "sessionId": sid}
+        )
+
+    transcript_under("owner")
+
+    assert await _preflight_resume(body("owner"), settings) is None
+    assert await _preflight_resume(body("intruder"), settings) is not None
+    codex = _settings(bearer_secret="x", provider="codex", workspace_root=root)
+    assert await _preflight_resume(body("owner"), codex) is not None  # claude's files only
 
 
 async def test_an_unreadable_session_record_is_a_json_500(tmp_path: Path) -> None:
@@ -476,6 +551,22 @@ def test_stateless_turn_asks_the_runner_not_to_persist(
     assert recorded["ephemeral"] is True
 
 
+@pytest.mark.parametrize(("extra", "expected"), [({}, False), ({"tokenStreaming": True}, True)])
+def test_token_streaming_reaches_the_runner(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, extra: dict[str, object], expected: object
+) -> None:
+    recorded = _install_recording_runner(monkeypatch)
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k-tokens", "prompt": "hi", **extra},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 200
+    assert recorded["token_streaming"] is expected
+
+
 def test_prompt_size_is_bounded(client: TestClient) -> None:
     r = client.post(
         "/v1/converse",
@@ -507,3 +598,163 @@ def test_an_unreadable_claude_md_is_a_json_500_before_the_stream(
     assert r.json() == {"code": "internal", "message": "could not read the base system prompt"}
     assert len(r.headers["x-turn-id"]) == 32
     assert app.state.admission.inflight == 0  # rejected before the reservation
+
+
+def _limits_body(**extra: object) -> object:
+    from sidecar.models import ConverseRequest
+
+    return ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", **extra})
+
+
+def _resolve(settings: Settings, **extra: object) -> object:
+    from sidecar.models import ConverseRequest
+    from sidecar.routes.converse import _run_limits
+
+    body = _limits_body(**extra)
+    assert isinstance(body, ConverseRequest)
+    return _run_limits(body, settings)
+
+
+def _rejected(settings: Settings, **extra: object) -> str:
+    from sidecar.errors import ApiError
+
+    with pytest.raises(ApiError) as exc_info:
+        _resolve(settings, **extra)
+    assert exc_info.value.status_code == 400
+    return exc_info.value.message
+
+
+def test_run_limits_default_to_the_settings() -> None:
+    from sidecar.routes.converse import _RunLimits
+
+    assert _resolve(_settings(bearer_secret="x")) == _RunLimits(timeout_sec=90)
+    configured = _settings(bearer_secret="x", max_turns=8, max_budget_usd=0.5, turn_timeout_sec=60)
+    assert _resolve(configured) == _RunLimits(timeout_sec=60, max_turns=8, max_budget_usd=0.5)
+
+
+def test_a_request_may_lower_a_limit_but_not_raise_it() -> None:
+    from sidecar.routes.converse import _RunLimits
+
+    configured = _settings(bearer_secret="x", max_turns=8, max_budget_usd=0.5, turn_timeout_sec=60)
+
+    lowered = _resolve(configured, maxTurns=2, maxBudgetUsd=0.1, timeoutSec=30)
+    assert lowered == _RunLimits(timeout_sec=30, max_turns=2, max_budget_usd=0.1)
+    assert _rejected(configured, maxTurns=9) == "maxTurns may not exceed 8 (MAX_TURNS)"
+    assert (
+        _rejected(configured, maxBudgetUsd=1) == "maxBudgetUsd may not exceed 0.5 (MAX_BUDGET_USD)"
+    )
+    assert _rejected(configured, timeoutSec=61) == "timeoutSec may not exceed 60 (TURN_TIMEOUT_SEC)"
+    # Without a setting there is no ceiling (TURN_TIMEOUT_SEC always has one).
+    unlimited = _resolve(_settings(bearer_secret="x"), maxTurns=50, maxBudgetUsd=3)
+    assert unlimited == _RunLimits(timeout_sec=90, max_turns=50, max_budget_usd=3)
+
+
+def test_a_request_may_only_pick_a_listed_model() -> None:
+    from sidecar.routes.converse import _RunLimits
+
+    listed = _settings(bearer_secret="x", allowed_models="claude-a,claude-b")
+
+    assert _resolve(listed, model="claude-b") == _RunLimits(timeout_sec=90, model="claude-b")
+    assert _rejected(listed, model="claude-c") == "model 'claude-c' is not in ALLOWED_MODELS"
+    assert "ALLOWED_MODELS is empty" in _rejected(_settings(bearer_secret="x"), model="claude-a")
+
+
+def test_codex_refuses_the_limits_it_cannot_enforce() -> None:
+    from sidecar.routes.converse import _RunLimits
+
+    codex = _settings(
+        bearer_secret="x", provider="codex", allowed_models="gpt-a", max_turns=8, max_budget_usd=1
+    )
+
+    # MAX_TURNS / MAX_BUDGET_USD do not reach codex (startup warns about them) ...
+    assert _resolve(codex, model="gpt-a", timeoutSec=10) == _RunLimits(
+        timeout_sec=10, model="gpt-a"
+    )
+    # ... and a request that sets them is told so.
+    assert _rejected(codex, maxTurns=2) == "maxTurns is not supported by PROVIDER=codex"
+    assert _rejected(codex, maxBudgetUsd=0.1) == "maxBudgetUsd is not supported by PROVIDER=codex"
+
+
+def test_run_limits_reach_the_runner(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded = _install_recording_runner(monkeypatch)
+    get_settings.cache_clear()
+    monkeypatch.setenv("ALLOWED_MODELS", "claude-a")
+    try:
+        r = client.post(
+            "/v1/converse",
+            json={
+                "sessionKey": "k-limits",
+                "prompt": "hi",
+                "model": "claude-a",
+                "maxTurns": 3,
+                "maxBudgetUsd": 0.25,
+            },
+            headers={"Authorization": "Bearer test-secret"},
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert r.status_code == 200
+    assert (recorded["model"], recorded["max_turns"], recorded["max_budget_usd"]) == (
+        "claude-a",
+        3,
+        0.25,
+    )
+
+
+def test_a_requested_timeout_bounds_the_turn(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from sidecar.routes import converse as converse_mod
+
+    def hanging_runner(_settings: Settings) -> Runner:
+        async def run_turn(spec: TurnSpec, *, cwd: Path) -> AsyncGenerator[RunnerEvent, None]:
+            await asyncio.Event().wait()
+            yield  # type: ignore[misc]  # unreachable; makes this an async generator
+
+        return run_turn
+
+    monkeypatch.setattr(converse_mod, "_get_runner", hanging_runner)
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k-timeout", "prompt": "hi", "timeoutSec": 1},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 200
+    assert '"code": "timeout"' in r.text
+    assert "turn exceeded 1s" in r.text  # the request's timeout, not TURN_TIMEOUT_SEC
+
+
+def test_a_limit_above_the_setting_is_a_400_before_the_stream(client: TestClient) -> None:
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k-over", "prompt": "hi", "timeoutSec": 10_000},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 400
+    assert r.json() == {
+        "code": "bad_request",
+        "message": "timeoutSec may not exceed 90 (TURN_TIMEOUT_SEC)",
+    }
+    assert len(r.headers["x-turn-id"]) == 32
+
+
+def test_output_schema_reaches_the_runner(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = _install_recording_runner(monkeypatch)
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    r = client.post(
+        "/v1/converse",
+        json={"sessionKey": "k-schema", "prompt": "hi", "outputSchema": schema},
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert r.status_code == 200
+    assert recorded["output_schema"] == schema

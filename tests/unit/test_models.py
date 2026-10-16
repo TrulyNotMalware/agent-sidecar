@@ -97,3 +97,33 @@ def test_text_that_cannot_be_encoded_is_a_validation_error(field: str) -> None:
     # (pydantic itself refuses them in the length-constrained fields)
     with pytest.raises(ValidationError):
         ConverseRequest.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"maxTurns": 0},
+        {"maxBudgetUsd": 0},
+        {"maxBudgetUsd": float("nan")},  # json.loads accepts NaN / Infinity
+        {"maxBudgetUsd": float("inf")},
+        {"timeoutSec": 0},
+        {"model": ""},
+    ],
+)
+def test_run_controls_must_be_positive_and_finite(extra: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        ConverseRequest.model_validate({"sessionKey": "k", "prompt": "hi", **extra})
+
+
+def test_output_schema_is_a_bounded_json_object() -> None:
+    from sidecar.models import MAX_OUTPUT_SCHEMA_BYTES
+
+    base = {"sessionKey": "k", "prompt": "hi"}
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    assert ConverseRequest.model_validate({**base, "outputSchema": schema}).output_schema == schema
+
+    with pytest.raises(ValidationError):
+        ConverseRequest.model_validate({**base, "outputSchema": ["not", "an", "object"]})
+    too_big = {"description": "x" * MAX_OUTPUT_SCHEMA_BYTES}
+    with pytest.raises(ValidationError, match="at most"):
+        ConverseRequest.model_validate({**base, "outputSchema": too_big})

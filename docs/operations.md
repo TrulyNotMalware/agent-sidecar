@@ -11,8 +11,11 @@ contract itself lives in `openapi.yaml`.
 | `BIND` | `127.0.0.1` | Listen address. Use `127.0.0.1` for Pod-local sidecar; `0.0.0.0` only for standalone testing. |
 | `PORT` | `7300` | Listen port. |
 | `BEARER_SECRET` | **required** | Shared secret expected in `Authorization: Bearer …`. Provision via Kubernetes Secret. Startup fails if unset or empty. |
-| `MAX_CONCURRENT` | `8` | Global in-flight `/v1/converse` cap; further requests get HTTP 429 (`busy`). |
-| `TURN_TIMEOUT_SEC` | `90` | Hard ceiling per turn. At the deadline the stream emits `error: timeout` and the CLI is closed in the background (see [Turn lifecycle](#turn-lifecycle-timeout-cancel-disconnect-shutdown)). |
+| `MAX_CONCURRENT` | `8` | Global in-flight `/v1/converse` cap; further requests get HTTP 429 (`busy`). Minimum `1`. |
+| `TURN_TIMEOUT_SEC` | `90` | Hard ceiling per turn, and the default and maximum of a request's `timeoutSec`. At the deadline the stream emits `error: timeout` and the CLI is closed in the background (see [Turn lifecycle](#turn-lifecycle-timeout-cancel-disconnect-shutdown)). Minimum `1`. |
+| `ALLOWED_MODELS` | unset | Comma-separated models a request may pick with `model` (e.g. `claude-sonnet-5-5,claude-haiku-5-5`). Unset: a request naming a model gets `400`, and turns use the CLI's default (claude: `ANTHROPIC_MODEL` or the CLI's own; codex: `config.toml`). |
+| `MAX_TURNS` | unset | **`PROVIDER=claude`.** Default and maximum of a request's `maxTurns` (model round trips per turn). Reaching it ends the turn with `error: sdk_error` (`Reached maximum number of turns (N)`). Unset: no limit unless the request sets one. Ignored with a startup warning for codex. |
+| `MAX_BUDGET_USD` | unset | **`PROVIDER=claude`.** Default and maximum of a request's `maxBudgetUsd`, checked against the CLI's cost estimate after each model call (`error: sdk_error`, `Reached maximum budget ($N)`). Unset: no limit unless the request sets one. Ignored with a startup warning for codex. |
 | `SHUTDOWN_GRACE_SEC` | `10` | On SIGTERM, how long in-flight turns may keep streaming before they end with `error: cancelled` (see [Shutdown](#shutdown)). Minimum `1`. |
 | `WORKSPACE_ROOT` | `/var/lib/claude-sidecar/sessions` | Per-`sessionKey` workspace root (session mode); stateless turns get a temporary directory under `WORKSPACE_ROOT/.stateless/`, and issued session ids are recorded in `WORKSPACE_ROOT/.session-ids/`. Created at startup. Non-root / local runs (e.g. macOS dev) must override this to a writable directory — otherwise startup fails with `PermissionError` creating the default path. |
 | `CLAUDE_MD_PATH` | unset | Path to the static base system prompt (typically a ConfigMap mount, e.g. `/workspace/CLAUDE.md`). |
@@ -260,6 +263,21 @@ to stdin and closes it.
   blanked for the claude CLI and its children).
 
 
+## Claude sessions
+
+- **A resume is bound to its `sessionKey`.** `claude --resume <id>` finds a session
+  in any project directory under `CLAUDE_CONFIG_DIR`, whatever the cwd, so the
+  sidecar only lets a key resume ids it was issued (recorded under
+  `WORKSPACE_ROOT/.session-ids/`, as for codex); others get `400` before the stream
+  opens. Sessions from before ids were recorded for claude still resume when their
+  transcript is in the key's own project directory — unless the workspace path is
+  so long that the CLI shortens the directory name with a hash (more than 200
+  characters once `/` and other non-alphanumerics become `-`); those start fresh.
+- **Stateless turns leave no transcript.** Once the CLI has exited, the sidecar
+  removes what it stored for the turn under `CLAUDE_CONFIG_DIR` (the project
+  directory named after the temp workspace, and the entries named after the turn's
+  session id). A turn killed hard (SIGKILL, OOM) can leave them behind.
+
 ## Claude agent policy
 
 The `claude` provider does not inherit tool permissions or settings from the
@@ -338,7 +356,7 @@ that opens a prompt-injection vector where the model invents IDs.
 |---|---|---|
 | `/healthz` | none | Liveness — process responding. |
 | `/readyz` | none | Readiness — the provider's CLI (the SDK's bundled `claude`, else `claude` on PATH; `codex` on PATH when `PROVIDER=codex`) **and** a matching identity present. 503 with `detail` when not ready. |
-| `/metrics` | none | Prometheus text format with five collectors. |
+| `/metrics` | none | Prometheus text format with seven collectors. |
 
 Metrics:
 
@@ -349,6 +367,8 @@ Metrics:
 | `sidecar_inflight` | gauge | — (turns holding a slot, including the time spent closing their CLI) |
 | `sidecar_tool_calls_total` | counter | `tool_name`, `outcome` ∈ `{started, ok, error}` |
 | `sidecar_tokens_total` | counter | `kind` ∈ `{input, output, cache_read, cache_creation}` (codex's `input` includes its cache reads, claude's does not) |
+| `sidecar_cost_usd_total` | counter | — (the claude CLI's estimate from its price table, the sum of `done.costUsd`; codex reports no cost) |
+| `sidecar_time_to_first_text_seconds` | histogram | — (turn start to its first `text` event; turns without text are not observed) |
 
 `/metrics` and `/healthz` intentionally do not require the Bearer secret so
 in-cluster scrapers and probes can hit them without secret distribution.
@@ -356,7 +376,8 @@ in-cluster scrapers and probes can hit them without secret distribution.
 ## Error model
 
 - HTTP 4xx is returned **before** a turn starts: `400 bad_request`,
-  `401 unauthorized`, `404 not_found` (cancel target absent), `429 busy`.
+  `401 unauthorized`, `404 not_found` (cancel target absent, nothing stored for a
+  deleted sessionKey), `429 busy`.
 - After the SSE stream opens, every error is reported as the terminal
   `event: error` frame. No HTTP status changes mid-stream.
 - SSE error codes: `timeout | sdk_error | internal | cancelled` (`busy` is always the pre-stream `429`).
@@ -427,13 +448,15 @@ closing the CLI. Consequences:
 ## Operational gotchas
 
 - **Stateless leftovers.** A turn killed hard (SIGKILL, OOM) can leave a directory
-  under `WORKSPACE_ROOT/.stateless/`; it is safe to delete whenever no turn runs.
+  under `WORKSPACE_ROOT/.stateless/` (and, with claude, its transcript under
+  `CLAUDE_CONFIG_DIR/projects/`); both are safe to delete whenever no turn runs.
 - **Where state lives.** The image keeps all mutable state under
   `/var/lib/claude-sidecar`: `sessions/` (`WORKSPACE_ROOT`), `claude/`
   (`CLAUDE_CONFIG_DIR`: claude transcripts, needed to resume) and `codex/`
   (`CODEX_HOME`: auth and rollouts). Mount one volume there; an `emptyDir` loses
   conversations when the Pod goes away, a persistent volume keeps them. Size it
-  for transcripts too, and clean all three together (keep `.session-ids/`).
+  for transcripts too, and clean all three together (keep `.session-ids/`), or
+  per conversation with `DELETE /v1/sessions/{sessionKey}`.
 - **Image.** Runs as uid/gid 10001 on `python:<minor>-slim-bookworm` (the minor is
   the Dockerfile's `FROM`) with Node.js 24 LTS and a pinned `@openai/codex`; the
   claude CLI is the one bundled with `claude-agent-sdk`. Python dependencies are
@@ -444,8 +467,13 @@ closing the CLI. Consequences:
   user-namespace support from the node). Upgrading from an image that ran as root:
   `chown -R 10001:10001` an existing state volume first.
 - **Workspace cardinality.** `WORKSPACE_ROOT` accumulates one sub-directory per
-  unique `sessionKey` in session mode. Mount it on a volume that has retention
-  policy / cleanup — the sidecar does not GC.
+  unique `sessionKey` in session mode. The sidecar does not GC on its own: delete a
+  finished conversation with `DELETE /v1/sessions/{sessionKey}` (its workspace,
+  the CLI's transcripts and its session id record; `429` while a turn holds the
+  key), or mount it on a volume that has a retention policy / cleanup.
+  Conversations from before this release recorded no claude session ids, so for
+  them the delete finds the transcripts of the key's workspace but not entries the
+  CLI keeps elsewhere by session id (`file-history/`, `todos/`, …).
 - **Tool name cardinality.** `sidecar_tool_calls_total` labels by `tool_name`.
   If your MCP exposes a vast number of distinct tool names, consider
   pre-aggregating in the consumer or relabel rules in Prometheus.
